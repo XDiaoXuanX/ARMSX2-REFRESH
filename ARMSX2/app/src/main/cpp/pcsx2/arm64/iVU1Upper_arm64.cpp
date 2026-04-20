@@ -53,75 +53,237 @@ static constexpr int64_t accOff()
 	return static_cast<int64_t>(offsetof(VURegs, ACC));
 }
 
-// C helper: MAC flag update + result clamping + writeback.
-// Called from JIT after NEON math. Takes the 4 float results, applies
-// VU_MACx_UPDATE (which clamps overflow/underflow and sets per-component flags),
-// writes to destination with XYZW mask, and updates statusflag.
-static void vu1_fmac_writeback(VURegs* VU, VECTOR* dst, u32 xyzw,
-                                float rx, float ry, float rz, float rw)
-{
-	// VF[0] is hardwired to {0,0,0,1} — discard writes but still update flags
-	const bool write = (dst != &VU->VF[0]);
-	if (xyzw & 8) { u32 v = VU_MACx_UPDATE(VU, rx); if (write) dst->i.x = v; }
-	else VU_MACx_CLEAR(VU);
-	if (xyzw & 4) { u32 v = VU_MACy_UPDATE(VU, ry); if (write) dst->i.y = v; }
-	else VU_MACy_CLEAR(VU);
-	if (xyzw & 2) { u32 v = VU_MACz_UPDATE(VU, rz); if (write) dst->i.z = v; }
-	else VU_MACz_CLEAR(VU);
-	if (xyzw & 1) { u32 v = VU_MACw_UPDATE(VU, rw); if (write) dst->i.w = v; }
-	else VU_MACw_CLEAR(VU);
-	VU_STAT_UPDATE(VU);
-}
+// Byte offset of VF[0]. The inline writeback uses this to detect the "drop
+// the result store, flags still update" case that matches the C helper's
+// `dst != &VU->VF[0]` check.
+static constexpr int64_t vfOffStatic0 = static_cast<int64_t>(offsetof(VURegs, VF));
 
-// OPMULA writeback: MAC flag update on xyz + ACC write, MAC[w] preserved.
-// Interpreter _vuOPMULA never touches macflag[w], so we cannot use
-// vu1_fmac_writeback (which calls VU_MACw_CLEAR on xyzw & 1 == 0).
-static void vu1_opmula_writeback(VURegs* VU, float rx, float ry, float rz)
-{
-	VU->ACC.i.x = VU_MACx_UPDATE(VU, rx);
-	VU->ACC.i.y = VU_MACy_UPDATE(VU, ry);
-	VU->ACC.i.z = VU_MACz_UPDATE(VU, rz);
-	VU_STAT_UPDATE(VU);
-}
+// ============================================================================
+//  Inline MAC/STATUS flag computation + result clamping + writeback.
+//  (Replaces the vu1_fmac_writeback / vu1_opmula_writeback / vu1_opmsub_writeback
+//  C helpers. Eliminates the BL overhead + function-call frame for what runs
+//  on every FMAC pair where g_vu1NeedsFlags is true.)
+//
+//  The interpreter's VU_MAC_UPDATE (VUflags.cpp) categorises each lane's
+//  float result as zero / denormal / inf-or-NaN / normal and sets four flag
+//  bits per lane in VU->macflag; it also flushes denormals to ±0 and
+//  (under CHECK_VU_OVERFLOW) clamps inf/NaN to ±0x7F7FFFFF before storing.
+//  VU_STAT_UPDATE then derives statusflag as a nibble-by-nibble "any bit set"
+//  reduction of macflag.
+//
+//  Flag bit layout (16 bits, one nibble per type):
+//    bits  0- 3  Z (zero)     — lane W/Z/Y/X at bit 0/1/2/3
+//    bits  4- 7  S (sign)
+//    bits  8-11  U (underflow — denormal)
+//    bits 12-15  O (overflow — inf/NaN)
+//  VU_MACx_UPDATE uses shift=3 for X, 2 for Y, 1 for Z, 0 for W — matching
+//  v5.S[0]=X .. v5.S[3]=W.
+//
+//  For lanes NOT in xyzw the four flag bits get cleared (matches
+//  VU_MAC*_CLEAR). For lanes IN xyzw the result is written back with VF[0]
+//  special-cased to drop the write (flags still update).
+//
+//  Per-lane result clamp (independent of flags):
+//    denormal → sign only (flush to ±0)
+//    inf/NaN + CHECK_VU_OVERFLOW(1) → sign | 0x7F7FFFFF
+//    otherwise → pass through.
+// ============================================================================
 
-// OPMSUB writeback: MAC flag update on xyz + VF[fd].xyz write, MAC[w]/VF[fd].w preserved.
-// When fd == 0 the interpreter writes to a dummy RDzero but still updates
-// MAC/Status — we skip the VF write while keeping the flag updates.
-static void vu1_opmsub_writeback(VURegs* VU, u32 fd, float rx, float ry, float rz)
+// Static constant for per-lane left-shift amounts used when packing per-lane
+// 4-bit flag values (at bits 0, 4, 8, 12 within each lane's u32) into the
+// 16-bit macflag. Lane 0 (X) shifts left 3, lane 3 (W) shifts left 0.
+// Loaded once per emit call via armLoadConstant128 (1-insn literal pool).
+alignas(16) static const u32 kFmacShiftVec[4] = {3, 2, 1, 0};
+
+// Mode for the inline writeback helper:
+//   GenericFmac : normal ADD/SUB/MUL/MADD/MSUB + accum variants.
+//                 Lanes not in xyzw get their flag bits cleared.
+//   OpmXYZ      : OPMULA / OPMSUB. Operates on xyz only; W lane's existing
+//                 flag bits are preserved (interpreter never touches macflag[w]).
+enum class FmacWritebackMode { GenericFmac, OpmXYZ };
+
+// Inline replacement for vu1_fmac_writeback / vu1_opmula_writeback / vu1_opmsub_writeback.
+//
+//   v5  : float32x4_t result, lanes [X, Y, Z, W] — CLOBBERED (receives the
+//         clamp-adjusted value that gets stored to dst).
+//   dst_off : byte offset from VU1_BASE to the destination VECTOR. For
+//         OPMULA this is accOff(); for OPMSUB / generic it's vfOff(fd) or
+//         accOff() (matches the prior C-helper call sites).
+//   xyzw : write mask (0..0xF). OpmXYZ mode forces effective xyzw=0xE (xyz).
+//   mode : see FmacWritebackMode above.
+//
+// Scratch: v2, v3, v4, v6, v7, v8; w4, w5, w6, w7. All caller-saved.
+static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode mode)
 {
-	const u32 vx = VU_MACx_UPDATE(VU, rx);
-	const u32 vy = VU_MACy_UPDATE(VU, ry);
-	const u32 vz = VU_MACz_UPDATE(VU, rz);
-	if (fd != 0)
+	const int64_t macflag_off    = static_cast<int64_t>(offsetof(VURegs, macflag));
+	const int64_t statusflag_off = static_cast<int64_t>(offsetof(VURegs, statusflag));
+	const bool  skip_dst_write   = (dst_off == vfOffStatic0); // VF[0] hardwired
+	const bool  overflow_clamp   = CHECK_VU_OVERFLOW(1);
+	const bool  opm_mode         = (mode == FmacWritebackMode::OpmXYZ);
+	// In OPMULA/OPMSUB the ISA treats xyz as the active lanes and never
+	// touches macflag[w] — force effective xyzw to 0xE so our lane loop
+	// stays uniform, and remember to preserve the prior W flag bits when
+	// rebuilding macflag.
+	const u32   eff_xyzw         = opm_mode ? 0xEu : xyzw;
+
+	// ------------------------------------------------------------------
+	// Step A: extract exp/sign and compute per-lane category masks.
+	// ------------------------------------------------------------------
+
+	// v2 = v5 << 1 — doubles magnitude, strips sign. Zero iff v5 ∈ {+0,-0}.
+	armAsm->Shl(v2.V4S(), v5.V4S(), 1);
+	// v3 = exp (8-bit per lane).
+	armAsm->Ushr(v3.V4S(), v2.V4S(), 24);
+	// v4 = sign bit (0 or 1 per lane).
+	armAsm->Ushr(v4.V4S(), v5.V4S(), 31);
+
+	// v6 = v_zero_mask : 0xFFFFFFFF if (v5 == ±0), else 0.
+	armAsm->Cmeq(v6.V4S(), v2.V4S(), 0);
+	// v7 = v_exp0_mask : 0xFFFFFFFF if (exp == 0) — covers both zero AND denormal.
+	armAsm->Cmeq(v7.V4S(), v3.V4S(), 0);
+	// v6 = v_denorm_mask : (exp == 0) AND NOT zero.
+	armAsm->Bic(v6.V16B(), v7.V16B(), v6.V16B());
+	// v8 = 0xFF broadcast, then v8 = v_inf_mask : (exp == 0xFF).
+	armAsm->Movi(v8.V4S(), 0xFF);
+	armAsm->Cmeq(v8.V4S(), v3.V4S(), v8.V4S());
+
+	// ------------------------------------------------------------------
+	// Step B: apply result clamping to v5.
+	//   denormal lanes → sign-only.
+	//   inf/NaN lanes (with overflow gate)  → sign | 0x7F7FFFFF.
+	// ------------------------------------------------------------------
+
+	// v3 = 0x80000000 per lane (sign-bit-placed).
+	armAsm->Shl(v3.V4S(), v4.V4S(), 31);
+	// v5 ← denorm ? v3 : v5 (flush denormals to ±0).
+	// Bit Vd,Vn,Vm : Vd = (Vd & ~Vm) | (Vn & Vm).
+	armAsm->Bit(v5.V16B(), v3.V16B(), v6.V16B());
+
+	if (overflow_clamp)
 	{
-		VU->VF[fd].i.x = vx;
-		VU->VF[fd].i.y = vy;
-		VU->VF[fd].i.z = vz;
+		// v2 = 0x7F7FFFFF broadcast (MAX_FLOAT bit pattern).
+		armAsm->Mov(w4, 0xFFFFu);
+		armAsm->Movk(w4, 0x7F7F, 16);
+		armAsm->Dup(v2.V4S(), w4);
+		// v2 = sign | MAX_FLOAT.
+		armAsm->Orr(v2.V16B(), v3.V16B(), v2.V16B());
+		// v5 ← inf ? (sign|MAX) : v5.
+		armAsm->Bit(v5.V16B(), v2.V16B(), v8.V16B());
 	}
-	VU_STAT_UPDATE(VU);
+
+	// ------------------------------------------------------------------
+	// Step C: build per-lane 4-bit flag word in v3:
+	//   v3.S[i] = Z | (S<<4) | (U<<8) | (O<<12)
+	// Each of Z/S/U/O is 0 or 1.
+	//   Z (zero-or-denorm) = (exp == 0) = v7 narrowed to 0/1.
+	//   S                  = v4 (already 0/1 from step A).
+	//   U (denormal)       = v6 (mask) narrowed to 0/1.
+	//   O (inf/NaN)        = v8 (mask) narrowed to 0/1.
+	// ------------------------------------------------------------------
+
+	// v7 narrows mask → 0/1. Shift the 0xFFFFFFFF pattern right by 31.
+	armAsm->Ushr(v7.V4S(), v7.V4S(), 31);   // Z bits at bit 0
+	armAsm->Ushr(v6.V4S(), v6.V4S(), 31);   // U bits at bit 0
+	armAsm->Ushr(v8.V4S(), v8.V4S(), 31);   // O bits at bit 0
+
+	// Shift sign/U/O to their positions within the per-lane nibble tower.
+	armAsm->Shl(v4.V4S(), v4.V4S(), 4);     // S bit moves to bit 4
+	armAsm->Shl(v6.V4S(), v6.V4S(), 8);     // U bit moves to bit 8
+	armAsm->Shl(v8.V4S(), v8.V4S(), 12);    // O bit moves to bit 12
+
+	// Combine: v3 = Z | S<<4 | U<<8 | O<<12, per lane.
+	armAsm->Orr(v3.V16B(), v7.V16B(), v4.V16B());
+	armAsm->Orr(v3.V16B(), v3.V16B(), v6.V16B());
+	armAsm->Orr(v3.V16B(), v3.V16B(), v8.V16B());
+
+	// ------------------------------------------------------------------
+	// Step D: pack v3's 4 lanes into a single 16-bit macflag value.
+	// Lane i shifts left by (3-i) so lane 0 (X) lands at bits 3/7/11/15,
+	// lane 3 (W) at bits 0/4/8/12. Horizontal sum then extract scalar.
+	// ------------------------------------------------------------------
+
+	// Load [3, 2, 1, 0] into v2 as 4x32-bit shift amounts (1 insn via literal pool).
+	armLoadConstant128(v2.Q(), kFmacShiftVec);
+	armAsm->Ushl(v3.V4S(), v3.V4S(), v2.V4S());
+	armAsm->Addv(s3, v3.V4S());              // horizontal sum → lane 0
+	armAsm->Umov(w6, v3.S(), 0);             // w6 = raw packed macflag (16 meaningful bits)
+
+	// ------------------------------------------------------------------
+	// Step E: apply xyzw mask to macflag (clear lanes not in eff_xyzw).
+	// Each lane contributes 4 bits, one in each nibble. The combined mask
+	// is `eff_xyzw * 0x1111` — replicates the per-lane bit pattern into
+	// all four flag nibbles.
+	// ------------------------------------------------------------------
+
+	if (eff_xyzw != 0xFu)
+	{
+		armAsm->And(w6, w6, static_cast<u32>(eff_xyzw) * 0x1111u);
+	}
+
+	// For OPMULA/OPMSUB, preserve the existing W lane flag bits (bits
+	// 0/4/8/12 — the 0x1111 mask). Merge prior macflag[W_bits] with the
+	// newly-computed XYZ bits.
+	if (opm_mode)
+	{
+		armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, macflag_off));
+		armAsm->And(w4, w4, 0x1111u);       // keep only old W bits
+		armAsm->Orr(w6, w6, w4);            // combine with fresh XYZ bits
+	}
+
+	armAsm->Str(w6, MemOperand(VU1_BASE_REG, macflag_off));
+
+	// ------------------------------------------------------------------
+	// Step F: derive statusflag. Bit i of statusflag = "any bit set in
+	// macflag nibble i". Tst + Cset + Orr shifted.
+	// ------------------------------------------------------------------
+
+	armAsm->Tst(w6, 0x000Fu);
+	armAsm->Cset(w7, ne);
+	armAsm->Tst(w6, 0x00F0u);
+	armAsm->Cset(w4, ne);
+	armAsm->Orr(w7, w7, Operand(w4, LSL, 1));
+	armAsm->Tst(w6, 0x0F00u);
+	armAsm->Cset(w4, ne);
+	armAsm->Orr(w7, w7, Operand(w4, LSL, 2));
+	armAsm->Tst(w6, 0xF000u);
+	armAsm->Cset(w4, ne);
+	armAsm->Orr(w7, w7, Operand(w4, LSL, 3));
+	armAsm->Str(w7, MemOperand(VU1_BASE_REG, statusflag_off));
+
+	// ------------------------------------------------------------------
+	// Step G: write clamped v5 to dst with xyzw (eff_xyzw) mask. Skip when
+	// dst is VF[0] (hardwired; the C helper's `write` check).
+	// ------------------------------------------------------------------
+
+	if (skip_dst_write)
+		return;
+
+	if (eff_xyzw == 0xFu)
+	{
+		armAsm->Str(q5, MemOperand(VU1_BASE_REG, dst_off));
+		return;
+	}
+
+	armAsm->Ldr(q4, MemOperand(VU1_BASE_REG, dst_off));
+	if (eff_xyzw & 8) armAsm->Mov(v4.V4S(), 0, v5.V4S(), 0);
+	if (eff_xyzw & 4) armAsm->Mov(v4.V4S(), 1, v5.V4S(), 1);
+	if (eff_xyzw & 2) armAsm->Mov(v4.V4S(), 2, v5.V4S(), 2);
+	if (eff_xyzw & 1) armAsm->Mov(v4.V4S(), 3, v5.V4S(), 3);
+	armAsm->Str(q4, MemOperand(VU1_BASE_REG, dst_off));
 }
 
-// Emit the call to vu1_fmac_writeback.
-// Result must be in v5.4S. dst_off = byte offset of destination from VU1_BASE_REG.
+// Generic FMAC writeback — result must be in v5.4S.
+// dst_off = byte offset of destination from VU1_BASE_REG.
 static void emitFmacWriteback(int64_t dst_off, u32 xyzw)
 {
-	// Extract v5 lanes to s0-s3 (ARM64 ABI: float args in s0-s3)
-	armAsm->Mov(v3.V4S(), 0, v5.V4S(), 3); // s3 = W
-	armAsm->Mov(v2.V4S(), 0, v5.V4S(), 2); // s2 = Z
-	armAsm->Mov(v1.V4S(), 0, v5.V4S(), 1); // s1 = Y
-	armAsm->Fmov(s0, s5);                   // s0 = X (lane 0)
-	// Integer args: x0=VU, x1=dst, w2=xyzw
-	armAsm->Mov(x0, VU1_BASE_REG);
-	armAsm->Add(x1, VU1_BASE_REG, dst_off);
-	armAsm->Mov(w2, xyzw);
-	armEmitCall(reinterpret_cast<const void*>(vu1_fmac_writeback));
+	emitFmacInlineWriteback(dst_off, xyzw, FmacWritebackMode::GenericFmac);
 }
 
 // Store v5 to dst_off with xyzw mask, used by the flag-skipping fast path.
 // Identical merge logic to emitNoFlagWriteback below, but takes a raw byte
 // offset (so it can target ACC as well as VF[fd]) and skips the fd==0 check
 // only when dst_off matches VF[0]. Output clamping is the caller's job.
-static constexpr int64_t vfOffStatic0 = static_cast<int64_t>(offsetof(VURegs, VF));
+// vfOffStatic0 is defined near the top of the file.
 static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 {
 	// VF[0] is hardwired to {0,0,0,1}; the C helper drops the write but
@@ -374,20 +536,12 @@ static void emitOpFmac(bool isSub, u32 fs, u32 ft, u32 fd_or_zero)
 
 	if (needsFlags)
 	{
-		// Extract v5 lanes 0/1/2 into s0/s1/s2 for the helper call.
-		armAsm->Mov(v2.V4S(), 0, v5.V4S(), 2); // s2 = rz
-		armAsm->Mov(v1.V4S(), 0, v5.V4S(), 1); // s1 = ry
-		armAsm->Fmov(s0, s5);                    // s0 = rx
-		armAsm->Mov(x0, VU1_BASE_REG);
-		if (isSub)
-		{
-			armAsm->Mov(w1, fd_or_zero);
-			armEmitCall(reinterpret_cast<const void*>(vu1_opmsub_writeback));
-		}
-		else
-		{
-			armEmitCall(reinterpret_cast<const void*>(vu1_opmula_writeback));
-		}
+		// OpmXYZ mode inlines VU_MAC[x/y/z]_UPDATE + VU_STAT_UPDATE and
+		// preserves macflag[w]'s existing bits (the interpreter never
+		// touches MACw for OPMULA/OPMSUB). For OPMSUB fd==0 the inline
+		// writeback skips the VF store via its vfOffStatic0 check.
+		const int64_t dst_off = isSub ? vfOff(fd_or_zero) : accOff();
+		emitFmacInlineWriteback(dst_off, 0xE, FmacWritebackMode::OpmXYZ);
 	}
 	else
 	{
