@@ -152,11 +152,45 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 		Console.Error("Failed to create GS device");
 	}
 
+#if defined(ENABLE_VULKAN) && defined(ENABLE_OPENGL)
+	// Some devices (particularly Android) advertise Vulkan but fail to actually create a
+	// usable device. The SW renderer only uses the graphics API as a display backend, so if
+	// Vulkan fell over we can retry with OpenGL/GLES and keep the user in SW instead of
+	// crashing out.
+	if (!okay && new_api == RenderAPI::Vulkan && renderer == GSRendererType::SW)
+	{
+		Console.Warning("Vulkan device creation failed for SW renderer; falling back to OpenGL.");
+		ImGuiManager::Shutdown(clear_state_on_fail);
+		if (g_gs_device)
+		{
+			g_gs_device->Destroy();
+			g_gs_device.reset();
+		}
+		Host::ReleaseRenderWindow();
+
+		g_gs_device = std::make_unique<GSDeviceOGL>();
+		okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
+		if (okay)
+		{
+			okay = ImGuiManager::Initialize();
+			if (!okay)
+				Console.Error("Failed to initialize ImGuiManager after OpenGL fallback");
+		}
+		else
+		{
+			Console.Error("OpenGL fallback also failed to create a GS device");
+		}
+	}
+#endif
+
 	if (!okay)
 	{
 		ImGuiManager::Shutdown(clear_state_on_fail);
-		g_gs_device->Destroy();
-		g_gs_device.reset();
+		if (g_gs_device)
+		{
+			g_gs_device->Destroy();
+			g_gs_device.reset();
+		}
 		Host::ReleaseRenderWindow();
 		return false;
 	}
