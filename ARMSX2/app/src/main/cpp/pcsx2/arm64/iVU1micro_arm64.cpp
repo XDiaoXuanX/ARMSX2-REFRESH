@@ -1239,25 +1239,57 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// zeroing the whole array.
 	std::memset(data_base, 0, data_size);
 
-	// Block-level E/D/T flags — drive step 13 (ebit countdown) gating below.
-	// Zero extra cost here: we already read `upper` for the regs decode.
-	bool block_has_ebit         = false;
-	bool block_has_dbit_or_tbit = false;
+	// Block-level flags driving per-emit gating below. All zero-cost to
+	// accumulate here — we already read `upper` / decode `lregs` for the
+	// regs pre-walk.
+	//   block_has_ebit         / block_has_dbit_or_tbit : step 13 countdown.
+	//   block_has_ibxx         : only IBxx reads VIBackupCycles via
+	//                            emitHazardVIRead (JR/JALR skip the hazard
+	//                            path despite `VIread != 0`). Opcodes per
+	//                            VUops.cpp LOWER_OPCODE[128]: IBEQ=0x28,
+	//                            IBNE=0x29, IBLTZ=0x2C, IBGTZ=0x2D,
+	//                            IBLEZ=0x2E, IBGEZ=0x2F.
+	//   block_has_vi_backup_set: any lower whose emitter calls emitBackupVI
+	//                            (IADD/ISUB/IALU-imm/IAND/IOR/LQD/LQI/SQD/
+	//                            SQI/ILWR/MTIR). Overapproximated as
+	//                            "writes VI[0..15] and pipe != BRANCH" —
+	//                            that includes FSAND/FMAND/FCAND/FCGET
+	//                            (flag-test ops that write VI but never
+	//                            touch VIBackupCycles). False positives
+	//                            only keep step 6b's decrement emits, so
+	//                            the overapproximation is soundness-safe.
+	//                            BAL/JALR are the intentional exclusions
+	//                            (write VI without emitBackupVI).
+	bool block_has_ebit           = false;
+	bool block_has_dbit_or_tbit   = false;
+	bool block_has_ibxx           = false;
+	bool block_has_vi_backup_set  = false;
 	{
 		u32 pc = startPC;
 		for (u32 i = 0; i < numPairs; i++)
 		{
 			const u32 upper = *reinterpret_cast<const u32*>(VU1.Micro + pc + 4);
 			const u32 lower = *reinterpret_cast<const u32*>(VU1.Micro + pc);
+			const bool ibit = ((upper >> 31) & 1) != 0;
 
 			VU1.code = upper;
 			VU1regs_UPPER_OPCODE[upper & 0x3f](&uregs_data[i]);
 
-			if (!((upper >> 31) & 1))
+			if (!ibit)
 			{
 				// Non-I-bit: lower field is an instruction.
 				VU1.code = lower;
 				VU1regs_LOWER_OPCODE[lower >> 25](&lregs_data[i]);
+
+				const u32 lopc = lower >> 25;
+				const bool is_IBxx =
+					lopc == 0x28u || lopc == 0x29u ||          // IBEQ, IBNE
+					(lopc >= 0x2Cu && lopc <= 0x2Fu);           // IBLTZ/GTZ/LEZ/GEZ
+				block_has_ibxx |= is_IBxx;
+
+				const _VURegsNum& lregs_i = lregs_data[i];
+				if ((lregs_i.VIwrite & 0xFFFFu) != 0u && lregs_i.pipe != VUPIPE_BRANCH)
+					block_has_vi_backup_set = true;
 			}
 			// I-bit pairs: lregs_data[i] stays zeroed (no lower instruction).
 
@@ -1268,6 +1300,28 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			pc = (pc + 8) & (VU1_PROGSIZE - 1);
 		}
 	}
+
+	// Step 6b (VIBackupCycles decrement) is observable only when some pair
+	// in the block reads VIBackupCycles — i.e., has an IBxx. If no IBxx,
+	// the per-pair decrement is dead within this block; the only concern
+	// is cross-block state leaking. Two cases:
+	//
+	//   (1) !block_has_ibxx && !block_has_vi_backup_set:
+	//       No writes in this block either. Entry VIBackupCycles is at most
+	//       2 (max value set by emitBackupVI). numPairs >= 2 (AnalyzeBlock
+	//       always includes a delay-slot pair, and stalls can only increase
+	//       elapsed cycles — never shrink them), so the natural per-pair
+	//       decrement would reach 0 before block exit. Eliding the
+	//       decrements and clamping VIBackupCycles to 0 at block end is
+	//       equivalent behavior for any downstream block.
+	//
+	//   (2) !block_has_ibxx && block_has_vi_backup_set:
+	//       In-block write sets VIBackupCycles=2 at some pair. A clamp-to-0
+	//       at exit would drop a still-live hazard for the next block's
+	//       IBxx. Keep the per-pair decrement.
+	//
+	// So we elide only in case (1).
+	const bool skip_vibackup_decrement = !block_has_ibxx && !block_has_vi_backup_set;
 
 	// --- Flag-deferral analysis ---
 	// For each FMAC pair, determine whether its MAC/STATUS flag updates are
@@ -2022,7 +2076,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// 6b. Decrement VIBackupCycles (needed for correct VI backup reads
 		//     in branch instructions). x22 holds cycle value before this pair.
 		//     Inlined: common case is VIBackupCycles==0 → CBZ skips entire block.
-		emitDecrementVIBackup(cycle_off, vibackup_off);
+		//     Elided entirely when the pre-walk proves no IBxx reader AND
+		//     no emitBackupVI-triggering write lives in this block — a
+		//     block-end Strb(wzr) clamp substitutes for the decrements.
+		if (!skip_vibackup_decrement)
+			emitDecrementVIBackup(cycle_off, vibackup_off);
 
 		// 6c. CHECK_XGKICKHACK periodic sync tick (C-1). If the pre-walk
 		//     committed accumulated kickcycles to this pair (only happens
@@ -2208,6 +2266,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		armAsm->Mov(x0, VU1_BASE_REG);
 		armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
 	}
+
+	// Step 6b block-end clamp. Elision of per-pair VIBackupCycles decrement
+	// requires this single Strb(wzr) at the fall-through exit to match the
+	// natural decrement's end state. Only fires on normal block completion —
+	// the budget_exceeded_exit path (linkEntry cycle/termination gate)
+	// bypasses the per-pair body entirely and correctly preserves
+	// VIBackupCycles untouched, matching "did not execute any pair" semantics.
+	if (skip_vibackup_decrement)
+		armAsm->Strb(wzr, MemOperand(VU1_BASE_REG, vibackup_off));
 
 	// Block-linking scaffolding (Phase 1): record the address immediately
 	// after the block-end XGKICK drain and immediately before the register
