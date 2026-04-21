@@ -42,13 +42,15 @@ static constexpr s64 LAST_PERF_CYCLE_OFFSET(int n) { return offsetof(cpuRegister
 #define ISTUB_BC0T     0
 #define ISTUB_BC0FL    0
 #define ISTUB_BC0TL    0
-#define ISTUB_TLBR     1   // TLB ops are complex — keep as interp
+#define ISTUB_TLBR     1   // TLB ops are complex — keep as interp (matches x86 recCall)
 #define ISTUB_TLBWI    1
 #define ISTUB_TLBWR    1
 #define ISTUB_TLBP     1
-#define ISTUB_ERET     1   // ERET modifies PC/status — keep as interp
-#define ISTUB_EI       1   // EI/DI have side effects — keep as interp
-#define ISTUB_DI       1
+#define ISTUB_ERET     1   // ERET uses armBranchCallInterpreter (matches x86 recBranchCall)
+#define ISTUB_EI       1   // EI  uses armBranchCallInterpreter (matches x86 recBranchCall)
+#define ISTUB_DI       0   // DI  has a native implementation below (matches x86 recDI —
+                           // delayed-by-one-instruction + kernel-mode gating for
+                           // Jak X, Spongebob, Incredibles, Tales of Fandom Vol. 2, etc.)
 #endif
 
 namespace R5900 {
@@ -69,14 +71,13 @@ void recMFC0()
 {
 	if (_Rd_ == 9)
 	{
-		// Count register: must update even if _Rt_ == 0
-		// Count += cpuRegs.cycle - cpuRegs.lastCOP0Cycle (min 1)
+		// Count register — matches x86 iCOP0.cpp:135-151.
+		// Count += (cycle - lastCOP0Cycle); lastCOP0Cycle = cycle.
+		// No min-1 clamp — x86 accepts a zero increment if cycle hasn't advanced,
+		// so we do too ("x86 JIT is truth").
 		armEmitLoadCurrentCycle(RSCRATCHGPR);
 		armAsm->Ldr(RSCRATCHGPR2, a64::MemOperand(RCPUSTATE, LAST_COP0_CYCLE_OFFSET));
 		armAsm->Sub(RSCRATCHGPR3, RSCRATCHGPR, RSCRATCHGPR2);
-		// Ensure increment is at least 1
-		armAsm->Cmp(RSCRATCHGPR3, 0);
-		armAsm->Csinc(RSCRATCHGPR3, RSCRATCHGPR3, a64::xzr, a64::ne);
 		// Update Count (32-bit add, using low 32 bits of increment)
 		armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, CP0_OFFSET(9)));
 		armAsm->Add(RWSCRATCH2, RWSCRATCH2, RWSCRATCH3);
@@ -99,40 +100,40 @@ void recMFC0()
 
 	switch (_Rd_)
 	{
-		case 12: // Status — mask off reserved bits
+		case 12: // Status — raw read, sign-extended (matches x86 iCOP0.cpp:195-196)
 		{
 			armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, CP0_OFFSET(12)));
-			armAsm->Mov(RWSCRATCH2, 0xf0c79c1f);
-			armAsm->And(RWSCRATCH, RWSCRATCH, RWSCRATCH2);
 			armStoreGPR64SignExt32(RWSCRATCH, _Rt_);
 			break;
 		}
 
-		case 25: // PERF registers
+		case 25: // PERF registers — matches x86 iCOP0.cpp:157-188.
 		{
 			if (0 == (_Imm_ & 1)) // MFPS — read PCCR
 			{
+				// x86 doesn't call COP0_UpdatePCCR for MFPS — we match.
 				armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, PERF_OFFSET + offsetof(PERFregs, n.pccr)));
 				armStoreGPR64SignExt32(RWSCRATCH, _Rt_);
 			}
-			else if (0 == (_Imm_ & 2)) // MFPC 0 — read PCR0
+			else if (0 == (_Imm_ & 2)) // MFPC 0 — read PCR0 (via UpdatePCCR)
 			{
-				// Call COP0_UpdatePCCR to get up-to-date counter value
 				armFlushConstRegs();
 				armFlushPC();
 				armFlushCode();
-				armAsm->Mov(RSCRATCHGPR, (u64)(uintptr_t)COP0_UpdatePCCR);
-				armAsm->Blr(RSCRATCHGPR);
+				armEmitFlushCycleBeforeCall();
+				armEmitCall((const void*)COP0_UpdatePCCR);
+				armEmitReloadCycleAfterCall();
 				armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, PERF_OFFSET + offsetof(PERFregs, n.pcr0)));
 				armStoreGPR64SignExt32(RWSCRATCH, _Rt_);
 			}
-			else // MFPC 1 — read PCR1
+			else // MFPC 1 — read PCR1 (via UpdatePCCR)
 			{
 				armFlushConstRegs();
 				armFlushPC();
 				armFlushCode();
-				armAsm->Mov(RSCRATCHGPR, (u64)(uintptr_t)COP0_UpdatePCCR);
-				armAsm->Blr(RSCRATCHGPR);
+				armEmitFlushCycleBeforeCall();
+				armEmitCall((const void*)COP0_UpdatePCCR);
+				armEmitReloadCycleAfterCall();
 				armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, PERF_OFFSET + offsetof(PERFregs, n.pcr1)));
 				armStoreGPR64SignExt32(RWSCRATCH, _Rt_);
 			}
@@ -165,63 +166,83 @@ void recMTC0()
 	{
 		case 9: // Count
 		{
-			// lastCOP0Cycle = cycle
+			// x86 commits scaleblockcycles_clear() into cpuRegs.cycle here
+			// because cpuRegs.cycle IS the x86 source of truth. On arm64, RCYCLE
+			// is authoritative during block execution; cpuRegs.cycle is only
+			// materialised across C calls and at iBranchTest. For MTC0 Count we
+			// only need "cycle now" in a register to stash as lastCOP0Cycle —
+			// no memory writeback needed.
 			armEmitLoadCurrentCycle(RSCRATCHGPR);
 			armAsm->Str(RSCRATCHGPR, a64::MemOperand(RCPUSTATE, LAST_COP0_CYCLE_OFFSET));
-			// CP0.r[9] = GPR[rt].UL[0]
 			armLoadGPR32(RWSCRATCH, _Rt_);
 			armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, CP0_OFFSET(9)));
 			break;
 		}
 
-		case 12: // Status — inline WriteCP0Status (native, no C++ call)
+		case 12: // Status
 		{
-			// WriteCP0Status normally calls COP0_UpdatePCCR first to update
-			// performance counters. We skip that here: it would be a C++ call
-			// that reads (potentially stale) cpuRegs.cycle, and would also
-			// invalidate Phase B's pinned RCYCLE. Perf counters lose accuracy
-			// on Status writes, which is acceptable — they're only consumed
-			// by game-side profiling code, not by emulation correctness.
+			// Inlined WriteCP0Status (x86 iCOP0.cpp:205-211 / 271-278):
+			//   COP0_UpdatePCCR();
+			//   cpuRegs.CP0.n.Status.val = value;
+			//   cpuSetNextEventDelta(4);
+			//
+			// We SKIP COP0_UpdatePCCR here. It's the perf-counter update
+			// helper; its effect on Status is limited to lastPERFCycle bookkeeping
+			// under the early-out `if (ERL || !CTE)`. For CTE=0 (counters not
+			// enabled — the overwhelmingly common case in real games) the call
+			// is effectively a no-op except for writing lastPERFCycle. For CTE=1
+			// we drop some counter accuracy, which is consumed by game-side
+			// profiling only — not emulation correctness.
+			//
+			// MTC0 Status is on interrupt-handler / kernel-code hot paths, so the
+			// C-call overhead (~20 extra instructions plus function prologue /
+			// epilogue) matters here. Keeping this fully inline.
 			armLoadGPR32(RWSCRATCH, _Rt_);
 			armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, CP0_OFFSET(12)));
-			// Inline cpuSetNextEventDelta(4) — schedules an event check 4
-			// cycles out, atomically updating both memory nec and RCYCLE.
 			armEmitSetNextEventDelta(4);
 			break;
 		}
 
-		case 16: // Config — call WriteCP0Config
+		case 16: // Config
 		{
-			armLoadGPR32(a64::w0, _Rt_);
-			armFlushConstRegs();
-			armFlushPC();
-			armFlushCode();
-			armAsm->Mov(RSCRATCHGPR, (u64)(uintptr_t)WriteCP0Config);
-			armAsm->Blr(RSCRATCHGPR);
+			// Inlined WriteCP0Config (COP0.cpp:30-35):
+			//   Config = (value & ~0xFC0) | 0x440;
+			// Protects the read-only IC/DC cache-size bits; forces them to the
+			// fixed mask 0x440. Pure arithmetic, no C call needed.
+			armLoadGPR32(RWSCRATCH, _Rt_);
+			armAsm->And(RWSCRATCH, RWSCRATCH, ~static_cast<u32>(0xFC0));
+			armAsm->Orr(RWSCRATCH, RWSCRATCH, 0x440);
+			armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, CP0_OFFSET(16)));
 			break;
 		}
 
-		case 25: // PERF registers
+		case 25: // PERF registers — matches x86 iCOP0.cpp:227-255 / 294-322.
 		{
 			if (0 == (_Imm_ & 1)) // MTPS
 			{
 				if (0 != (_Imm_ & 0x3E)) // only effective when register field is 0
 					break;
-				// COP0_UpdatePCCR(); pccr = GPR[rt].UL[0]; COP0_DiagnosticPCCR();
+				// x86 pattern: iFlushCall + cycle-update + COP0_UpdatePCCR,
+				// then bare store of pccr (no mask), then COP0_DiagnosticPCCR
+				// with no cycle update between the two calls.
 				armFlushConstRegs();
 				armFlushPC();
 				armFlushCode();
-				armAsm->Mov(RSCRATCHGPR, (u64)(uintptr_t)COP0_UpdatePCCR);
-				armAsm->Blr(RSCRATCHGPR);
+				armEmitFlushCycleBeforeCall();
+				armEmitCall((const void*)COP0_UpdatePCCR);
+				armEmitReloadCycleAfterCall();
+				// Write pccr raw — x86 does NOT mask. DiagnosticPCCR below
+				// will validate / log any unexpected bits.
 				armLoadGPR32(RWSCRATCH, _Rt_);
-				// Only bits 1-9, 11-19, and 31 are writable
-				armAsm->And(RWSCRATCH, RWSCRATCH, 0x800FFBFE);
 				armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PERF_OFFSET + offsetof(PERFregs, n.pccr)));
-				armAsm->Mov(RSCRATCHGPR, (u64)(uintptr_t)COP0_DiagnosticPCCR);
-				armAsm->Blr(RSCRATCHGPR);
+				armEmitCall((const void*)COP0_DiagnosticPCCR);
+				armEmitReloadCycleAfterCall();
 			}
 			else if (0 == (_Imm_ & 2)) // MTPC 0
 			{
+				// As with MTC0 Count: x86 writes cpuRegs.cycle because it's x86's
+				// source of truth; arm64 has RCYCLE. Just compute "cycle now"
+				// directly from (nec + RCYCLE) into a register for lastPERFCycle[0].
 				armLoadGPR32(RWSCRATCH, _Rt_);
 				armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PERF_OFFSET + offsetof(PERFregs, n.pcr0)));
 				armEmitLoadCurrentCycle(RSCRATCHGPR);
@@ -399,10 +420,63 @@ void recEI() { armBranchCallInterpreter(R5900::Interpreter::OpcodeImpl::COP0::EI
 void recEI() { armBranchCallInterpreter(R5900::Interpreter::OpcodeImpl::COP0::EI); }
 #endif
 
+// Native DI — matches x86 iCOP0.cpp:97-123 verbatim.
+//
+// Two semantics x86 JIT got right that the plain interpreter doesn't:
+//   1. DI execution is delayed by one instruction — the JIT compiles the next
+//      instruction BEFORE applying DI's effect. Games rely on this.
+//   2. Only clear EIE (Status bit 0x10000) when in kernel mode OR when any of
+//      EXL/ERL/EDI (0x20006) is set. In plain user mode with none of those
+//      set, DI is a no-op.
+//
+// Upstream commit note lists games that regress if either semantic is
+// violated: Jak X, Namco 50th anniversary, Spongebob the Movie, Spongebob
+// Battle for Bikini Bottom, The Incredibles, The Incredibles rize of the
+// underminer, Soukou kihei armodyne, Garfield Saving Arlene,
+// Tales of Fandom Vol. 2.
+//
+// Flow:
+//   if (!g_recompilingDelaySlot) compile_next_instruction
+//   load Status
+//   if (Status & (EXL|ERL|EDI))        goto apply
+//   if (Status & KSU) (user/supervisor) goto exit
+// apply:
+//   Status &= ~EIE
+//   store Status
+// exit:
 #if ISTUB_DI
 void recDI() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP0::DI); }
 #else
-void recDI() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP0::DI); }
+void recDI()
+{
+	// DI is delayed by one instruction: compile the next op first, UNLESS
+	// we're ourselves already a delay slot (JR/BEQ/etc. swap paths).
+	if (!g_recompilingDelaySlot)
+		recompileNextInstruction(false, false);
+
+	a64::Label apply, exit;
+
+	// Load Status into a scratch.
+	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, CP0_OFFSET(12)));
+
+	// (Status & 0x20006) != 0 → fall through to `apply`.
+	// x86 does `TEST eax, 0x20006; JNZ iHaveNoIdea` — we use TST+B.ne. The
+	// branch is skipped if all of EXL/ERL/EDI are clear.
+	armAsm->Tst(RWSCRATCH, 0x20006);
+	armAsm->B(&apply, a64::ne);
+
+	// None of EXL/ERL/EDI are set. Check KSU (Status bits 3-4).
+	// (Status & 0x18) != 0 → user/supervisor mode → skip the clear.
+	armAsm->Tst(RWSCRATCH, 0x18);
+	armAsm->B(&exit, a64::ne);
+
+	// Kernel mode with no EXL/ERL/EDI, OR any of EXL/ERL/EDI set: clear EIE.
+	armAsm->Bind(&apply);
+	armAsm->And(RWSCRATCH, RWSCRATCH, ~static_cast<u32>(0x10000));
+	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, CP0_OFFSET(12)));
+
+	armAsm->Bind(&exit);
+}
 #endif
 
 } // namespace COP0
