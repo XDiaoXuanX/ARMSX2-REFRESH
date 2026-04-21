@@ -3569,6 +3569,38 @@ static u32 GetProcessorIdForProcessor(const cpuinfo_processor* proc)
 #endif
 }
 
+// Look up the cpuinfo processor struct for a given OS processor id.
+static const cpuinfo_processor* FindCpuinfoProcessorForOSId(u32 os_id)
+{
+	const u32 count = cpuinfo_get_processors_count();
+	for (u32 i = 0; i < count; i++)
+	{
+		const cpuinfo_processor* p = cpuinfo_get_processor(i);
+		if (p && GetProcessorIdForProcessor(p) == os_id)
+			return p;
+	}
+	return nullptr;
+}
+
+// Build an affinity bitmask covering every processor in the cluster that
+// contains `os_id`. Returns 0 if the cluster isn't resolvable (caller should
+// fall back to single-core pinning).
+static u64 ClusterAffinityMaskForOSId(u32 os_id)
+{
+	const cpuinfo_processor* proc = FindCpuinfoProcessorForOSId(os_id);
+	if (!proc || !proc->cluster)
+		return 0;
+	const cpuinfo_cluster* cluster = proc->cluster;
+	u64 mask = 0;
+	for (u32 j = 0; j < cluster->processor_count; j++)
+	{
+		const cpuinfo_processor* p = cpuinfo_get_processor(cluster->processor_start + j);
+		if (p)
+			mask |= static_cast<u64>(1) << GetProcessorIdForProcessor(p);
+	}
+	return mask;
+}
+
 static void InitializeProcessorList()
 {
 	if (!cpuinfo_initialize())
@@ -3721,6 +3753,9 @@ void VMManager::SetEmuThreadAffinities()
 		MTGS::GetThreadHandle().SetAffinity(0);
 		vu1Thread.GetThreadHandle().SetAffinity(0);
 		s_vm_thread_handle.SetAffinity(0);
+		MTGS::GetThreadHandle().SetNicePriority(0);
+		vu1Thread.GetThreadHandle().SetNicePriority(0);
+		s_vm_thread_handle.SetNicePriority(0);
 		s_software_renderer_processor_list = {};
 		return;
 	}
@@ -3731,43 +3766,78 @@ void VMManager::SetEmuThreadAffinities()
 	const u32 gs_index = s_processor_list[mtvu ? 2 : 1];
 	INFO_LOG("Processor order assignment: EE={}, VU={}, GS={}", ee_index, vu_index, gs_index);
 
-	const u64 ee_affinity = static_cast<u64>(1) << ee_index;
-	INFO_LOG("  EE thread is on processor {} (0x{:x})", ee_index, ee_affinity);
+	// Build a "performance" affinity mask by unioning the clusters of the three
+	// intended critical processors. On big.LITTLE / heterogeneous SoCs (all
+	// Android phones, most modern laptops), this lets the OS freely migrate
+	// EE/VU/GS within the fast cluster(s) instead of getting stuck when the
+	// kernel parks a system thread on "our" specific core. Falls back to the
+	// legacy single-core masks if cpuinfo can't resolve cluster info.
+	const u64 ee_cluster_mask = ClusterAffinityMaskForOSId(ee_index);
+	const u64 vu_cluster_mask = ClusterAffinityMaskForOSId(vu_index);
+	const u64 gs_cluster_mask = ClusterAffinityMaskForOSId(gs_index);
+	const u64 perf_mask = ee_cluster_mask | vu_cluster_mask | gs_cluster_mask;
+
+	const bool use_cluster_mask = (perf_mask != 0);
+
+	const u64 ee_affinity = use_cluster_mask ? perf_mask : (static_cast<u64>(1) << ee_index);
+	INFO_LOG("  EE thread pinned to mask 0x{:x} (cluster mode: {})", ee_affinity, use_cluster_mask);
 	s_vm_thread_handle.SetAffinity(ee_affinity);
+	s_vm_thread_handle.SetNicePriority(-10);
 
 	if (EmuConfig.Speedhacks.vuThread)
 	{
-		const u64 vu_affinity = static_cast<u64>(1) << vu_index;
-		INFO_LOG("  VU thread is on processor {} (0x{:x})", vu_index, vu_affinity);
+		const u64 vu_affinity = use_cluster_mask ? perf_mask : (static_cast<u64>(1) << vu_index);
+		INFO_LOG("  VU thread pinned to mask 0x{:x} (cluster mode: {})", vu_affinity, use_cluster_mask);
 		vu1Thread.GetThreadHandle().SetAffinity(vu_affinity);
+		vu1Thread.GetThreadHandle().SetNicePriority(-10);
 	}
 	else
 	{
 		vu1Thread.GetThreadHandle().SetAffinity(0);
 	}
 
-	const u64 gs_affinity = static_cast<u64>(1) << gs_index;
-	INFO_LOG("  GS thread is on processor {} (0x{:x})", gs_index, gs_affinity);
+	const u64 gs_affinity = use_cluster_mask ? perf_mask : (static_cast<u64>(1) << gs_index);
+	INFO_LOG("  GS thread pinned to mask 0x{:x} (cluster mode: {})", gs_affinity, use_cluster_mask);
 	MTGS::GetThreadHandle().SetAffinity(gs_affinity);
+	MTGS::GetThreadHandle().SetNicePriority(-10);
 
-	// Try to find some threads for the software renderer.
-	// They should be in the same cluster as the main GS thread. If they're not, for example,
-	// we had 4 P cores and 6 E cores, let the OS schedule them instead.
-	s_software_renderer_processor_list.reserve(s_processor_list.size() - (mtvu ? 3 : 2));
-	const u32 gs_cluster_id = cpuinfo_get_processor(gs_index)->cluster->cluster_id;
-	for (size_t i = mtvu ? 3 : 2; i < s_processor_list.size(); i++)
+	// Build the SW-renderer worker pool.
+	//
+	// Cluster mode: EE/VU/GS already share the whole perf cluster, so let SW
+	// workers use the same pool. OS balances contention within the cluster.
+	//
+	// Legacy per-core mode: keep upstream's behaviour (remaining cores in GS's
+	// cluster only, skipping the top 3 that EE/VU/GS own).
+	s_software_renderer_processor_list.clear();
+	if (use_cluster_mask)
 	{
-		const u32 proc_index = s_processor_list[i];
-		const u32 proc_cluster_id = cpuinfo_get_processor(proc_index)->cluster->cluster_id;
-		if (proc_cluster_id != gs_cluster_id)
+		for (u32 bit = 0; bit < 64; ++bit)
 		{
-			WARNING_LOG("  Only using {} SW threads, processor {} is in cluster {}, but the GS thread is in cluster {}",
-				s_software_renderer_processor_list.size(), proc_index, proc_cluster_id, gs_cluster_id);
-			break;
+			if (perf_mask & (static_cast<u64>(1) << bit))
+				s_software_renderer_processor_list.push_back(bit);
 		}
-
-		s_software_renderer_processor_list.push_back(proc_index);
 	}
+	else
+	{
+		s_software_renderer_processor_list.reserve(s_processor_list.size() - (mtvu ? 3 : 2));
+		const cpuinfo_processor* gs_proc = FindCpuinfoProcessorForOSId(gs_index);
+		const u32 gs_cluster_id = (gs_proc && gs_proc->cluster) ? gs_proc->cluster->cluster_id : 0;
+		for (size_t i = mtvu ? 3 : 2; i < s_processor_list.size(); i++)
+		{
+			const u32 proc_index = s_processor_list[i];
+			const cpuinfo_processor* p = FindCpuinfoProcessorForOSId(proc_index);
+			const u32 proc_cluster_id = (p && p->cluster) ? p->cluster->cluster_id : 0;
+			if (proc_cluster_id != gs_cluster_id)
+			{
+				WARNING_LOG("  Only using {} SW threads, processor {} is in cluster {}, but the GS thread is in cluster {}",
+					s_software_renderer_processor_list.size(), proc_index, proc_cluster_id, gs_cluster_id);
+				break;
+			}
+
+			s_software_renderer_processor_list.push_back(proc_index);
+		}
+	}
+	INFO_LOG("  SW renderer pool has {} processors", s_software_renderer_processor_list.size());
 }
 
 const std::vector<u32>& VMManager::Internal::GetSoftwareRendererProcessorList()
