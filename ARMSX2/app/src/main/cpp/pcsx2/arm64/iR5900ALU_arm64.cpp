@@ -12,18 +12,18 @@
 using namespace R5900;
 
 // Per-instruction interp stub toggle. Set to 1 = interp, 0 = native.
+//
+// The overflow-trapping variants (ADD/ADDI/SUB/DADD/DADDI/DSUB) alias directly
+// to their non-trapping -U counterparts at the bottom of this file, matching
+// x86 JIT behavior — upstream silently wraps on overflow and never raises
+// cpuException from JIT-compiled code. So there are no ISTUB_* toggles for the
+// signed variants; they follow whatever ISTUB_*U says.
 #if defined(INTERP_ALU) || defined(INTERP_EE)
-#define ISTUB_ADD      1
 #define ISTUB_ADDU     1
-#define ISTUB_SUB      1
 #define ISTUB_SUBU     1
-#define ISTUB_ADDI     1
 #define ISTUB_ADDIU    1
-#define ISTUB_DADD     1
 #define ISTUB_DADDU    1
-#define ISTUB_DSUB     1
 #define ISTUB_DSUBU    1
-#define ISTUB_DADDI    1
 #define ISTUB_DADDIU   1
 #define ISTUB_AND      1
 #define ISTUB_OR       1
@@ -37,17 +37,11 @@ using namespace R5900;
 #define ISTUB_SLTI     1
 #define ISTUB_SLTIU    1
 #else
-#define ISTUB_ADD      1  // overflow trap — keep interp
 #define ISTUB_ADDU     0
-#define ISTUB_SUB      1  // overflow trap — keep interp
 #define ISTUB_SUBU     0
-#define ISTUB_ADDI     1  // overflow trap — keep interp
 #define ISTUB_ADDIU    0
-#define ISTUB_DADD     1  // overflow trap — keep interp
 #define ISTUB_DADDU    0
-#define ISTUB_DSUB     1  // overflow trap — keep interp
 #define ISTUB_DSUBU    0
-#define ISTUB_DADDI    1  // overflow trap — keep interp
 #define ISTUB_DADDIU   0
 #define ISTUB_AND      0
 #define ISTUB_OR       0
@@ -410,6 +404,32 @@ void recAND()
 		armAsm->Str(a64::xzr, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rd_)));
 		return;
 	}
+
+	// Single-operand const fold (mirrors x86 recLogicalOp_constv for AND:
+	// absorbing=0, identity=-1).
+	if (GPR_IS_CONST1(_Rs_) || GPR_IS_CONST1(_Rt_))
+	{
+		const u32 creg = GPR_IS_CONST1(_Rs_) ? _Rs_ : _Rt_;
+		const u32 vreg = GPR_IS_CONST1(_Rs_) ? _Rt_ : _Rs_;
+		const u64 cval = g_cpuConstRegs[creg].UD[0];
+
+		if (cval == 0)
+		{
+			armAsm->Str(a64::xzr, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rd_)));
+			return;
+		}
+		auto rv = armGprAlloc(vreg, false);
+		auto rd = armGprAlloc(_Rd_, true);
+		if (cval == ~static_cast<u64>(0))
+		{
+			if (rd.GetCode() != rv.GetCode())
+				armAsm->Mov(rd, rv);
+			return;
+		}
+		armAsm->And(rd, rv, cval);
+		return;
+	}
+
 	if (_Rs_ == _Rt_)
 	{
 		auto rs = armGprAlloc(_Rs_, false);
@@ -467,6 +487,32 @@ void recOR()
 		return;
 	}
 
+	// Single-operand const fold (mirrors x86 recLogicalOp_constv for OR:
+	// absorbing=-1, identity=0).
+	if (GPR_IS_CONST1(_Rs_) || GPR_IS_CONST1(_Rt_))
+	{
+		const u32 creg = GPR_IS_CONST1(_Rs_) ? _Rs_ : _Rt_;
+		const u32 vreg = GPR_IS_CONST1(_Rs_) ? _Rt_ : _Rs_;
+		const u64 cval = g_cpuConstRegs[creg].UD[0];
+
+		if (cval == ~static_cast<u64>(0))
+		{
+			auto rd = armGprAlloc(_Rd_, true);
+			armAsm->Mov(rd, ~static_cast<u64>(0));
+			return;
+		}
+		auto rv = armGprAlloc(vreg, false);
+		auto rd = armGprAlloc(_Rd_, true);
+		if (cval == 0)
+		{
+			if (rd.GetCode() != rv.GetCode())
+				armAsm->Mov(rd, rv);
+			return;
+		}
+		armAsm->Orr(rd, rv, cval);
+		return;
+	}
+
 	auto rs = armGprAlloc(_Rs_, false);
 	auto rt = armGprAlloc(_Rt_, false);
 	auto rd = armGprAlloc(_Rd_, true);
@@ -511,6 +557,26 @@ void recXOR()
 		auto rd = armGprAlloc(_Rd_, true);
 		if (rd.GetCode() != rs.GetCode())
 			armAsm->Mov(rd, rs);
+		return;
+	}
+
+	// Single-operand const fold (mirrors x86 recLogicalOp_constv for XOR:
+	// no absorbing value, identity=0).
+	if (GPR_IS_CONST1(_Rs_) || GPR_IS_CONST1(_Rt_))
+	{
+		const u32 creg = GPR_IS_CONST1(_Rs_) ? _Rs_ : _Rt_;
+		const u32 vreg = GPR_IS_CONST1(_Rs_) ? _Rt_ : _Rs_;
+		const u64 cval = g_cpuConstRegs[creg].UD[0];
+
+		auto rv = armGprAlloc(vreg, false);
+		auto rd = armGprAlloc(_Rd_, true);
+		if (cval == 0)
+		{
+			if (rd.GetCode() != rv.GetCode())
+				armAsm->Mov(rd, rv);
+			return;
+		}
+		armAsm->Eor(rd, rv, cval);
 		return;
 	}
 
@@ -560,6 +626,33 @@ void recNOR()
 		auto rt = armGprAlloc(_Rt_, false);
 		auto rd = armGprAlloc(_Rd_, true);
 		armAsm->Mvn(rd, rt);
+		return;
+	}
+
+	// Single-operand const fold (mirrors x86 recLogicalOp_constv for NOR:
+	// absorbing=-1 → result 0, identity=0 → result ~vreg).
+	if (GPR_IS_CONST1(_Rs_) || GPR_IS_CONST1(_Rt_))
+	{
+		const u32 creg = GPR_IS_CONST1(_Rs_) ? _Rs_ : _Rt_;
+		const u32 vreg = GPR_IS_CONST1(_Rs_) ? _Rt_ : _Rs_;
+		const u64 cval = g_cpuConstRegs[creg].UD[0];
+
+		if (cval == ~static_cast<u64>(0))
+		{
+			// x NOR -1 = ~(-1) = 0
+			armAsm->Str(a64::xzr, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rd_)));
+			return;
+		}
+		auto rv = armGprAlloc(vreg, false);
+		auto rd = armGprAlloc(_Rd_, true);
+		if (cval == 0)
+		{
+			// x NOR 0 = ~x
+			armAsm->Mvn(rd, rv);
+			return;
+		}
+		armAsm->Orr(rd, rv, cval);
+		armAsm->Mvn(rd, rd);
 		return;
 	}
 
@@ -797,45 +890,25 @@ void recSLTIU()
 #endif
 
 // ============================================================================
-//  Overflow-trapping ops — kept as interp stubs
-//  ADD, ADDI, DADD, DADDI, SUB, DSUB can raise cpuException on overflow
+//  Overflow-trapping variants — alias to their non-trapping counterparts.
+//
+//  The x86 JIT (iR5900Arit.cpp:147, 221, 316, 397, iR5900AritImm.cpp:67-70,
+//  88-91) does exactly this: recADDU literally calls recADD, recDADDIU calls
+//  recDADDI, etc. — no overflow check is ever emitted. The interpreter traps
+//  per the MIPS spec, but no x86-JIT-compiled game ever sees that trap. We
+//  mirror the x86 JIT to keep semantics consistent across backends.
+//
+//  INTERP_ALU / INTERP_EE bisect escape hatches still work because they
+//  force ISTUB_*U = 1, routing the -U variants (and therefore these aliases)
+//  to the interpreter.
 // ============================================================================
 
-#if ISTUB_ADD
-void recADD() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::ADD); }
-#else
-void recADD() {}
-#endif
-
-#if ISTUB_ADDI
-void recADDI() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::ADDI); }
-#else
-void recADDI() {}
-#endif
-
-#if ISTUB_SUB
-void recSUB() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SUB); }
-#else
-void recSUB() {}
-#endif
-
-#if ISTUB_DADD
-void recDADD() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::DADD); }
-#else
-void recDADD() {}
-#endif
-
-#if ISTUB_DADDI
-void recDADDI() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::DADDI); }
-#else
-void recDADDI() {}
-#endif
-
-#if ISTUB_DSUB
-void recDSUB() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::DSUB); }
-#else
-void recDSUB() {}
-#endif
+void recADD()   { recADDU();   }
+void recADDI()  { recADDIU();  }
+void recSUB()   { recSUBU();   }
+void recDADD()  { recDADDU();  }
+void recDADDI() { recDADDIU(); }
+void recDSUB()  { recDSUBU();  }
 
 } // namespace OpcodeImpl
 } // namespace Dynarec
