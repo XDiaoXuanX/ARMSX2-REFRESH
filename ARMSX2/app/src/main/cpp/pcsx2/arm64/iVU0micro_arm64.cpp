@@ -112,6 +112,36 @@ static void vu0HandleDelayBranch(VURegs* VU)
 	}
 }
 
+// Predicate: does this lower instruction word decode to a NOP on VU0?
+// Matches x86 microVU's isNOP=true on isVU0 for EFU ops, XGKICK, XTOP, and
+// the pipeline-wait ops WAITQ/WAITP. Used to elide the per-pair VU0.code
+// store and rec-table dispatch scaffolding for these ops — the rec emitters
+// themselves already NOP, so the Mov+Str + table indirection was pure waste.
+//
+// Lower dispatch flow: lower >> 25 == 0x40 → LowerOP sub-table;
+//   (lower & 0x3F) in 0x3C..0x3F → T3_xx sub-table;
+//   (lower >> 6) & 0x1F → T3_xx entry.
+static bool isVU0LowerNOP(u32 lower)
+{
+	if ((lower >> 25) != 0x40) return false;
+	const u32 lower_op = lower & 0x3f;
+	if (lower_op < 0x3C) return false;
+
+	const u32 t3_sub = (lower >> 6) & 0x1f;
+	switch (lower_op)
+	{
+		case 0x3C: // T3_00 — XTOP, XGKICK, ESADD, EATANxy, ESQRT, ESIN (all NOP on VU0)
+			return (t3_sub >= 0x1A) && (t3_sub <= 0x1F);
+		case 0x3D: // T3_01 — ERSADD, EATANxz, ERSQRT, EATAN (NOP). XITOP (0x1A) does real work.
+			return (t3_sub >= 0x1C) && (t3_sub <= 0x1F);
+		case 0x3E: // T3_10 — ELENG, ESUM, ERCPR, EEXP (all NOP on VU0)
+			return (t3_sub >= 0x1C) && (t3_sub <= 0x1F);
+		case 0x3F: // T3_11 — WAITQ(0x0E), ERLENG(0x1C), WAITP(0x1E). 0x1D/0x1F are Unknown (skip).
+			return (t3_sub == 0x0E) || (t3_sub == 0x1C) || (t3_sub == 0x1E);
+	}
+	return false;
+}
+
 static void vu0DecrementVIBackup(VURegs* VU, u64 cyclesBefore)
 {
 	if (VU->VIBackupCycles > 0)
@@ -405,13 +435,20 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			// mVUlow.isNOP when the pair is both in an E-bit delay slot and
 			// contains a branch. Upper still executes; we just skip the
 			// branch rec emission so VU->branch / branchpc stay untouched.
+			//
+			// Also elide the entire lower emit scaffold (VU0.code store +
+			// rec table dispatch) when the lower is a known-NOP on VU0
+			// (EFU/XGKICK/XTOP/WAITP/WAITQ) — matches x86 microVU's
+			// mVUlow.isNOP pass1 optimization. Saves ~8 bytes of code per
+			// NOP op plus a runtime Mov+Str pair.
 			const bool suppress_branch = !ibit && branch_pipe && prev_was_ebit;
+			const bool lower_is_nop    = !ibit && isVU0LowerNOP(lower);
 			if (ibit)
 			{
 				armAsm->Mov(w4, lower);
 				armAsm->Str(w4, MemOperand(VU0_BASE_REG, regi_off));
 			}
-			else
+			else if (!lower_is_nop)
 			{
 				if (use_ibit_hack)
 				{
