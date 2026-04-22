@@ -1665,8 +1665,11 @@ void recVU0_XITOP()  { armEmitCall(reinterpret_cast<const void*>(VU0_LOWER_OPCOD
 //  Generic fallback emitter for unknown / reserved lower opcode slots.
 //  VU0.code is already set; the interpreter will handle the unknown case
 //  (logging / NOP).
+//
+//  Exported (non-static) so iVU0micro_arm64.cpp can pointer-compare dispatch
+//  table entries for bad-op detection (C-7 from the VU0 audit).
 // ============================================================================
-static void recVU0_Lower_Unknown()
+void recVU0_Lower_Unknown()
 {
 	armEmitCall(reinterpret_cast<const void*>(VU0_LOWER_OPCODE[VU0.code >> 25]));
 }

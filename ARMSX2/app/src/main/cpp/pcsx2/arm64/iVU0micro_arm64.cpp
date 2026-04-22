@@ -40,6 +40,10 @@ using VU0RecFn = void (*)();
 extern VU0RecFn recVU0_UpperTable[64];
 extern VU0RecFn recVU0_LowerTable[128];
 
+// The generic "unknown lower opcode" emitter, exposed from iVU0Lower_arm64.cpp.
+// Used for pointer-compare bad-op detection at block-analysis time.
+extern void recVU0_Lower_Unknown();
+
 // ============================================================================
 //  Block cache
 // ============================================================================
@@ -175,6 +179,28 @@ static bool PairHasBranch(u32 pc)
 	return lregs.pipe == VUPIPE_BRANCH;
 }
 
+// Detect pairs containing an illegal/reserved lower opcode so we can truncate
+// the block at them. Mirrors x86 microVU's mVUcheckBadOp (microVU_Compile.inl)
+// which sets mVUinfo.isEOB when dispatch routes to Unknown. We do pointer
+// comparison against recVU0_Lower_Unknown on the top-level dispatch only —
+// sub-table Unknown ops still fall through to the interp at runtime and are
+// harmless (just log + return), they just don't get the tighter block bound.
+// I-bit pairs are exempted: their lower word is the I-register literal, not
+// an opcode.
+static bool PairHasBadOp(u32 pc)
+{
+	const u32 upper = *reinterpret_cast<const u32*>(VU0.Micro + pc + 4);
+	if ((upper >> 31) & 1)
+		return false;
+	// BIOS writes a reversed-NOP pair (0x8000033c for the upper half); x86
+	// microVU explicitly excludes this to avoid console spam. Honor the same
+	// allowlist.
+	if (upper == 0x8000033c)
+		return false;
+	const u32 lower = *reinterpret_cast<const u32*>(VU0.Micro + pc);
+	return recVU0_LowerTable[lower >> 25] == recVU0_Lower_Unknown;
+}
+
 static u32 AnalyzeBlock(u32 startPC)
 {
 	u32 pairs = 0;
@@ -184,6 +210,7 @@ static u32 AnalyzeBlock(u32 startPC)
 	{
 		const bool ebit   = PairHasEbit(pc);
 		const bool branch = PairHasBranch(pc);
+		const bool bad_op = PairHasBadOp(pc);
 
 		pairs++;
 		pc = (pc + 8) & (VU0_PROGSIZE - 1);
@@ -193,6 +220,13 @@ static u32 AnalyzeBlock(u32 startPC)
 			pairs++;
 			break;
 		}
+		// Bad op: include the current pair (still dispatches to interp) but
+		// no delay slot, and truncate the block. Matches x86 microVU's
+		// mVUinfo.isEOB on bad op. Benefit is earlier block boundary so we
+		// re-enter dispatch and don't keep compiling past a definitely-bad
+		// opcode.
+		if (bad_op)
+			break;
 	}
 
 	return pairs;
