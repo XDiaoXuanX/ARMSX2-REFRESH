@@ -1591,13 +1591,18 @@ void recVU0_EEXP() { /* NOP — no EFU on VU0 */ }
 
 // ============================================================================
 //  Special — VU/GIF interface.
-//  VU0 has no XGKICK. XTOP/XITOP always use the interpreter on VU0.
+//
+//  XGKICK and XTOP are NOPs on VU0 — matches x86 microVU's isNOP=true on
+//  isVU0 (microVU_Lower.inl:1653, 1826) and the VU0 interp stubs which are
+//  empty bodies (VU0MI_XGKICK/VU0MI_XTOP in VUops.cpp).
+//
+//  XITOP does real work on VU0 — reads VifRegs.itop masked by 0xff (VU1
+//  masks by 0x3ff). x86 microVU emits inline code; arm64 routes to interp.
 // ============================================================================
 
-// Always interp on VU0 — no GIF driving from VU0 micro mode.
-void recVU0_XITOP() { armEmitCall(reinterpret_cast<const void*>(VU0_LOWER_OPCODE[VU0.code >> 25])); }
-void recVU0_XTOP()  { armEmitCall(reinterpret_cast<const void*>(VU0_LOWER_OPCODE[VU0.code >> 25])); }
-void recVU0_XGKICK(){ armEmitCall(reinterpret_cast<const void*>(VU0_LOWER_OPCODE[VU0.code >> 25])); }
+void recVU0_XGKICK() { /* NOP on VU0 — no GIF interface */ }
+void recVU0_XTOP()   { /* NOP on VU0 — VIF top register not exposed */ }
+void recVU0_XITOP()  { armEmitCall(reinterpret_cast<const void*>(VU0_LOWER_OPCODE[VU0.code >> 25])); }
 
 // ============================================================================
 //  Generic fallback emitter for unknown / reserved lower opcode slots.
