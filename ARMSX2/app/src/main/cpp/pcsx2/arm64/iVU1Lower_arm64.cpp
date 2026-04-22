@@ -1577,12 +1577,14 @@ void recVU1_ILW() {
 	armAsm->Ldr(x1, MemOperand(VU1_BASE_REG, mem_off));
 	armAsm->Add(x1, x1, x0);
 
-	// ptr is u16*: ptr[0]/ptr[2]/ptr[4]/ptr[6] = byte offsets 0/4/8/12.
-	// Only the final set bit's value survives — match by emitting in order.
-	if (xyzw & 8) { armAsm->Ldrh(w2, MemOperand(x1,  0)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	if (xyzw & 4) { armAsm->Ldrh(w2, MemOperand(x1,  4)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	if (xyzw & 2) { armAsm->Ldrh(w2, MemOperand(x1,  8)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	if (xyzw & 1) { armAsm->Ldrh(w2, MemOperand(x1, 12)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	// First-set-wins priority (X>Y>Z>W) — matches x86 microVU's offsetSS
+	// selection (_X ? 0 : _Y ? 4 : _Z ? 8 : 12). Only diverges from the
+	// previous last-set-wins sequential-if order when multiple lane bits
+	// are set (invalid encoding). Fixes L-2 / D-5 parallel.
+	if      (xyzw & 8) { armAsm->Ldrh(w2, MemOperand(x1,  0)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	else if (xyzw & 4) { armAsm->Ldrh(w2, MemOperand(x1,  4)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	else if (xyzw & 2) { armAsm->Ldrh(w2, MemOperand(x1,  8)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	else if (xyzw & 1) { armAsm->Ldrh(w2, MemOperand(x1, 12)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
 }
 #endif
 
@@ -1632,12 +1634,11 @@ void recVU1_ILWR() {
 	armAsm->Ldr(x1, MemOperand(VU1_BASE_REG, mem_off));
 	armAsm->Add(x1, x1, x0);
 
-	// ptr is u16*: ptr[0]/ptr[2]/ptr[4]/ptr[6] = byte offsets 0/4/8/12.
-	// Last-set xyzw bit wins — emit in order to match interpreter.
-	if (xyzw & 8) { armAsm->Ldrh(w2, MemOperand(x1,  0)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	if (xyzw & 4) { armAsm->Ldrh(w2, MemOperand(x1,  4)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	if (xyzw & 2) { armAsm->Ldrh(w2, MemOperand(x1,  8)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	if (xyzw & 1) { armAsm->Ldrh(w2, MemOperand(x1, 12)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	// First-set-wins priority (X>Y>Z>W) — matches x86 microVU's offsetSS.
+	if      (xyzw & 8) { armAsm->Ldrh(w2, MemOperand(x1,  0)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	else if (xyzw & 4) { armAsm->Ldrh(w2, MemOperand(x1,  4)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	else if (xyzw & 2) { armAsm->Ldrh(w2, MemOperand(x1,  8)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	else if (xyzw & 1) { armAsm->Ldrh(w2, MemOperand(x1, 12)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
 }
 #endif
 
