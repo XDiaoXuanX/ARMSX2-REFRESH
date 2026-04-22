@@ -374,10 +374,13 @@ static void vu0_ILW(VURegs* VU)
 	vu_u16 addr = ((imm + VU->VI[W_Is(VU)].SS[0]) * 16);
 	vu0MTVUSyncVU1Reg(addr);
 	vu_u16* ptr = (vu_u16*)GET_VU_MEM(VU, addr);
-	if (W_X(VU)) VU->VI[W_It(VU)].US[0] = ptr[0];
-	if (W_Y(VU)) VU->VI[W_It(VU)].US[0] = ptr[2];
-	if (W_Z(VU)) VU->VI[W_It(VU)].US[0] = ptr[4];
-	if (W_W(VU)) VU->VI[W_It(VU)].US[0] = ptr[6];
+	// First-set-wins priority (X>Y>Z>W) — matches x86 microVU's offsetSS
+	// selection. Only diverges from the sequential-if last-set-wins order
+	// when multiple lane bits are set (invalid encoding).
+	if      (W_X(VU)) VU->VI[W_It(VU)].US[0] = ptr[0];
+	else if (W_Y(VU)) VU->VI[W_It(VU)].US[0] = ptr[2];
+	else if (W_Z(VU)) VU->VI[W_It(VU)].US[0] = ptr[4];
+	else if (W_W(VU)) VU->VI[W_It(VU)].US[0] = ptr[6];
 }
 
 static void vu0_ISW(VURegs* VU)
@@ -398,10 +401,11 @@ static void vu0_ILWR(VURegs* VU)
 	u32 addr = (VU->VI[W_Is(VU)].US[0] * 16);
 	vu0MTVUSyncVU1Reg(addr);
 	vu_u16* ptr = (vu_u16*)GET_VU_MEM(VU, addr);
-	if (W_X(VU)) VU->VI[W_It(VU)].US[0] = ptr[0];
-	if (W_Y(VU)) VU->VI[W_It(VU)].US[0] = ptr[2];
-	if (W_Z(VU)) VU->VI[W_It(VU)].US[0] = ptr[4];
-	if (W_W(VU)) VU->VI[W_It(VU)].US[0] = ptr[6];
+	// First-set-wins priority (X>Y>Z>W) — matches x86 microVU's offsetSS.
+	if      (W_X(VU)) VU->VI[W_It(VU)].US[0] = ptr[0];
+	else if (W_Y(VU)) VU->VI[W_It(VU)].US[0] = ptr[2];
+	else if (W_Z(VU)) VU->VI[W_It(VU)].US[0] = ptr[4];
+	else if (W_W(VU)) VU->VI[W_It(VU)].US[0] = ptr[6];
 }
 
 static void vu0_ISWR(VURegs* VU)
