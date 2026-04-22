@@ -729,41 +729,20 @@ void recArmVU0::Execute(u32 cycles)
 
 void recArmVU0::Clear(u32 addr, u32 size)
 {
-	// Invalidate any block whose byte span overlaps [addr, addr+size).
-	// Slot-keyed invalidation alone (the pre-2026-04 behavior) misses
-	// blocks that START earlier than `addr` but span INTO the clear range,
-	// leaving stale compiled code for games that partially patch VU0
-	// micro memory mid-program. Mirror x86 microVU's program-range
-	// invalidation by walking every cached block's [start, end) span
-	// (with wrap at VU0_PROGSIZE).
-	if (addr >= VU0_PROGSIZE || size == 0)
+	// Slot-keyed invalidation. An earlier attempt to make this span-aware
+	// (commit 4af448458 "fix: VU0 clear()") caused graphical dropouts and
+	// lag — Clear() is hit frequently (VIF MPG uploads, DMA completions,
+	// CPU memory writes) and scanning all 512 slots per call triggered a
+	// recompile storm. The stale-block bug that fix was chasing (blocks
+	// spanning across the patched range) is audit-speculative — never
+	// confirmed in a real game — so we keep the fast path.
+	const u32 first        = addr / 8;
+	const u32 last         = (addr + size + 7) / 8;
+	const u32 clamped_last = std::min(last, VU0_NUM_SLOTS);
+
+	if (first >= VU0_NUM_SLOTS)
 		return;
 
-	const u32 clear_start = addr;
-	const u32 clear_end   = std::min(addr + size, VU0_PROGSIZE);
-
-	for (u32 slot = 0; slot < VU0_NUM_SLOTS; slot++)
-	{
-		if (!s_blocks[slot].codeEntry)
-			continue;
-
-		const u32 block_start         = slot * 8;
-		const u32 block_end_unwrapped = block_start + s_blocks[slot].numPairs * 8;
-
-		bool overlap;
-		if (block_end_unwrapped <= VU0_PROGSIZE)
-		{
-			// Non-wrapping block: standard interval-overlap test.
-			overlap = (block_start < clear_end) && (clear_start < block_end_unwrapped);
-		}
-		else
-		{
-			// Wrapping block — treat as [block_start, VU0_PROGSIZE) ∪ [0, wrap_end).
-			const u32 wrap_end = block_end_unwrapped - VU0_PROGSIZE;
-			overlap = (block_start < clear_end) || (clear_start < wrap_end);
-		}
-
-		if (overlap)
-			s_blocks[slot].codeEntry = nullptr;
-	}
+	for (u32 i = first; i < clamped_last; i++)
+		s_blocks[i].codeEntry = nullptr;
 }
