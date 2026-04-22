@@ -247,6 +247,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 	// Epilogue label — jumped to when we need early exit mid-block
 	Label early_exit;
 
+	// Tracks whether the previous pair executed a branch op — feeds the
+	// "is this pair a branch delay slot?" predicate for D/T bit suppression.
+	// Mirrors mVUinfo.isBdelay in x86 microVU_Compile.inl:901.
+	bool prev_was_branch = false;
+
 	u32 pc = startPC;
 	for (u32 i = 0; i < numPairs; i++)
 	{
@@ -434,7 +439,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			// is set, matching x86 microVU_Compile.inl:900-910 which calls
 			// mVUDoDBit/mVUDoTBit after mVUexecuteInstruction. D/T → ebit=1
 			// is picked up by step 13's ebit countdown below in the same pair.
-			if (dbit_set || tbit_set)
+			//
+			// Suppressed when the current pair is itself a branch or is in
+			// a branch delay slot — matches x86's `!mVUinfo.isBdelay && !mVUlow.branch`
+			// guard (ISA undefined behavior for D/T in these contexts).
+			if ((dbit_set || tbit_set) && !branch_pipe && !prev_was_branch)
 			{
 				armAsm->Mov(w0, upper);
 				armEmitCall(reinterpret_cast<const void*>(vu0CheckDTBits));
@@ -479,6 +488,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 		}
 
 		pc = (pc + 8) & (VU0_PROGSIZE - 1);
+
+		// Track branch for next pair's D/T bit suppression (step 11b).
+		// Updated regardless of fallback vs native path because the delay
+		// slot's D/T check must be suppressed either way.
+		prev_was_branch = branch_pipe;
 
 		// After each pair (except last): check VPU_STAT and MFLAGSET
 		if (i < numPairs - 1)
