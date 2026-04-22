@@ -140,7 +140,11 @@ using vu_s32 = int32_t;
 using vu_u32 = uint32_t;
 
 // Emit inline ARM64 for vuDouble clamping on a W register.
-// Flushes denormals to ±0, clamps inf/NaN to ±max if vu1SignOverflow is set.
+// Flushes denormals to ±0, clamps inf/NaN to ±max if vu1Overflow is set.
+// Gated on CHECK_VU_OVERFLOW to match x86 microVU_Lower.inl:92 (SQRT) and
+// microVU_Clamp.inl mVUclamp1 (operand-path inf/NaN clamp). Previously gated
+// on SIGN_OVERFLOW — that diverged from x86 JIT, matching the same mistake
+// fixed in VU0 Lower D-6.
 // wreg: u32 float bits (modified in place)
 // wtmp: scratch register (clobbered)
 static void emitVuDouble(const Register& wreg, const Register& wtmp)
@@ -148,7 +152,7 @@ static void emitVuDouble(const Register& wreg, const Register& wtmp)
 	a64::Label done;
 	armAsm->Ubfx(wtmp, wreg, 23, 8); // extract 8-bit exponent
 
-	if (CHECK_VU_SIGN_OVERFLOW(1))
+	if (CHECK_VU_OVERFLOW(1))
 	{
 		a64::Label denormal;
 		armAsm->Cbz(wtmp, &denormal);           // exp==0 -> denormal
@@ -170,7 +174,10 @@ static void emitVuDouble(const Register& wreg, const Register& wtmp)
 	armAsm->Bind(&done);
 }
 
-// Float denormal/overflow clamping — mirrors vuDouble() in VUops.cpp
+// Float denormal/overflow clamping — mirrors upstream vuDouble() in VUops.cpp
+// (gated on CHECK_VU_OVERFLOW to match x86 JIT, NOT the port's local VUops.cpp
+// which was changed to SIGN_OVERFLOW — that change diverges from x86 JIT).
+// Same fix as VU0 Lower D-6.
 static float vu1Double(vu_u32 f)
 {
 	switch (f & 0x7f800000)
@@ -179,7 +186,7 @@ static float vu1Double(vu_u32 f)
 			f &= 0x80000000;
 			return *(float*)&f;
 		case 0x7f800000:
-			if (CHECK_VU_SIGN_OVERFLOW(1))
+			if (CHECK_VU_OVERFLOW(1))
 			{
 				u32 d = (f & 0x80000000) | 0x7f7fffff;
 				return *(float*)&d;
