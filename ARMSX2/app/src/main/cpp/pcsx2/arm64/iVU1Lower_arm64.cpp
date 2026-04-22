@@ -2191,9 +2191,15 @@ void recVU1_FCAND() {
 REC_VU1_LOWER_INTERP(FCEQ)
 #else
 void recVU1_FCEQ() {
+	// Compare full 32 bits of clipflag against imm24. Matches x86
+	// microVU_Lower.inl:612-627 (XOR + SUB 1 + SHR 31 on the full register).
+	// If clipflag's upper 8 bits are non-zero, Cmp fails and Cset returns 0
+	// — correctly aligned with x86. In normal flow clipflag never has
+	// garbage upper bits (FCSET writes the 24-bit-masked imm to the pinned
+	// reg), so this is behaviorally a no-op for real code, but the stricter
+	// compare keeps the divergence from x86 closed.
 	const u32 imm = VU1.code & 0xFFFFFF;
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, viOff(REG_CLIP_FLAG)));
-	armAsm->And(w0, w0, 0xFFFFFF);
 	armAsm->Mov(w1, imm);
 	armAsm->Cmp(w0, w1);
 	armAsm->Cset(w0, a64::eq);
