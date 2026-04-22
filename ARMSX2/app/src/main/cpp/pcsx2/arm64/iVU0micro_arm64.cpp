@@ -65,6 +65,13 @@ static ArmConstantPool s_pool;
 //  Runtime helpers
 // ============================================================================
 
+// D/T bit firing on VU0. Fires the INTC IRQ immediately via hwIntcIrq
+// rather than x86 microVU's VUFLAG_INTCINTERRUPT deferred-flag pattern
+// (microVU_Compile.inl:570). Safe because hwIntcIrq only mutates state
+// (INTC_STAT |= 1<<n, then cpuTestINTCInts which at most schedules an EE
+// event via cpuSetNextEventDelta(4)). No preemption, no dispatch. The
+// timing divergence vs x86 is sub-block (~1 pair) since ebit=1 terminates
+// the block immediately after this via step 13's countdown anyway.
 static void vu0CheckDTBits(u32 upper)
 {
 	if (upper & 0x10000000) // D flag
@@ -614,13 +621,41 @@ void recArmVU0::Execute(u32 cycles)
 
 void recArmVU0::Clear(u32 addr, u32 size)
 {
-	const u32 first        = addr / 8;
-	const u32 last         = (addr + size + 7) / 8;
-	const u32 clamped_last = std::min(last, VU0_NUM_SLOTS);
-
-	if (first >= VU0_NUM_SLOTS)
+	// Invalidate any block whose byte span overlaps [addr, addr+size).
+	// Slot-keyed invalidation alone (the pre-2026-04 behavior) misses
+	// blocks that START earlier than `addr` but span INTO the clear range,
+	// leaving stale compiled code for games that partially patch VU0
+	// micro memory mid-program. Mirror x86 microVU's program-range
+	// invalidation by walking every cached block's [start, end) span
+	// (with wrap at VU0_PROGSIZE).
+	if (addr >= VU0_PROGSIZE || size == 0)
 		return;
 
-	for (u32 i = first; i < clamped_last; i++)
-		s_blocks[i].codeEntry = nullptr;
+	const u32 clear_start = addr;
+	const u32 clear_end   = std::min(addr + size, VU0_PROGSIZE);
+
+	for (u32 slot = 0; slot < VU0_NUM_SLOTS; slot++)
+	{
+		if (!s_blocks[slot].codeEntry)
+			continue;
+
+		const u32 block_start         = slot * 8;
+		const u32 block_end_unwrapped = block_start + s_blocks[slot].numPairs * 8;
+
+		bool overlap;
+		if (block_end_unwrapped <= VU0_PROGSIZE)
+		{
+			// Non-wrapping block: standard interval-overlap test.
+			overlap = (block_start < clear_end) && (clear_start < block_end_unwrapped);
+		}
+		else
+		{
+			// Wrapping block — treat as [block_start, VU0_PROGSIZE) ∪ [0, wrap_end).
+			const u32 wrap_end = block_end_unwrapped - VU0_PROGSIZE;
+			overlap = (block_start < clear_end) || (clear_start < wrap_end);
+		}
+
+		if (overlap)
+			s_blocks[slot].codeEntry = nullptr;
+	}
 }
