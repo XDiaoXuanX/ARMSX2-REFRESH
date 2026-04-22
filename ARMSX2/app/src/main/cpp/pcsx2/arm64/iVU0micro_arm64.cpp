@@ -702,7 +702,12 @@ void recArmVU0::Execute(u32 cycles)
 
 	VU0.VI[REG_TPC].UL >>= 3;
 
-	if (EmuConfig.Speedhacks.EECycleRate != 0 && (!EmuConfig.Gamefixes.VUSyncHack || EmuConfig.Speedhacks.EECycleRate < 0))
+	// Skip cycle scaling when either sync gamefix is active and EECycleRate is
+	// positive — both VUSyncHack and FullVU0SyncHack tighten VU0 sync, and
+	// scaling cycles down would defeat the sync. Matches x86 microVU which
+	// treats the two flags as equivalent across microVU_{Compile,Branch,Macro}.inl.
+	const bool tight_sync = EmuConfig.Gamefixes.VUSyncHack || EmuConfig.Gamefixes.FullVU0SyncHack;
+	if (EmuConfig.Speedhacks.EECycleRate != 0 && (!tight_sync || EmuConfig.Speedhacks.EECycleRate < 0))
 	{
 		u64 cycle_change = VU0.cycle - startcycles;
 		VU0.cycle -= cycle_change;
