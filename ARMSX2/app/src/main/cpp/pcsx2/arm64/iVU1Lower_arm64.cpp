@@ -1157,15 +1157,26 @@ void recVU1_IADDI() {
 	const u32 it = (VU1.code >> 16) & 0xF;
 	if (it == 0) return;
 	const u32 is = (VU1.code >> 11) & 0xF;
-	// 5-bit signed immediate at bits [10:6], sign-extended.
-	s32 imm = (VU1.code >> 6) & 0x1f;
-	imm = ((imm & 0x10) ? static_cast<s32>(0xfffffff0) : 0) | (imm & 0xf);
 	emitBackupVI(it);
 	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
-	if (imm > 0)
-		armAsm->Add(w0, w0, imm);
-	else if (imm < 0)
-		armAsm->Sub(w0, w0, static_cast<u32>(-imm));
+	if (EmuConfig.Gamefixes.IbitHack)
+	{
+		// Live 5-bit signed immediate from bits [10:6] of VU->code. Matches
+		// x86 microVU_Lower.inl IADDI IbitHack path (xSHL 21; xSAR 27).
+		armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
+		armAsm->Sbfx(w1, w1, 6, 5);
+		armAsm->Add(w0, w0, w1);
+	}
+	else
+	{
+		// 5-bit signed immediate at bits [10:6], sign-extended at JIT time.
+		s32 imm = (VU1.code >> 6) & 0x1f;
+		imm = ((imm & 0x10) ? static_cast<s32>(0xfffffff0) : 0) | (imm & 0xf);
+		if (imm > 0)
+			armAsm->Add(w0, w0, imm);
+		else if (imm < 0)
+			armAsm->Sub(w0, w0, static_cast<u32>(-imm));
+	}
 	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
 }
 #endif
@@ -1177,14 +1188,28 @@ void recVU1_IADDIU() {
 	const u32 it = (VU1.code >> 16) & 0xF;
 	if (it == 0) return;
 	const u32 is = (VU1.code >> 11) & 0xF;
-	// 15-bit unsigned immediate: bits [24:21] → [14:11], bits [10:0] → [10:0].
-	const u32 imm = ((VU1.code >> 10) & 0x7800) | (VU1.code & 0x7ff);
 	emitBackupVI(it);
 	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
-	if (imm != 0)
+	if (EmuConfig.Gamefixes.IbitHack)
 	{
-		armAsm->Mov(w1, imm);
+		// Live 15-bit unsigned immediate from VU->code: ((code >> 10) & 0x7800) | (code & 0x7FF).
+		// Mirrors x86 microVU_Lower.inl IADDIU IbitHack path.
+		armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
+		armAsm->Lsr(w2, w1, 10);
+		armAsm->And(w2, w2, 0x7800);
+		armAsm->And(w1, w1, 0x7FF);
+		armAsm->Orr(w1, w1, w2);
 		armAsm->Add(w0, w0, w1);
+	}
+	else
+	{
+		// 15-bit unsigned immediate: bits [24:21] → [14:11], bits [10:0] → [10:0].
+		const u32 imm = ((VU1.code >> 10) & 0x7800) | (VU1.code & 0x7ff);
+		if (imm != 0)
+		{
+			armAsm->Mov(w1, imm);
+			armAsm->Add(w0, w0, w1);
+		}
 	}
 	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
 }
@@ -1197,13 +1222,25 @@ void recVU1_ISUBIU() {
 	const u32 it = (VU1.code >> 16) & 0xF;
 	if (it == 0) return;
 	const u32 is = (VU1.code >> 11) & 0xF;
-	const u32 imm = ((VU1.code >> 10) & 0x7800) | (VU1.code & 0x7ff);
 	emitBackupVI(it);
 	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
-	if (imm != 0)
+	if (EmuConfig.Gamefixes.IbitHack)
 	{
-		armAsm->Mov(w1, imm);
+		armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
+		armAsm->Lsr(w2, w1, 10);
+		armAsm->And(w2, w2, 0x7800);
+		armAsm->And(w1, w1, 0x7FF);
+		armAsm->Orr(w1, w1, w2);
 		armAsm->Sub(w0, w0, w1);
+	}
+	else
+	{
+		const u32 imm = ((VU1.code >> 10) & 0x7800) | (VU1.code & 0x7ff);
+		if (imm != 0)
+		{
+			armAsm->Mov(w1, imm);
+			armAsm->Sub(w0, w0, w1);
+		}
 	}
 	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
 }
@@ -1271,6 +1308,14 @@ static void emitComputeVuMemOffset(u32 is_reg, s32 imm)
 REC_VU1_LOWER_INTERP(LQ)
 #else
 void recVU1_LQ() {
+	// IbitHack: route to C wrapper which reads VU->code at runtime. Block
+	// dispatcher's live-Ldr keeps VU->code aligned with post-compile patches.
+	if (EmuConfig.Gamefixes.IbitHack)
+	{
+		armAsm->Mov(x0, VU1_BASE_REG);
+		armEmitCall(reinterpret_cast<const void*>(vu1_LQ));
+		return;
+	}
 	const u32 ft = W_Ft(&VU1);
 	if (ft == 0) return;
 	const u32 is = W_Is(&VU1);
@@ -1309,19 +1354,22 @@ void recVU1_LQD() {
 	// Interpreter unconditionally backs up VI[is] before the decrement.
 	emitBackupVI(is);
 
-	// Pre-decrement VI[is] — gated on is != 0 so VI[0] (hardwired 0) is left alone.
+	// L-1 fix (parallels VU0 D-4): always compute VI[is] - 1 into w2 and use
+	// it for the address, even when is == 0. x86 microVU allocates a reg for
+	// VI[0]=0, DECs it, and uses (u16)-1 * 16 = 0x3FF0 (post-mask) as the
+	// address. Writeback to VI[is] is still gated on is != 0 so the VI[0]
+	// hardwired-zero invariant is preserved in memory.
+	armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(is)));
+	armAsm->Sub(w2, w2, 1);
 	if (is != 0)
-	{
-		armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(is)));
-		armAsm->Sub(w2, w2, 1);
 		armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(is)));
-	}
 
 	if (ft == 0) return;
 
-	// Address = (VI[is] & 0x3FF) * 16 — interpreter uses US[0] (unsigned), but
-	// the final 0x3FF0 mask makes sign of the 16->32 extension irrelevant.
-	emitComputeVuMemOffset(is, 0);
+	// Address = w2 * 16 masked to 14 bits (interpreter uses US[0] unsigned,
+	// but the final & 0x3FF0 mask makes sign irrelevant).
+	armAsm->Lsl(w0, w2, 4);
+	armAsm->And(w0, w0, 0x3FF0);
 	armAsm->Ldr(x1, MemOperand(VU1_BASE_REG, mem_off));
 	armAsm->Add(x1, x1, x0);
 
@@ -1387,6 +1435,12 @@ void recVU1_LQI() {
 REC_VU1_LOWER_INTERP(SQ)
 #else
 void recVU1_SQ() {
+	if (EmuConfig.Gamefixes.IbitHack)
+	{
+		armAsm->Mov(x0, VU1_BASE_REG);
+		armEmitCall(reinterpret_cast<const void*>(vu1_SQ));
+		return;
+	}
 	const u32 fs = W_Fs(&VU1);
 	const u32 it = W_It(&VU1); // SQ uses It as the base register
 	const u32 xyzw = W_XYZW(&VU1);
@@ -1424,15 +1478,25 @@ void recVU1_SQD() {
 
 	emitBackupVI(it);
 
-	// Pre-decrement — interpreter quirk: gated on ft != 0, not it != 0.
+	// L-1 fix (parallels VU0 D-4): decrement path uses the decremented value
+	// for the address even when it == 0 (x86 wraps to offset 0x3FF0). The
+	// writeback guard `ft != 0` comes from the interp's SQD-Ft==0-is-NOP
+	// quirk; the `it != 0` addition protects VI[0]'s hardwired invariant.
+	// When ft == 0 we leave VI[it] untouched and use the un-decremented
+	// value for the address (matches interp — SQD Ft==0 still stores).
 	if (ft != 0)
 	{
 		armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
 		armAsm->Sub(w2, w2, 1);
-		armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
+		if (it != 0)
+			armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
+		armAsm->Lsl(w0, w2, 4);
+		armAsm->And(w0, w0, 0x3FF0);
 	}
-
-	emitComputeVuMemOffset(it, 0);
+	else
+	{
+		emitComputeVuMemOffset(it, 0);
+	}
 	armAsm->Ldr(x1, MemOperand(VU1_BASE_REG, mem_off));
 	armAsm->Add(x1, x1, x0);
 
@@ -1480,8 +1544,10 @@ void recVU1_SQI() {
 		if (xyzw & 1) { armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, vfOff(fs) + 12)); armAsm->Str(w2, MemOperand(x1, 12)); }
 	}
 
-	// Post-increment — same W_Ft gate as SQD's decrement.
-	if (ft != 0)
+	// Post-increment — same W_Ft gate as SQD's decrement. Writeback
+	// additionally gated on it != 0 so VI[0]'s hardwired-zero invariant
+	// is preserved (matches the L-1 fix pattern for SQD).
+	if (ft != 0 && it != 0)
 	{
 		armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
 		armAsm->Add(w2, w2, 1);
@@ -1494,6 +1560,12 @@ void recVU1_SQI() {
 REC_VU1_LOWER_INTERP(ILW)
 #else
 void recVU1_ILW() {
+	if (EmuConfig.Gamefixes.IbitHack)
+	{
+		armAsm->Mov(x0, VU1_BASE_REG);
+		armEmitCall(reinterpret_cast<const void*>(vu1_ILW));
+		return;
+	}
 	const u32 it = W_It(&VU1);
 	if (it == 0) return;
 	const u32 is = W_Is(&VU1);
@@ -1518,6 +1590,12 @@ void recVU1_ILW() {
 REC_VU1_LOWER_INTERP(ISW)
 #else
 void recVU1_ISW() {
+	if (EmuConfig.Gamefixes.IbitHack)
+	{
+		armAsm->Mov(x0, VU1_BASE_REG);
+		armEmitCall(reinterpret_cast<const void*>(vu1_ISW));
+		return;
+	}
 	const u32 it = W_It(&VU1);
 	const u32 is = W_Is(&VU1);
 	const u32 xyzw = W_XYZW(&VU1);
@@ -1668,6 +1746,37 @@ static inline u32 vu1ComputePCRelTarget()
 	return static_cast<u32>((tpc_val + imm11 * 8) & 0x3fff);
 }
 
+// IbitHack variant: emit runtime computation of PC-relative branch target
+// into w3. pair_pc portion remains compile-time (matches what step 2 wrote
+// to TPC); only imm11 is read live from VU->code to catch post-compile
+// micro-memory patches. Mirrors x86 microVU's ptr32[&curI] path for branches.
+// Clobbers w3.
+static void emitRuntimePCRelTarget()
+{
+	const s32 tpc_const = static_cast<s32>((g_vu1CurrentPC + 8) & 0x3fff);
+	armAsm->Ldr(w3, MemOperand(VU1_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
+	armAsm->Sbfx(w3, w3, 0, 11);    // signed 11-bit imm in bits [10:0]
+	armAsm->Lsl(w3, w3, 3);          // imm11 * 8
+	armAsm->Add(w3, w3, tpc_const);
+	armAsm->And(w3, w3, 0x3fff);
+}
+
+// Emit Mov w3, bpc — either baked compile-time target or live runtime
+// decode — picking the path based on EmuConfig.Gamefixes.IbitHack. All
+// PC-relative branches use this before calling emitInlineSetBranch(w3).
+static void emitPCRelTargetIntoW3()
+{
+	if (EmuConfig.Gamefixes.IbitHack)
+	{
+		emitRuntimePCRelTarget();
+	}
+	else
+	{
+		const u32 bpc = vu1ComputePCRelTarget();
+		armAsm->Mov(w3, bpc);
+	}
+}
+
 // Emit BAL/JALR link register write. Called before emitInlineSetBranch.
 // The link value matches _vuBAL/_vuJALR in VUops.cpp: when already in a
 // delay slot (branch==1) we link to branchpc+8 (runtime), otherwise we
@@ -1704,8 +1813,7 @@ static void emitBranchLinkWrite(u32 it)
 REC_VU1_LOWER_INTERP(B)
 #else
 void recVU1_B() {
-	const u32 bpc = vu1ComputePCRelTarget();
-	armAsm->Mov(w3, bpc);
+	emitPCRelTargetIntoW3();
 	emitInlineSetBranch(w3);
 }
 #endif
@@ -1714,11 +1822,10 @@ void recVU1_B() {
 REC_VU1_LOWER_INTERP(BAL)
 #else
 void recVU1_BAL() {
-	const u32 bpc = vu1ComputePCRelTarget();
-	const u32 it  = W_It(&VU1);
+	const u32 it = W_It(&VU1);
 	if (it != 0)
 		emitBranchLinkWrite(it);
-	armAsm->Mov(w3, bpc);
+	emitPCRelTargetIntoW3();
 	emitInlineSetBranch(w3);
 }
 #endif
@@ -1754,15 +1861,14 @@ void recVU1_JALR() {
 REC_VU1_LOWER_INTERP(IBEQ)
 #else
 void recVU1_IBEQ() {
-	const u32 bpc = vu1ComputePCRelTarget();
-	const u32 it  = W_It(&VU1);
-	const u32 is  = W_Is(&VU1);
+	const u32 it = W_It(&VU1);
+	const u32 is = W_Is(&VU1);
 	a64::Label not_taken;
 	emitHazardVIRead(w6, it, false, w4);
 	emitHazardVIRead(w7, is, false, w4);
 	armAsm->Cmp(w6, w7);
 	armAsm->B(&not_taken, a64::ne);
-	armAsm->Mov(w3, bpc);
+	emitPCRelTargetIntoW3();
 	emitInlineSetBranch(w3);
 	armAsm->Bind(&not_taken);
 }
@@ -1772,15 +1878,14 @@ void recVU1_IBEQ() {
 REC_VU1_LOWER_INTERP(IBNE)
 #else
 void recVU1_IBNE() {
-	const u32 bpc = vu1ComputePCRelTarget();
-	const u32 it  = W_It(&VU1);
-	const u32 is  = W_Is(&VU1);
+	const u32 it = W_It(&VU1);
+	const u32 is = W_Is(&VU1);
 	a64::Label not_taken;
 	emitHazardVIRead(w6, it, false, w4);
 	emitHazardVIRead(w7, is, false, w4);
 	armAsm->Cmp(w6, w7);
 	armAsm->B(&not_taken, a64::eq);
-	armAsm->Mov(w3, bpc);
+	emitPCRelTargetIntoW3();
 	emitInlineSetBranch(w3);
 	armAsm->Bind(&not_taken);
 }
@@ -1790,13 +1895,12 @@ void recVU1_IBNE() {
 REC_VU1_LOWER_INTERP(IBLTZ)
 #else
 void recVU1_IBLTZ() {
-	const u32 bpc = vu1ComputePCRelTarget();
-	const u32 is  = W_Is(&VU1);
+	const u32 is = W_Is(&VU1);
 	a64::Label not_taken;
 	emitHazardVIRead(w6, is, true, w4);
 	armAsm->Cmp(w6, 0);
 	armAsm->B(&not_taken, a64::ge);
-	armAsm->Mov(w3, bpc);
+	emitPCRelTargetIntoW3();
 	emitInlineSetBranch(w3);
 	armAsm->Bind(&not_taken);
 }
@@ -1806,13 +1910,12 @@ void recVU1_IBLTZ() {
 REC_VU1_LOWER_INTERP(IBGTZ)
 #else
 void recVU1_IBGTZ() {
-	const u32 bpc = vu1ComputePCRelTarget();
-	const u32 is  = W_Is(&VU1);
+	const u32 is = W_Is(&VU1);
 	a64::Label not_taken;
 	emitHazardVIRead(w6, is, true, w4);
 	armAsm->Cmp(w6, 0);
 	armAsm->B(&not_taken, a64::le);
-	armAsm->Mov(w3, bpc);
+	emitPCRelTargetIntoW3();
 	emitInlineSetBranch(w3);
 	armAsm->Bind(&not_taken);
 }
@@ -1822,13 +1925,12 @@ void recVU1_IBGTZ() {
 REC_VU1_LOWER_INTERP(IBLEZ)
 #else
 void recVU1_IBLEZ() {
-	const u32 bpc = vu1ComputePCRelTarget();
-	const u32 is  = W_Is(&VU1);
+	const u32 is = W_Is(&VU1);
 	a64::Label not_taken;
 	emitHazardVIRead(w6, is, true, w4);
 	armAsm->Cmp(w6, 0);
 	armAsm->B(&not_taken, a64::gt);
-	armAsm->Mov(w3, bpc);
+	emitPCRelTargetIntoW3();
 	emitInlineSetBranch(w3);
 	armAsm->Bind(&not_taken);
 }
@@ -1838,13 +1940,12 @@ void recVU1_IBLEZ() {
 REC_VU1_LOWER_INTERP(IBGEZ)
 #else
 void recVU1_IBGEZ() {
-	const u32 bpc = vu1ComputePCRelTarget();
-	const u32 is  = W_Is(&VU1);
+	const u32 is = W_Is(&VU1);
 	a64::Label not_taken;
 	emitHazardVIRead(w6, is, true, w4);
 	armAsm->Cmp(w6, 0);
 	armAsm->B(&not_taken, a64::lt);
-	armAsm->Mov(w3, bpc);
+	emitPCRelTargetIntoW3();
 	emitInlineSetBranch(w3);
 	armAsm->Bind(&not_taken);
 }

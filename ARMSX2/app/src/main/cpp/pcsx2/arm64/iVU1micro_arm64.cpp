@@ -1779,6 +1779,16 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	const int64_t macflag_off    = (int64_t)offsetof(VURegs, macflag);
 	const int64_t statusflag_off = (int64_t)offsetof(VURegs, statusflag);
 	const int64_t clipflag_off   = (int64_t)offsetof(VURegs, clipflag);
+	const int64_t micro_off      = (int64_t)offsetof(VURegs, Micro);
+
+	// IbitHack forces per-op immediate decode from live micro memory (mirrors
+	// x86 microVU's ptr32[&curI] reads). When on, VU->code is loaded from
+	// VU->Micro[pc] at runtime instead of the JIT-baked instruction word so
+	// subsequent native ops + C wrappers pick up any post-compile patches.
+	// Natively-emitted IADDI/IADDIU/ISUBIU/LQ/SQ/ILW/ISW and PC-relative
+	// branches (B/BAL/IBxx) consult EmuConfig directly and emit runtime-decode
+	// paths of their own. Matches the VU0 Lower D-3 fix.
+	const bool use_ibit_hack = EmuConfig.Gamefixes.IbitHack;
 
 	// Stage C2: prime the pinned cycle register from memory. Every subsequent
 	// step 1 in the per-pair loop bumps x21 in place and does NOT store back
@@ -2319,7 +2329,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		//    Set VU->code at runtime (interpreter reads it for register fields).
 		//    Set VU1.code at compile time so the rec emitter resolves the correct
 		//    interpreter function pointer via VU1_UPPER_OPCODE[code & 0x3f].
-		armAsm->Mov(w4, upper);
+		if (use_ibit_hack)
+		{
+			// IbitHack: live read from micro memory so post-compile patches
+			// are visible to C wrappers + runtime-decode native paths.
+			armAsm->Ldr(x5, MemOperand(VU1_BASE_REG, micro_off));
+			armAsm->Ldr(w4, MemOperand(x5, (pc + 4)));
+		}
+		else
+		{
+			armAsm->Mov(w4, upper);
+		}
 		armAsm->Str(w4, MemOperand(VU1_BASE_REG, code_off));
 		VU1.code = upper; // compile-time context for the rec emitter
 		g_vu1NeedsFlags = pair_needs_flags[i]; // flag-deferral hint for FMAC emitters
@@ -2350,7 +2370,16 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				pending_xgkick_fire = false;
 			}
 			// Execute lower instruction (stalls already tested above).
-			armAsm->Mov(w4, lower);
+			if (use_ibit_hack)
+			{
+				// IbitHack: live read from micro memory.
+				armAsm->Ldr(x5, MemOperand(VU1_BASE_REG, micro_off));
+				armAsm->Ldr(w4, MemOperand(x5, pc));
+			}
+			else
+			{
+				armAsm->Mov(w4, lower);
+			}
 			armAsm->Str(w4, MemOperand(VU1_BASE_REG, code_off));
 			VU1.code = lower; // compile-time context
 			g_vu1CurrentPC = pc; // compile-time PC for native branches
