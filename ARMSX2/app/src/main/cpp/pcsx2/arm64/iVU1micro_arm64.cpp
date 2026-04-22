@@ -316,11 +316,16 @@ static void vu1CheckDTBits(u32 upper)
 
 // End-of-microprogram cleanup (called when ebit countdown hits 0).
 //
-// No XGKICK drain here: step 13 (this call) runs before step 14/15 within
-// the same pair, so a pair-local pending kick is always drained by step 15
-// or by the block-end drain in CompileBlock. And since vu1_XGKICK no longer
-// touches VU1.xgkickenable, there's no legacy interpreter-style pending
-// state to clean up on our behalf.
+// XGKICK drain:
+//   Non-hack path: step 15 or the block-end drain in CompileBlock handles
+//   pending_xgkick_fire, and vu1_XGKICK_fire_deferred never sets
+//   VU1.xgkickenable, so there's nothing to clean up here.
+//   Hack path: VU1.xgkickenable is set by vu1_XGKICK_hack_capture and
+//   deliberately persists across block boundaries (block-end drain gates
+//   on !xgkickhack). At ebit the microprogram is done, so any remaining
+//   paced bytes must be flushed here. Mirrors x86 mVUendProgram
+//   (microVU_Branch.inl:174-178, `if (CHECK_XGKICKHACK) mVU_XGKICK_SYNC(true)`)
+//   and VU1 interp VU1microInterp.cpp:197-198.
 static void vu1EbitDone(VURegs* VU)
 {
 	VU->VIBackupCycles = 0;
@@ -341,6 +346,14 @@ static void vu1EbitDone(VURegs* VU)
 	// the EE side before queueing and, with INSTANT_VU1, is never re-set),
 	// so the loop uses this flag as its termination signal.
 	s_vu1_program_ended = true;
+	// Flush any in-flight hack-mode paced transfer. No-op when xgkickenable
+	// is false (the non-hack JIT path never sets it — H-1 keeps it false
+	// even after hazard-fallback interp XGKICKs).
+	if (VU1.xgkickenable)
+		_vuXGKICKTransfer(0, true);
+	// Under INSTANT_VU1 the cycle reference switches from VU1.cycle to
+	// cpuRegs.cycle at ebit because VU1 runs synchronously with the EE —
+	// matches VU1microInterp.cpp:202-203.
 	if (INSTANT_VU1)
 		VU1.xgkicklastcycle = cpuRegs.cycle;
 }
@@ -1863,19 +1876,27 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// on memwrite pairs. Mirrors mVUregs.xgkickcycles / mVUlow.kickcycles
 	// accumulation at microVU_Compile.inl:779-786.
 	//
-	// mVUstall is reconstructed by simulating upstream's per-lane pipeline
-	// counters (mVUregs.VF[reg].{x,y,z,w} and mVUregs.VI[reg]) — FMAC
-	// writes set a lane to 4, every pair decrements by `1 + mVUstall`
-	// (saturating at 0), and each pair's stall is the max remaining
-	// count across all lanes it reads. This matches analyzeReg1 /
-	// analyzeVIreg1 / mVUincCycles / mVUsetCycles exactly. Under-counting
-	// cycles here would have _vuXGKICKTransfer drain too slowly relative
-	// to real GIF pacing, breaking games like Crash Twinsanity whose
-	// XGKICK-adjacent code is FMAC-heavy.
+	// mVUstall is reconstructed by simulating upstream's pipeline counters
+	// (mVUregs.VF[reg].{x,y,z,w}, mVUregs.VI[reg], mVUregs.q, mVUregs.p).
+	// Matches upstream analyzeReg1 / analyzeVIreg1 / analyzeQreg / analyzePreg
+	// + mVUincCycles + mVUsetCycles behaviour at cycle granularity:
 	//
-	// Q/P/xgkick pipeline stalls are omitted — rare enough that the
-	// FMAC+IALU approximation tracks upstream within a cycle or two per
-	// sync window, well inside GIF pacing tolerance.
+	//   - FMAC writes set a VF lane to 4 (analyzeReg2).
+	//   - Any VI write (lower IALU + LQ/SQ autoincrement + branch link)
+	//     installs 1-cycle latency (matches analyzeVIreg2(..., 1) at
+	//     every upstream call site).  The interp's _vuRegs* sets
+	//     _VURegsNum.cycles=0 for IALU, so we can't use that field —
+	//     we install 1 unconditionally for any op whose VIwrite hits a
+	//     real VI slot (bits 0..15; flag bits 16+ are masked out).
+	//   - FDIV writes Q with _VURegsNum.cycles (7 for DIV/SQRT, 13 for RSQRT).
+	//   - EFU writes P with _VURegsNum.cycles (12..54 depending on op).
+	//   - Reads stall on max remaining cycles across read lanes /
+	//     VI slots / pipelines.  P-read stall is (p - 1), matching
+	//     analyzePreg's off-by-one.
+	//   - xgkick pipeline (analyzeXGkick1) skipped: only active under
+	//     !CHECK_XGKICKHACK which disables this pre-walk entirely.
+	//   - R pipeline skipped: analyzeRreg never contributes to mVUstall
+	//     (it only stages mVUregsTemp.r, never reads mVUregs.r).
 	u32 kick_cycles_sync[VU1_MAX_BLOCK_PAIRS] = {};
 	if (xgkickhack)
 	{
@@ -1884,10 +1905,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// (X/Y/Z/W), so lane index = 3 - bit_position.
 		u8 pl_vf[32][4] = {};
 		u8 pl_vi[16]    = {};
+		u8 pl_q         = 0;
+		u8 pl_p         = 0;
 
 		auto decLaneArr = [](u8* arr, u32 n, u32 len) {
 			for (u32 k = 0; k < len; k++)
 				arr[k] = (arr[k] > n) ? static_cast<u8>(arr[k] - n) : 0;
+		};
+		auto decU8 = [](u8& v, u32 n) {
+			v = (v > n) ? static_cast<u8>(v - n) : 0;
 		};
 
 		u32 accum = 0;
@@ -1903,6 +1929,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// Step 1: baseline +1 cycle decrement (mVUincCycles(mVU, 1)).
 			decLaneArr(&pl_vf[0][0], 1, 32 * 4);
 			decLaneArr(&pl_vi[0],    1, 16);
+			decU8(pl_q, 1);
+			decU8(pl_p, 1);
 
 			// Step 2: compute mVUstall from this pair's reads. Upper is
 			// always decoded (even on I-bit pairs, since upper still runs
@@ -1942,6 +1970,25 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				readVF(lregs_i.VFread0, lregs_i.VFr0xyzw);
 				readVF(lregs_i.VFread1, lregs_i.VFr1xyzw);
 				readVI(lregs_i.VIread);
+
+				// Q read stall (analyzeQreg): FDIV ops back-to-back.
+				// analyzeQreg is only emitted by mVUanalyzeFDIV, and FDIV
+				// ops always have pipe==VUPIPE_FDIV.  Upper FMAC ops that
+				// use Q as src (ADDq/MADDq/...) do NOT call analyzeQreg in
+				// upstream x86 — matching that (slight inaccuracy but
+				// upstream-truth).
+				if (lregs_i.pipe == VUPIPE_FDIV && pl_q > stall)
+					stall = pl_q;
+
+				// P read stall (analyzePreg): EFU ops back-to-back.  The
+				// analyzePreg macro uses `(p ? p - 1 : 0)` — off by one
+				// vs Q/VF stalls (upstream quirk).
+				if (lregs_i.pipe == VUPIPE_EFU && pl_p > 0)
+				{
+					const u32 p_stall = pl_p - 1u;
+					if (p_stall > stall)
+						stall = p_stall;
+				}
 			}
 
 			// Step 3: advance by stall (mVUsetCycles -> mVUincCycles(stall)).
@@ -1949,14 +1996,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			{
 				decLaneArr(&pl_vf[0][0], stall, 32 * 4);
 				decLaneArr(&pl_vi[0],    stall, 16);
+				decU8(pl_q, stall);
+				decU8(pl_p, stall);
 			}
 
-			// Step 4: install writes from this pair. FMAC writes per-lane=4;
-			// IALU writes VI[reg]=cycles (typically 0 for IADD/ISUB-family,
-			// non-zero for branch-ALU which is rare on the memwrite path).
-			// tCycles in upstream takes max of existing vs new — since we
-			// just decremented and FMAC=4 is the max latency, straight
-			// assignment matches.
+			// Step 4: install writes from this pair.  tCycles(old, new)
+			// = max(old, new); since we just decremented to 0 on any
+			// lane/slot being written, a straight "set if larger" suffices.
 			auto writeVF = [&](u8 reg, u8 xyzw, u8 cyc) {
 				if (reg == 0 || xyzw == 0)
 					return;
@@ -1983,14 +2029,42 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				}
 			};
 
+			// Upper FMAC VF writes: 4-cycle pipeline latency.
 			if (uregs_i.pipe == VUPIPE_FMAC)
 				writeVF(uregs_i.VFwrite, uregs_i.VFwxyzw, 4);
+
 			if (!ibit_w)
 			{
+				// Lower VF writes (LQ/LQI/LQD/MOVE/MR32/MFIR family, all
+				// pipe==VUPIPE_FMAC in _vuRegs*): same 4-cycle latency.
 				if (lregs_i.pipe == VUPIPE_FMAC)
 					writeVF(lregs_i.VFwrite, lregs_i.VFwxyzw, 4);
-				else if (lregs_i.pipe == VUPIPE_IALU && lregs_i.cycles > 0)
-					writeVI(lregs_i.VIwrite, static_cast<u8>(lregs_i.cycles));
+
+				// Lower VI writes: upstream analyzeVIreg2 always uses
+				// aCycles=1, regardless of opcode.  Install for every
+				// op that sets VIwrite on a real VI slot (0..15).
+				// Covers IALU (IADD/ISUB/IADDI/IAND/IOR), LQI/LQD/SQI/SQD
+				// autoincrement, MTIR, branch link registers.
+				// FMAC ops that set VIwrite for flag bits (REG_ACC_FLAG=16+)
+				// get filtered by writeVI's `mask & 0xFFFFu`.
+				if (lregs_i.VIwrite)
+					writeVI(lregs_i.VIwrite, 1);
+
+				// Q write (FDIV): _VURegsNum.cycles holds latency (7/13).
+				if (lregs_i.pipe == VUPIPE_FDIV && lregs_i.cycles > 0)
+				{
+					const u8 cyc = static_cast<u8>(lregs_i.cycles);
+					if (pl_q < cyc)
+						pl_q = cyc;
+				}
+
+				// P write (EFU): _VURegsNum.cycles holds latency (12..54).
+				if (lregs_i.pipe == VUPIPE_EFU && lregs_i.cycles > 0)
+				{
+					const u8 cyc = static_cast<u8>(lregs_i.cycles);
+					if (pl_p < cyc)
+						pl_p = cyc;
+				}
 			}
 
 			// Step 5: accumulate per-pair kickcycles (microVU_Compile.inl:781).
