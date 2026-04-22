@@ -235,12 +235,12 @@ REC_MMI_STUB(PEXCW)
 #define ISTUB_PEXCH    0
 #define ISTUB_PROT3W   0
 
-// Complex / HI-LO-writing ops — keep as interpreter stubs
-#define ISTUB_PMFHL    1   // 5 modes via sa field
-#define ISTUB_PMTHL    1   // HI/LO write with 4 elements
-#define ISTUB_PEXT5    1   // RGB5→RGBA8 bit shuffle
-#define ISTUB_PPAC5    1   // RGBA8→RGB5 bit shuffle
-#define ISTUB_QFSRV    1   // variable byte-shift (runtime sa)
+// Complex ops — ported natively to match x86 coverage.
+#define ISTUB_PMFHL    0   // 4 native modes (LW/UW/LH/SH) + SLW/invalid → interp
+#define ISTUB_PMTHL    0   // mode 0 only (other modes are no-ops per x86)
+#define ISTUB_PEXT5    0   // RGB5→RGBA8 bit shuffle, mirrors x86 mask+shift chain
+#define ISTUB_PPAC5    0   // RGBA8→RGB5 bit shuffle, mirrors x86 mask+shift chain
+#define ISTUB_QFSRV    0   // 32-byte stage + unaligned 128b load from [tempqw+sa]
 #define ISTUB_PMADDH   0   // 8×16b MAC to HI/LO
 #define ISTUB_PHMADH   0   // horizontal MAC
 #define ISTUB_PMSUBH   0   // 8×16b MSUB to HI/LO
@@ -334,13 +334,106 @@ void recPLZCW()
 #if ISTUB_PMFHL
 void recPMFHL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PMFHL); }
 #else
-void recPMFHL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PMFHL); }
+// _Sa_ selects one of 5 extraction modes from HI/LO into Rd:
+//   0x00 LW  — Rd = {LO.L[0], HI.L[0], LO.L[2], HI.L[2]}
+//   0x01 UW  — Rd = {LO.L[1], HI.L[1], LO.L[3], HI.L[3]}
+//   0x02 SLW — saturate HI/LO doubleword to 32b signed; x86 falls to interp
+//   0x03 LH  — Rd.H = {LO[0], LO[2], HI[0], HI[2], LO[4], LO[6], HI[4], HI[6]}
+//   0x04 SH  — Rd.H = {sat(LO[0]), sat(LO[1]), sat(HI[0]), sat(HI[1]),
+//                      sat(LO[2]), sat(LO[3]), sat(HI[2]), sat(HI[3])}
+//              (signed 32→16 saturation per lane, then interleave L/H halves)
+// Mirrors x86 recPMFHL in iMMI.cpp:162-232.
+void recPMFHL()
+{
+	if (!_Rd_)
+		return;
+	armDelConstReg(_Rd_);
+
+	switch (_Sa_)
+	{
+		case 0x00: // LW
+			armAsm->Ldr(a64::q3, a64::MemOperand(RCPUSTATE, LO_OFFSET));
+			armAsm->Ldr(a64::q4, a64::MemOperand(RCPUSTATE, HI_OFFSET));
+			// Even-indexed 32b lanes of each, packed to low 64b, then interleave.
+			armAsm->Uzp1(a64::v3.V4S(), a64::v3.V4S(), a64::v3.V4S());
+			armAsm->Uzp1(a64::v4.V4S(), a64::v4.V4S(), a64::v4.V4S());
+			armAsm->Zip1(a64::v0.V4S(), a64::v3.V4S(), a64::v4.V4S());
+			armStoreGPR128(_Rd_, a64::q0);
+			return;
+
+		case 0x01: // UW
+			armAsm->Ldr(a64::q3, a64::MemOperand(RCPUSTATE, LO_OFFSET));
+			armAsm->Ldr(a64::q4, a64::MemOperand(RCPUSTATE, HI_OFFSET));
+			// Odd-indexed 32b lanes, then interleave.
+			armAsm->Uzp2(a64::v3.V4S(), a64::v3.V4S(), a64::v3.V4S());
+			armAsm->Uzp2(a64::v4.V4S(), a64::v4.V4S(), a64::v4.V4S());
+			armAsm->Zip1(a64::v0.V4S(), a64::v3.V4S(), a64::v4.V4S());
+			armStoreGPR128(_Rd_, a64::q0);
+			return;
+
+		case 0x02: // SLW — x86 falls through to interp (iMMI.cpp:193-198)
+			armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PMFHL);
+			return;
+
+		case 0x03: // LH
+			armAsm->Ldr(a64::q3, a64::MemOperand(RCPUSTATE, LO_OFFSET));
+			armAsm->Ldr(a64::q4, a64::MemOperand(RCPUSTATE, HI_OFFSET));
+			// Even-indexed 16b lanes of each. After Uzp1.V8H the low 4H of each
+			// holds {lane 0, 2, 4, 6}; interleaving as 4S packs them as halfword
+			// pairs per PS2 spec (same shape as x86's PSHUF.LW/HW 0x88 + PSRL.DQ
+			// + PUNPCK.LDQ sequence).
+			armAsm->Uzp1(a64::v3.V8H(), a64::v3.V8H(), a64::v3.V8H());
+			armAsm->Uzp1(a64::v4.V8H(), a64::v4.V8H(), a64::v4.V8H());
+			armAsm->Zip1(a64::v0.V4S(), a64::v3.V4S(), a64::v4.V4S());
+			armStoreGPR128(_Rd_, a64::q0);
+			return;
+
+		case 0x04: // SH — 32→16 signed saturating pack + swap middle 2 words
+			armAsm->Ldr(a64::q3, a64::MemOperand(RCPUSTATE, LO_OFFSET));
+			armAsm->Ldr(a64::q4, a64::MemOperand(RCPUSTATE, HI_OFFSET));
+			// Pack LO 4×s32 → low 4×s16, then HI 4×s32 → upper 4×s16.
+			armAsm->Sqxtn(a64::v0.V4H(), a64::v3.V4S());
+			armAsm->Sqxtn2(a64::v0.V8H(), a64::v4.V4S());
+			// Swap lanes 1 and 2 (PSHUF.D 0xd8 equivalent).
+			armAsm->Mov(a64::v1.V16B(), a64::v0.V16B());
+			armAsm->Ins(a64::v1.S(), 1, a64::v0.S(), 2);
+			armAsm->Ins(a64::v1.S(), 2, a64::v0.S(), 1);
+			armStoreGPR128(_Rd_, a64::q1);
+			return;
+
+		default:
+			// Invalid mode — x86 pxFails; we fall to interp for parity.
+			armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PMFHL);
+			return;
+	}
+}
 #endif
 
 #if ISTUB_PMTHL
 void recPMTHL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PMTHL); }
 #else
-void recPMTHL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PMTHL); }
+// _Sa_ == 0: LO.L[0,2] = Rs.L[0,2], HI.L[0,2] = Rs.L[1,3]; other lanes preserved.
+// Other _Sa_ values are silently no-op (matches x86 recPMTHL in iMMI.cpp:234-248,
+// which early-returns on _Sa_ != 0).
+void recPMTHL()
+{
+	if (_Sa_ != 0)
+		return;
+
+	armLoadGPR128(a64::q0, _Rs_);
+	armAsm->Ldr(a64::q3, a64::MemOperand(RCPUSTATE, LO_OFFSET));
+	armAsm->Ldr(a64::q4, a64::MemOperand(RCPUSTATE, HI_OFFSET));
+
+	// LO.L[0] ← Rs.L[0], LO.L[2] ← Rs.L[2] (lanes 1 and 3 of LO preserved).
+	armAsm->Ins(a64::v3.S(), 0, a64::v0.S(), 0);
+	armAsm->Ins(a64::v3.S(), 2, a64::v0.S(), 2);
+	// HI.L[0] ← Rs.L[1], HI.L[2] ← Rs.L[3] (lanes 1 and 3 of HI preserved).
+	armAsm->Ins(a64::v4.S(), 0, a64::v0.S(), 1);
+	armAsm->Ins(a64::v4.S(), 2, a64::v0.S(), 3);
+
+	armAsm->Str(a64::q3, a64::MemOperand(RCPUSTATE, LO_OFFSET));
+	armAsm->Str(a64::q4, a64::MemOperand(RCPUSTATE, HI_OFFSET));
+}
 #endif
 
 // ---- Packed shifts (immediate sa) ----
@@ -566,13 +659,99 @@ void recPPACB() { armMMIBinOp([]() { armAsm->Uzp1(a64::v0.V16B(), a64::v1.V16B()
 #if ISTUB_PEXT5
 void recPEXT5() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PEXT5); }
 #else
-void recPEXT5() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PEXT5); }
+// RGB5A1 (5+5+5+1 packed per 32-bit word) → RGBA8888 expansion.  Direct port
+// of x86 recPEXT5 shift/mask chain (iMMI.cpp:548-578) — per 32-bit lane:
+//   out.bit[  0.. 4] = in.bit[ 0.. 4] << 3   (R5 → R8 high-5)
+//   out.bit[  8..12] = in.bit[ 5.. 9] << 3   (G5 → G8 high-5)
+//   out.bit[ 16..20] = in.bit[10..14] << 3   (B5 → B8 high-5)
+//   out.bit[     31] = in.bit[    15]        (A1 → A8 MSB)
+// Low 3 bits of each channel and bits 5..7 of alpha are zero (PS2 behaviour).
+void recPEXT5()
+{
+	if (!_Rd_)
+		return;
+	armDelConstReg(_Rd_);
+	armLoadGPR128(a64::q0, _Rt_);
+
+	// v1 = t0reg (B5 bits + A1 bit pre-position), v2 = t1reg, v3 = D (R5 + G5).
+
+	// Extract G5 (bits 5..9) → bits 0..4 of v1.
+	armAsm->Shl(a64::v1.V4S(), a64::v0.V4S(), 22);
+	// Extract A1 (bit 15 of each halfword) → bit 0 of each halfword in v2.
+	armAsm->Ushr(a64::v2.V8H(), a64::v0.V8H(), 15);
+	armAsm->Ushr(a64::v1.V4S(), a64::v1.V4S(), 27);
+	// A1 → bit 20 of each 32b lane (so final shift<<11 puts it at bit 31).
+	armAsm->Shl(a64::v2.V4S(), a64::v2.V4S(), 20);
+	armAsm->Orr(a64::v1.V16B(), a64::v1.V16B(), a64::v2.V16B());
+
+	// Extract B5 (bits 10..14) → bits 0..4 of high halfword of each 32b lane
+	// (via dword shift 17 then word shift 11).
+	armAsm->Shl(a64::v2.V4S(), a64::v0.V4S(), 17);
+	// Extract R5 (bits 0..4) → bits 0..4 of v3.
+	armAsm->Shl(a64::v3.V4S(), a64::v0.V4S(), 27);
+	armAsm->Ushr(a64::v3.V4S(), a64::v3.V4S(), 27);
+	armAsm->Ushr(a64::v2.V8H(), a64::v2.V8H(), 11);
+	armAsm->Orr(a64::v3.V16B(), a64::v3.V16B(), a64::v2.V16B());
+
+	// Final assembly: low halfword of each 32b contains R5 (bits 0..4) + B5
+	// (bits 16..20 after the halfword shift).  << 3 places them at RGBA8
+	// positions.  t0reg holds G5 at bits 0..4 and A1 at bit 20; << 11 puts
+	// G5 at bit 11 (wait, matches PS2 RGB5→RGBA8 per x86 shift chain).
+	armAsm->Shl(a64::v3.V8H(), a64::v3.V8H(), 3);
+	armAsm->Shl(a64::v1.V8H(), a64::v1.V8H(), 11);
+	armAsm->Orr(a64::v3.V16B(), a64::v3.V16B(), a64::v1.V16B());
+
+	armStoreGPR128(_Rd_, a64::q3);
+}
 #endif
 
 #if ISTUB_PPAC5
 void recPPAC5() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PPAC5); }
 #else
-void recPPAC5() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::PPAC5); }
+// RGBA8888 → RGB5A1 compression.  Direct port of x86 recPPAC5 (iMMI.cpp:581-613):
+//   out.bit[ 0.. 4] = in.bit[ 3.. 7]   (R high 5)
+//   out.bit[ 5.. 9] = in.bit[11..15]   (G high 5)
+//   out.bit[10..14] = in.bit[19..23]   (B high 5)
+//   out.bit[    15] = in.bit[    31]   (A MSB)
+//   out.bit[16..31] = 0
+// The x86 sequence builds R+G into D, B+A into t0, then uses a 0x3FF mask
+// to merge (keep R+G from D, B+A from t0).  We mirror via NEON Bic.
+void recPPAC5()
+{
+	if (!_Rd_)
+		return;
+	armDelConstReg(_Rd_);
+	armLoadGPR128(a64::q0, _Rt_);
+
+	// v1 = t0reg (B5 + A1 bit), v2 = t1reg (scratch + final mask), v3 = D (R5 + G5).
+
+	// t0 = (in << 8) >> 17  → bits 10..14 of T at bits 0..4 of v1.
+	armAsm->Shl(a64::v1.V4S(), a64::v0.V4S(), 8);
+	// t1 = (in >> 31) << 15 → bit 31 of T at bit 15 of v2.
+	armAsm->Ushr(a64::v2.V4S(), a64::v0.V4S(), 31);
+	armAsm->Ushr(a64::v1.V4S(), a64::v1.V4S(), 17);
+	armAsm->Shl(a64::v2.V4S(), a64::v2.V4S(), 15);
+	armAsm->Orr(a64::v1.V16B(), a64::v1.V16B(), a64::v2.V16B());
+
+	// D = (in << 24) >> 27 | (in >> 11) << 5  → R5 at bits 0..4, G5 at bits 5..9.
+	armAsm->Ushr(a64::v2.V4S(), a64::v0.V4S(), 11);
+	armAsm->Shl(a64::v3.V4S(), a64::v0.V4S(), 24);
+	armAsm->Ushr(a64::v3.V4S(), a64::v3.V4S(), 27);
+	armAsm->Shl(a64::v2.V4S(), a64::v2.V4S(), 5);
+	armAsm->Orr(a64::v3.V16B(), a64::v3.V16B(), a64::v2.V16B());
+
+	// Build 0x3FF mask per 32b lane (all-ones >> 22) to keep only R+G bits of D,
+	// then OR in B+A from t0 (via Bic for PANDN semantics).
+	armAsm->Movi(a64::v2.V16B(), 0xFF);
+	armAsm->Ushr(a64::v2.V4S(), a64::v2.V4S(), 22);
+	armAsm->And(a64::v3.V16B(), a64::v3.V16B(), a64::v2.V16B());
+	// PANDN(t1, t0) → t1 = (~t1) & t0.  NEON Bic(Vd, Vn, Vm) = Vn AND NOT Vm,
+	// so Bic(v2, v1, v2) = v1 AND NOT v2.
+	armAsm->Bic(a64::v2.V16B(), a64::v1.V16B(), a64::v2.V16B());
+	armAsm->Orr(a64::v3.V16B(), a64::v3.V16B(), a64::v2.V16B());
+
+	armStoreGPR128(_Rd_, a64::q3);
+}
 #endif
 
 #if ISTUB_PADDUW
@@ -731,7 +910,56 @@ void recPSRLVW()
 #if ISTUB_QFSRV
 void recQFSRV() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::QFSRV); }
 #else
-void recQFSRV() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::MMI::QFSRV); }
+// 32-byte staging buffer for QFSRV's "concatenate Rt||Rs, extract 16B at +sa".
+// File-local static: EE JIT dispatches single-threaded so no synchronisation
+// is needed (same assumption as the XGKICK scratch in iVU1Lower_arm64.cpp).
+alignas(16) static u32 qfsrv_tempqw[8];
+
+// QFSRV: Rd = bytes[sa..sa+15] of the 32-byte concatenation {Rt, Rs},
+// where `sa` is a runtime value in cpuRegs.sa (0..15 per PS2 spec).
+// Mirrors x86 recQFSRV (iMMI.cpp:1268-1297) including the "_Rs_ == _Rt_ + 1"
+// fast path that avoids the staging buffer when the two GPRs are already
+// contiguous in cpuRegs.GPR.r[].
+void recQFSRV()
+{
+	if (!_Rd_)
+		return;
+	armDelConstReg(_Rd_);
+
+	if (_Rs_ == _Rt_ + 1)
+	{
+		// Fast path: adjacent GPRs are contiguous in memory.  Flush any
+		// cached/const state on Rt and Rs (matches x86 _flushEEreg), then
+		// load directly from &cpuRegs.GPR.r[_Rt_] + sa.
+		armFlushConstReg(_Rt_);
+		armGprFlush(_Rt_);
+		armFlushConstReg(_Rs_);
+		armGprFlush(_Rs_);
+
+		armAsm->Add(RSCRATCHGPR, RCPUSTATE, GPR_OFFSET(_Rt_));
+		armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, SA_OFFSET));
+		armAsm->Add(RSCRATCHGPR, RSCRATCHGPR, RSCRATCHGPR2);
+		armAsm->Ldr(a64::q0, a64::MemOperand(RSCRATCHGPR));
+		armStoreGPR128(_Rd_, a64::q0);
+		return;
+	}
+
+	// General path: stage Rt and Rs contiguously in qfsrv_tempqw, then do
+	// unaligned 128b load from [tempqw + sa].  ARM64 LDR Q supports unaligned
+	// access by default.
+	armLoadGPR128(a64::q0, _Rt_);
+	armLoadGPR128(a64::q1, _Rs_);
+
+	armAsm->Mov(RSCRATCHGPR, reinterpret_cast<uintptr_t>(qfsrv_tempqw));
+	armAsm->Str(a64::q0, a64::MemOperand(RSCRATCHGPR));
+	armAsm->Str(a64::q1, a64::MemOperand(RSCRATCHGPR, 16));
+
+	armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, SA_OFFSET));
+	armAsm->Add(RSCRATCHGPR, RSCRATCHGPR, RSCRATCHGPR2);
+	armAsm->Ldr(a64::q0, a64::MemOperand(RSCRATCHGPR));
+
+	armStoreGPR128(_Rd_, a64::q0);
+}
 #endif
 
 // ============================================================================
