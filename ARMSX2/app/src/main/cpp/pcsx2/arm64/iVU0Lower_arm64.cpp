@@ -1444,15 +1444,8 @@ void recVU0_MTIR() {
 REC_VU0_LOWER_INTERP(MFP)
 #else
 void recVU0_MFP() {
-	const u32 ft = (VU0.code >> 16) & 0x1F;
-	if (ft == 0) return;
-	const u32 xyzw = (VU0.code >> 21) & 0xF;
-	// Load P register (32-bit, stored as VI[REG_P].UL).
-	armAsm->Ldr(w0, MemOperand(VU0_BASE_REG, viOff(REG_P)));
-	if (xyzw & 8) armAsm->Str(w0, MemOperand(VU0_BASE_REG, vfOff(ft) + 0));
-	if (xyzw & 4) armAsm->Str(w0, MemOperand(VU0_BASE_REG, vfOff(ft) + 4));
-	if (xyzw & 2) armAsm->Str(w0, MemOperand(VU0_BASE_REG, vfOff(ft) + 8));
-	if (xyzw & 1) armAsm->Str(w0, MemOperand(VU0_BASE_REG, vfOff(ft) + 12));
+	// P register only exists on VU1 (it's the EFU result register).
+	// MFP on VU0 is a no-op — matches interpreter _vuMFP in VUops.cpp.
 }
 #endif
 
