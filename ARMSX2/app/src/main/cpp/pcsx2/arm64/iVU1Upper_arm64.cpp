@@ -843,51 +843,41 @@ static void emitITOF(int fbits)
 }
 
 // ============================================================================
-//  C wrappers for CLIP / OPMULA / OPMSUB
+//  C wrappers for OPMULA / OPMSUB (ISTUB fallback path only)
 // ============================================================================
 
-static float vu1Double(u32 f)
-{
-	switch (f & 0x7f800000)
-	{
-		case 0x0:
-			f &= 0x80000000;
-			return *(float*)&f;
-		case 0x7f800000:
-			if (CHECK_VU_SIGN_OVERFLOW(1))
-			{
-				u32 d = (f & 0x80000000) | 0x7f7fffff;
-				return *(float*)&d;
-			}
-			break;
-	}
-	return *(float*)&f;
-}
-
+// OPMULA: ACC.xyz = cross-like multiply (fs.y*ft.z, fs.z*ft.x, fs.x*ft.y)
+// x86 microVU (microVU_Upper.inl:422-445) emits raw SSE_MULPS on the shuffled
+// operands with NO mVUclamp2 call. Matches that: read VF.f directly (VU FPCR
+// handles denormal flush via FTZ mode), no vu1Double input clamping.
 static void vu1_OPMULA(VURegs* VU)
 {
 	const u32 fs = (VU->code >> 11) & 0x1F;
 	const u32 ft = (VU->code >> 16) & 0x1F;
-	VU->ACC.i.x = VU_MACx_UPDATE(VU, vu1Double(VU->VF[fs].i.y) * vu1Double(VU->VF[ft].i.z));
-	VU->ACC.i.y = VU_MACy_UPDATE(VU, vu1Double(VU->VF[fs].i.z) * vu1Double(VU->VF[ft].i.x));
-	VU->ACC.i.z = VU_MACz_UPDATE(VU, vu1Double(VU->VF[fs].i.x) * vu1Double(VU->VF[ft].i.y));
+	VU->ACC.i.x = VU_MACx_UPDATE(VU, VU->VF[fs].f.y * VU->VF[ft].f.z);
+	VU->ACC.i.y = VU_MACy_UPDATE(VU, VU->VF[fs].f.z * VU->VF[ft].f.x);
+	VU->ACC.i.z = VU_MACz_UPDATE(VU, VU->VF[fs].f.x * VU->VF[ft].f.y);
 	VU_STAT_UPDATE(VU);
 }
 
+// OPMSUB: VF[fd].xyz = ACC.xyz - cross-like multiply (fs.y*ft.z, fs.z*ft.x, fs.x*ft.y)
+// x86 microVU (microVU_Upper.inl:447-474) emits SSE_MULPS + SSE_SUBPS without
+// mVUclamp2 on operands. Match: read VF.f/ACC.f directly.
+// VF[0] writes are discarded (flags still updated).
 static void vu1_OPMSUB(VURegs* VU)
 {
 	const u32 fs = (VU->code >> 11) & 0x1F;
 	const u32 ft = (VU->code >> 16) & 0x1F;
 	const u32 fd = (VU->code >>  6) & 0x1F;
-	float ftx = vu1Double(VU->VF[ft].i.x);
-	float fty = vu1Double(VU->VF[ft].i.y);
-	float ftz = vu1Double(VU->VF[ft].i.z);
-	float fsx = vu1Double(VU->VF[fs].i.x);
-	float fsy = vu1Double(VU->VF[fs].i.y);
-	float fsz = vu1Double(VU->VF[fs].i.z);
-	u32 rx = VU_MACx_UPDATE(VU, vu1Double(VU->ACC.i.x) - fsy * ftz);
-	u32 ry = VU_MACy_UPDATE(VU, vu1Double(VU->ACC.i.y) - fsz * ftx);
-	u32 rz = VU_MACz_UPDATE(VU, vu1Double(VU->ACC.i.z) - fsx * fty);
+	const float ftx = VU->VF[ft].f.x;
+	const float fty = VU->VF[ft].f.y;
+	const float ftz = VU->VF[ft].f.z;
+	const float fsx = VU->VF[fs].f.x;
+	const float fsy = VU->VF[fs].f.y;
+	const float fsz = VU->VF[fs].f.z;
+	u32 rx = VU_MACx_UPDATE(VU, VU->ACC.f.x - fsy * ftz);
+	u32 ry = VU_MACy_UPDATE(VU, VU->ACC.f.y - fsz * ftx);
+	u32 rz = VU_MACz_UPDATE(VU, VU->ACC.f.z - fsx * fty);
 	if (fd != 0)
 	{
 		VU->VF[fd].i.x = rx;
