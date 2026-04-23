@@ -792,8 +792,11 @@ static void emitFTOI(int fbits)
 	const u32 xyzw = (VU1.code >> 21) & 0xF;
 	if (ft == 0) return;
 	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
-	if (CHECK_VU_SIGN_OVERFLOW(1))
+	const bool clampInputs = CHECK_VU_SIGN_OVERFLOW(1);
+	if (clampInputs)
 	{
+		// FMINNM/FMAXNM against ±MAX_FLOAT: NaN treated as "missing" and
+		// replaced, so NaN cannot reach FCVTZS below.
 		emitVuClampSetup();
 		emitVuClampVec(v0.V4S());
 	}
@@ -801,6 +804,30 @@ static void emitFTOI(int fbits)
 		armAsm->Fcvtzs(v1.V4S(), v0.V4S(), fbits);
 	else
 		armAsm->Fcvtzs(v1.V4S(), v0.V4S());
+
+	// NaN fixup (only when input clamp is off).
+	//
+	// Interpreter's floatToInt (VUops.cpp:879) checks post-multiply exponent:
+	//   if ((uvalue & 0x7f800000) >= 0x4f000000)
+	//       return (sign) ? INT_MIN : INT_MAX;
+	// which covers finite overflow (matches ARM64 FCVTZS saturation), ±Inf
+	// (also matches FCVTZS: +Inf→INT_MAX, -Inf→INT_MIN), AND NaN (where
+	// ARM64 FCVTZS diverges by returning 0).
+	//
+	// Replicate the NaN case: overwrite NaN lanes with sign-based
+	// INT_MIN/INT_MAX. Finite + Inf already match, so we only need a
+	// NaN-specific mask (IEEE self-equality: NaN != NaN).
+	if (!clampInputs)
+	{
+		armAsm->Fcmeq(v2.V4S(), v0.V4S(), v0.V4S()); // 1s for non-NaN, 0s for NaN
+		armAsm->Mvn(v2.V16B(), v2.V16B());            // invert → 1s for NaN
+		armAsm->Sshr(v3.V4S(), v0.V4S(), 31);        // v3 = 0 (pos) or 0xFFFFFFFF (neg)
+		armAsm->Mov(w0, 0x7FFFFFFFu);
+		armAsm->Dup(v4.V4S(), w0);
+		armAsm->Eor(v3.V16B(), v3.V16B(), v4.V16B()); // v3 = 0x7FFFFFFF (pos) or 0x80000000 (neg)
+		armAsm->Bit(v1.V16B(), v3.V16B(), v2.V16B()); // blend: NaN lanes ← v3
+	}
+
 	if (xyzw == 0xF)
 	{
 		armAsm->Str(q1, MemOperand(VU1_BASE_REG, vfOff(ft)));
