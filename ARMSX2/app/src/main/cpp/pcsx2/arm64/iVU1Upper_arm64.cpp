@@ -673,8 +673,21 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 fs = (VU1.code >> 11) & 0x1F; \
 		const u32 ft = (VU1.code >> 16) & 0x1F; \
 		const u32 xyzw = (VU1.code >> 21) & 0xF; \
+		const int64_t dst = (toACC) ? accOff() : vfOff(fd); \
+		/* doSafeSub: SUB/SUBA (op=1) full-vector with fs==ft forces +0. \
+		 * Mirrors x86 microVU_Upper.inl:173-187. Avoids INF-INF=NaN and  \
+		 * NaN-NaN=NaN, either of which would corrupt the Z MAC flag.    \
+		 * Broadcast variants (SUBx/y/z/w/q/i) are NOT affected per x86. */ \
+		if ((op) == 1 && fs == ft) { \
+			armAsm->Movi(v5.V4S(), 0); \
+			if (g_vu1NeedsFlags) { \
+				emitFmacWriteback(dst, xyzw); \
+			} else { \
+				emitFmacStoreMasked(dst, xyzw); \
+			} \
+			return; \
+		} \
 		armAsm->Ldr(q1, MemOperand(VU1_BASE_REG, vfOff(ft))); \
-		int64_t dst = (toACC) ? accOff() : vfOff(fd); \
 		emitBinaryFmac(op, fs, dst, xyzw); \
 	}
 
