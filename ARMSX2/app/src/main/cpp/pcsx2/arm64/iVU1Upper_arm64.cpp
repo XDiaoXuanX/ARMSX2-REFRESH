@@ -374,22 +374,28 @@ static void emitLoadQI(int64_t vi_off)
 // The interpreter calls vuDouble() on every FMAC input, which:
 //   exp=0 (denormal): flush to ±0 (ARM64 FZ mode handles this)
 //   exp=0xFF (inf/NaN): clamp to ±MAX_FLOAT (gated on CHECK_VU_SIGN_OVERFLOW)
-// We use FMINNM/FMAXNM to clamp: these treat NaN as "missing" (return the
-// non-NaN operand), so both ±INF and NaN are clamped to ±MAX_FLOAT.
-// Setup: load MAX_FLOAT into v6, -MAX_FLOAT into v7.
+// Mirrors the x86 JIT's sign-preserving operand clamp (mVUclamp2 in
+// microVU_Clamp.inl): SMIN against +MAX_FLOAT handles positive overflow,
+// UMIN against -MAX_FLOAT (as unsigned bit pattern 0xFF7FFFFF) handles
+// negative overflow, leaving the sign bit of -NaN / -INF intact.
+// Setup: load +MAX_FLOAT into v6, -MAX_FLOAT into v7.
 
 static void emitVuClampSetup()
 {
 	armAsm->Mov(w0, 0xFFFF);
-	armAsm->Movk(w0, 0x7F7F, 16); // w0 = 0x7F7FFFFF = MAX_FLOAT
+	armAsm->Movk(w0, 0x7F7F, 16); // w0 = 0x7F7FFFFF = +MAX_FLOAT
 	armAsm->Dup(v6.V4S(), w0);
-	armAsm->Fneg(v7.V4S(), v6.V4S());
+	armAsm->Fneg(v7.V4S(), v6.V4S()); // v7 = 0xFF7FFFFF = -MAX_FLOAT
 }
 
 static void emitVuClampVec(const VRegister& vn)
 {
-	armAsm->Fminnm(vn, vn, v6.V4S());
-	armAsm->Fmaxnm(vn, vn, v7.V4S());
+	// Signed 32-bit min clamps +overflow (+NaN/+INF > +MAX as signed int).
+	armAsm->Smin(vn, vn, v6.V4S());
+	// Unsigned 32-bit min clamps -overflow (-NaN/-INF unsigned > -MAX's
+	// unsigned bit pattern 0xFF7FFFFF). Positive values (<= 0x7F7FFFFF)
+	// are smaller than 0xFF7FFFFF unsigned and pass through unchanged.
+	armAsm->Umin(vn, vn, v7.V4S());
 }
 
 // --- Binary FMAC: dst = VF[fs] OP src2 ---
