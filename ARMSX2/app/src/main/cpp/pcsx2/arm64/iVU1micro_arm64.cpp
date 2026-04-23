@@ -132,6 +132,22 @@ static inline bool isMemWriteOp(u32 lower)
 	return false;
 }
 
+// Predicate: does this lower instruction word decode to a NOP on VU1?
+// Only WAITQ and WAITP — the EFU ops that are NOP on VU0 are real on VU1.
+// Used by step 8 to elide the Mov+Str+emitVU1Lower scaffold for these ops
+// since recVU1_WAITQ / recVU1_WAITP emit zero instructions.
+//
+// Opcode encodings:
+//   WAITQ : top7 = 0x40, sub = 0x3F (T3_11), idx = 0x0E
+//   WAITP : top7 = 0x40, sub = 0x3F (T3_11), idx = 0x1E
+static inline bool isVU1LowerNOP(u32 lower)
+{
+	if ((lower >> 25) != 0x40u) return false;
+	if ((lower & 0x3fu) != 0x3Fu) return false;
+	const u32 idx = (lower >> 6) & 0x1fu;
+	return idx == 0x0Eu || idx == 0x1Eu;
+}
+
 // ============================================================================
 //  Rec emitter dispatch entry points (defined in iVU1Upper/Lower_arm64.cpp).
 //  These replaced recVU1_UpperTable[64] / recVU1_LowerTable[128] — direct
@@ -542,6 +558,64 @@ static bool PairHasBranch(u32 pc)
 	return lregs.pipe == VUPIPE_BRANCH;
 }
 
+// Detect pairs containing an illegal/reserved lower opcode so we can truncate
+// the block at them. Mirrors x86 microVU's mVUcheckBadOp (microVU_Compile.inl)
+// which sets mVUinfo.isEOB when dispatch routes to Unknown. VU1 uses a switch
+// dispatcher (emitVU1Lower) so we enumerate valid top-level encodings here
+// rather than doing pointer comparison like VU0. Sub-table Unknown ops still
+// fall through to interp at runtime and are harmless — they just don't get
+// the tighter block bound.
+//
+// I-bit pairs are exempted: their lower word is the I-register literal, not
+// an opcode. BIOS writes a reversed-NOP pair (0x8000033c for the upper half)
+// that's excluded to avoid a spurious truncation on the BIOS boot path.
+static bool PairHasBadOp(u32 pc)
+{
+	const u32 upper = *reinterpret_cast<const u32*>(VU1.Micro + pc + 4);
+	if ((upper >> 31) & 1)
+		return false;
+	if (upper == 0x8000033c)
+		return false;
+	const u32 lower = *reinterpret_cast<const u32*>(VU1.Micro + pc);
+	const u32 top7  = lower >> 25;
+	// Valid top-level encodings per emitVU1Lower switch dispatcher.
+	switch (top7)
+	{
+		case 0x00: // LQ
+		case 0x01: // SQ
+		case 0x04: // ILW
+		case 0x05: // ISW
+		case 0x08: // IADDIU
+		case 0x09: // ISUBIU
+		case 0x10: // FCEQ
+		case 0x11: // FCSET
+		case 0x12: // FCAND
+		case 0x13: // FCOR
+		case 0x14: // FSEQ
+		case 0x15: // FSSET
+		case 0x16: // FSAND
+		case 0x17: // FSOR
+		case 0x18: // FMEQ
+		case 0x1A: // FMAND
+		case 0x1B: // FMOR
+		case 0x1C: // FCGET
+		case 0x20: // B
+		case 0x21: // BAL
+		case 0x24: // JR
+		case 0x25: // JALR
+		case 0x28: // IBEQ
+		case 0x29: // IBNE
+		case 0x2C: // IBLTZ
+		case 0x2D: // IBGTZ
+		case 0x2E: // IBLEZ
+		case 0x2F: // IBGEZ
+		case 0x40: // LowerOP sub-dispatch
+			return false;
+		default:
+			return true;
+	}
+}
+
 static u32 AnalyzeBlock(u32 startPC)
 {
 	u32 pairs = 0;
@@ -551,6 +625,7 @@ static u32 AnalyzeBlock(u32 startPC)
 	{
 		const bool ebit   = PairHasEbit(pc);
 		const bool branch = PairHasBranch(pc);
+		const bool bad_op = PairHasBadOp(pc);
 
 		pairs++;
 		pc = (pc + 8) & (VU1_PROGSIZE - 1);
@@ -561,6 +636,13 @@ static u32 AnalyzeBlock(u32 startPC)
 			pairs++;
 			break;
 		}
+		// Bad op: include the current pair (still dispatches to interp) but
+		// no delay slot, and truncate the block. Matches x86 microVU's
+		// mVUinfo.isEOB on bad op. Benefit is earlier block boundary so we
+		// re-enter dispatch and don't keep compiling past a definitely-bad
+		// opcode. Same pattern as VU0 C-7 fix.
+		if (bad_op)
+			break;
 	}
 
 	return pairs;
@@ -2368,13 +2450,19 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// branch rec emission so VU->branch / branchpc stay untouched.
 		// Same pattern as VU0 C-5 fix.
 		const bool suppress_branch = !ibit && branch_pipe && prev_was_ebit;
+		// Also elide the entire lower emit scaffold (VU->code store +
+		// dispatch) when the lower is a known-NOP on VU1 (WAITP/WAITQ) —
+		// matches x86 microVU's mVUlow.isNOP pass1 optimization. Saves
+		// ~3 emitted instructions per NOP op plus the switch dispatch.
+		// Same pattern as VU0 C-6 fix.
+		const bool lower_is_nop = !ibit && isVU1LowerNOP(lower);
 		if (ibit)
 		{
 			// I-bit: lower field is a float immediate — load into VI[REG_I].
 			armAsm->Mov(w4, lower);
 			armAsm->Str(w4, MemOperand(VU1_BASE_REG, regi_off));
 		}
-		else
+		else if (!lower_is_nop)
 		{
 			// 8a. (non-hack) Back-to-back XGKICK sequencing. If the prior
 			//     pair captured an XGKICK and this pair's lower is also an
