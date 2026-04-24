@@ -1750,8 +1750,27 @@ static void recExecute()
 		// for(;;) loop.
 		if (fastjmp_set(&m_SetJmp_CancelInstruction))
 		{
-			// Landed here from recCancelInstruction. Add a small cycle bump
-			// so the system makes progress, then check events and re-dispatch.
+			// Landed here from recCancelInstruction, triggered by an interp
+			// stub calling Cpu->CancelInstruction() mid-block (Address Error,
+			// TLB miss, etc.). The interp has already written cpuRegs.pc via
+			// the pre-increment in execI, so we don't need to restore PC.
+			//
+			// Invariant on entry: the faulting op's armEmitFlushCycleBeforeCall
+			// already wrote `cpuRegs.cycle = nextEventCycle + RCYCLE`, so cycle
+			// reflects the block's progress up to (but not including) whatever
+			// the interp would have consumed if it had completed normally.
+			//
+			// Bump by 8 = "one scaled-instruction worth" (DEFAULT_SCALED_BLOCKS
+			// right-shifts s_nBlockCycles by 3, so scaling factor is 8×; a base
+			// 1-cycle op contributes 8 to cpuRegs.cycle). This guarantees
+			// forward progress so we can't loop forever on a persistently
+			// faulting address, and gives any hardware-state-dependent events
+			// a chance to fire via the check below.
+			//
+			// The re-dispatch into EnterRecompiledCode reads the current
+			// cpuRegs.pc (written by the interp before the cancel) and rebuilds
+			// RCYCLE from (cycle - nextEventCycle), restoring the Phase B cycle
+			// invariant even after this manual bump.
 			cpuRegs.cycle += 8;
 			if (cpuRegs.cycle >= cpuRegs.nextEventCycle)
 				_cpuEventTest_Shared();
