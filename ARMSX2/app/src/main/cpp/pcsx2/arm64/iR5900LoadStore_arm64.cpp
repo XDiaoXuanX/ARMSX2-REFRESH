@@ -181,7 +181,10 @@ namespace OpcodeImpl {
 // ---- LB — Load Byte (sign-extended to 64 bits) ----
 
 #if ISTUB_LB
-void recLB() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LB); }
+// ESPN-counter event-test fix — emit BEFORE armCallInterpreter so the const
+// tracker still holds _Rs_ when armMaybeForceEventTestAfterRead reads it.
+// armCallInterpreter would otherwise drop const tracking on return.
+void recLB() { armMaybeForceEventTestAfterRead(); armCallInterpreter(R5900::Interpreter::OpcodeImpl::LB); }
 #else
 void recLB()
 {
@@ -217,7 +220,7 @@ void recLB()
 // ---- LBU — Load Byte Unsigned ----
 
 #if ISTUB_LBU
-void recLBU() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LBU); }
+void recLBU() { armMaybeForceEventTestAfterRead(); armCallInterpreter(R5900::Interpreter::OpcodeImpl::LBU); }
 #else
 void recLBU()
 {
@@ -247,7 +250,7 @@ void recLBU()
 // ---- LH — Load Halfword (sign-extended) ----
 
 #if ISTUB_LH
-void recLH() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LH); }
+void recLH() { armMaybeForceEventTestAfterRead(); armCallInterpreter(R5900::Interpreter::OpcodeImpl::LH); }
 #else
 void recLH()
 {
@@ -278,7 +281,7 @@ void recLH()
 // ---- LHU — Load Halfword Unsigned ----
 
 #if ISTUB_LHU
-void recLHU() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LHU); }
+void recLHU() { armMaybeForceEventTestAfterRead(); armCallInterpreter(R5900::Interpreter::OpcodeImpl::LHU); }
 #else
 void recLHU()
 {
@@ -308,7 +311,7 @@ void recLHU()
 // ---- LW — Load Word (sign-extended) ----
 
 #if ISTUB_LW
-void recLW() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LW); }
+void recLW() { armMaybeForceEventTestAfterRead(); armCallInterpreter(R5900::Interpreter::OpcodeImpl::LW); }
 #else
 void recLW()
 {
@@ -338,7 +341,7 @@ void recLW()
 // ---- LWU — Load Word Unsigned ----
 
 #if ISTUB_LWU
-void recLWU() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LWU); }
+void recLWU() { armMaybeForceEventTestAfterRead(); armCallInterpreter(R5900::Interpreter::OpcodeImpl::LWU); }
 #else
 void recLWU()
 {
