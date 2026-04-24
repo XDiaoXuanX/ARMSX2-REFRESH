@@ -140,6 +140,108 @@ enum class FmacWritebackMode { GenericFmac, OpmXYZ };
 // Writes VU->macflag and VU->statusflag via the pinned regs (VU1_MACFLAG_REG
 // / VU1_STATUSFLAG_REG) rather than memory — Phase-7 caches all three flag
 // fields in callee-saved registers for the duration of the block.
+
+// Partial-lane store peephole. Replaces the old Ldr+Mov+Str merge pattern
+// (2+N insns for N set lanes) with targeted stores that touch only the
+// memory lanes selected by `xyzw`. Lanes not in `xyzw` are untouched in
+// memory — equivalent semantics to the merge-load-store, since the old
+// code merged selected lanes into a full quadword but the non-selected
+// lanes came straight from memory and went straight back.
+//
+// Key vixl gotcha: `st1 {vt.<T>}[lane], [xn, #imm]` requires imm==0
+// (LoadStoreStructVerify asserts in debug; silently miscompiles in
+// release). So for any store at a non-zero offset, we either use a
+// scalar Str form (s/d/q — those DO support immediate offsets) or
+// rearrange the source lanes into lane 0/low-64 of a scratch first.
+//
+// Scratch: v2 (caller-saved, unused by writeback step G / emitBinaryFmac
+// aftermath / MIN/MAX/ABS tail — all three call sites treat v2 as dead
+// after this function returns).
+//
+// Expects result in v5 (the FMAC pipeline output). base_off is the byte
+// offset from VU1_BASE_REG to the destination VECTOR (vfOff(fd) /
+// accOff() / etc.). xyzw must be nonzero and not 0xF — the caller
+// handles those via full-store / no-op respectively.
+//
+// xyzw bit layout: bit 3 = X (lane 0 / offset 0),
+//                  bit 2 = Y (lane 1 / offset 4),
+//                  bit 1 = Z (lane 2 / offset 8),
+//                  bit 0 = W (lane 3 / offset 12).
+//
+// Instruction count per mask (vs old 2+N pattern):
+//   X only  (0x8):              1 insn  (was 3)
+//   XY only (0xC):              1 insn  (was 4)
+//   other single (0x1/2/4):    2 insns (was 3)
+//   ZW only  (0x3):             2 insns (was 4)
+//   split doubles / triples:   2–3 insns (was 4–5)
+static void emitPartialLaneStore(int64_t base_off, u32 xyzw)
+{
+	// Helper: store v5's lane L to [base + L*4] via `Mov v2.s[0], v5.s[L]
+	// + Str s2, [base + L*4]`. Two insns; used for non-lane-0 singles.
+	auto emitLaneS = [&](int lane) {
+		armAsm->Mov(v2.V4S(), 0, v5.V4S(), lane);
+		armAsm->Str(s2, MemOperand(VU1_BASE_REG, base_off + lane * 4));
+	};
+
+	switch (xyzw)
+	{
+		// --- Single-lane stores ---
+		case 0x8: // X: Str s5 at +0 (1 insn, lane 0 maps straight to offset 0)
+			armAsm->Str(s5, MemOperand(VU1_BASE_REG, base_off + 0));
+			return;
+		case 0x4: emitLaneS(1); return; // Y
+		case 0x2: emitLaneS(2); return; // Z
+		case 0x1: emitLaneS(3); return; // W
+
+		// --- Adjacent dual-lane stores ---
+		case 0xC: // XY: Str d5 at +0 (1 insn, low 64 maps straight)
+			armAsm->Str(d5, MemOperand(VU1_BASE_REG, base_off + 0));
+			return;
+		case 0x3: // ZW: rotate v5 high 64 into low 64 of v2, then Str d2 at +8
+			armAsm->Ext(v2.V16B(), v5.V16B(), v5.V16B(), 8);
+			armAsm->Str(d2, MemOperand(VU1_BASE_REG, base_off + 8));
+			return;
+
+		// --- Triple-lane stores ---
+		case 0xE: // XYZ = XY (Str d5) + Z
+			armAsm->Str(d5, MemOperand(VU1_BASE_REG, base_off + 0));
+			emitLaneS(2);
+			return;
+		case 0xD: // XYW = XY (Str d5) + W
+			armAsm->Str(d5, MemOperand(VU1_BASE_REG, base_off + 0));
+			emitLaneS(3);
+			return;
+		case 0xB: // XZW = X (Str s5) + ZW (Ext + Str d)
+			armAsm->Str(s5, MemOperand(VU1_BASE_REG, base_off + 0));
+			armAsm->Ext(v2.V16B(), v5.V16B(), v5.V16B(), 8);
+			armAsm->Str(d2, MemOperand(VU1_BASE_REG, base_off + 8));
+			return;
+		case 0x7: // YZW = Y (lane move + Str s) + ZW (Ext + Str d)
+			emitLaneS(1);
+			armAsm->Ext(v2.V16B(), v5.V16B(), v5.V16B(), 8);
+			armAsm->Str(d2, MemOperand(VU1_BASE_REG, base_off + 8));
+			return;
+
+		// --- Non-adjacent dual-lane stores ---
+		case 0x9: // XW
+			armAsm->Str(s5, MemOperand(VU1_BASE_REG, base_off + 0));
+			emitLaneS(3);
+			return;
+		case 0xA: // XZ
+			armAsm->Str(s5, MemOperand(VU1_BASE_REG, base_off + 0));
+			emitLaneS(2);
+			return;
+		case 0x5: // YW
+			emitLaneS(1);
+			emitLaneS(3);
+			return;
+		case 0x6: // YZ
+			emitLaneS(1);
+			emitLaneS(2);
+			return;
+	}
+}
+
 static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode mode)
 {
 	const bool  skip_dst_write   = (dst_off == vfOffStatic0); // VF[0] hardwired
@@ -306,12 +408,7 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 		return;
 	}
 
-	armAsm->Ldr(q4, MemOperand(VU1_BASE_REG, dst_off));
-	if (eff_xyzw & 8) armAsm->Mov(v4.V4S(), 0, v5.V4S(), 0);
-	if (eff_xyzw & 4) armAsm->Mov(v4.V4S(), 1, v5.V4S(), 1);
-	if (eff_xyzw & 2) armAsm->Mov(v4.V4S(), 2, v5.V4S(), 2);
-	if (eff_xyzw & 1) armAsm->Mov(v4.V4S(), 3, v5.V4S(), 3);
-	armAsm->Str(q4, MemOperand(VU1_BASE_REG, dst_off));
+	emitPartialLaneStore(dst_off, eff_xyzw);
 }
 
 // Generic FMAC writeback — result must be in v5.4S.
@@ -357,12 +454,7 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 		return;
 	}
 
-	armAsm->Ldr(q4, MemOperand(VU1_BASE_REG, dst_off));
-	if (xyzw & 8) armAsm->Mov(v4.V4S(), 0, v5.V4S(), 0); // x
-	if (xyzw & 4) armAsm->Mov(v4.V4S(), 1, v5.V4S(), 1); // y
-	if (xyzw & 2) armAsm->Mov(v4.V4S(), 2, v5.V4S(), 2); // z
-	if (xyzw & 1) armAsm->Mov(v4.V4S(), 3, v5.V4S(), 3); // w
-	armAsm->Str(q4, MemOperand(VU1_BASE_REG, dst_off));
+	emitPartialLaneStore(dst_off, xyzw);
 }
 
 // Writeback for ops that DO NOT update MAC/Status flags (MAX, MINI, ABS).
@@ -387,13 +479,8 @@ static void emitNoFlagWriteback(u32 fd, u32 xyzw)
 		return;
 	}
 
-	// Partial write: load existing dst into v4, merge selected lanes from v5
-	armAsm->Ldr(q4, MemOperand(VU1_BASE_REG, dst_off));
-	if (xyzw & 8) armAsm->Mov(v4.V4S(), 0, v5.V4S(), 0); // x
-	if (xyzw & 4) armAsm->Mov(v4.V4S(), 1, v5.V4S(), 1); // y
-	if (xyzw & 2) armAsm->Mov(v4.V4S(), 2, v5.V4S(), 2); // z
-	if (xyzw & 1) armAsm->Mov(v4.V4S(), 3, v5.V4S(), 3); // w
-	armAsm->Str(q4, MemOperand(VU1_BASE_REG, dst_off));
+	// Partial write via peephole: direct indexed stores, no load-merge-store.
+	emitPartialLaneStore(dst_off, xyzw);
 }
 
 // ============================================================================
