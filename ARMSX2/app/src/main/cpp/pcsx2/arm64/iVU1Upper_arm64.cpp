@@ -32,6 +32,13 @@ using namespace vixl::aarch64;
 // ============================================================================
 bool g_vu1NeedsFlags = true;
 
+// Phase-9: compile-time tracker (mirrors g_vu1NeedsFlags). True = VU1_Q_REG
+// holds the current authoritative VI[REG_Q] broadcast; false = next Q
+// reader must reload from memory. Reset to false on each CompileBlock
+// entry and at every point Q memory may have changed (TestPipes with FDIV
+// flush, vu1Exec hazard, vu1EbitDone).
+bool g_vu1QLive = false;
+
 // ============================================================================
 //  Native NEON codegen helpers
 // ============================================================================
@@ -43,6 +50,43 @@ static const auto VU1_BASE_REG = x23;
 static const auto VU1_MACFLAG_REG    = w19;
 static const auto VU1_STATUSFLAG_REG = w20;
 static const auto VU1_CLIPFLAG_REG   = w28;
+
+// Phase-8 (2026-04-22): pinned VU->ACC register. Loaded at block prologue
+// (Ldr q16, [VU1_BASE, accOff()]), flushed at epilogue and around the one
+// BL that can mutate ACC (vu1Exec hazard fallback). Every FMAC transform
+// chain (MULAx → MADDAy → MADDAz → MADDw) touches ACC four times — pre-
+// pinning replaces 4 Ldr + 4 Str per chain with a single Ldr at prologue
+// and Str at epilogue, killing ~6 memory ops per chain.
+//
+// Reg choice rationale: q16 is unused by every current upper/lower
+// emitter (all NEON use in this file is v0-v8). The q-form is caller-
+// saved on AAPCS64 — we must flush+reload around BLs that may clobber
+// or mutate ACC. The only default-build BL that touches ACC is
+// vu1Exec; all other helpers (pipe flushes, XGKICK, CheckDTBits, etc.)
+// leave ACC alone.
+//
+// IMPORTANT: must match the alias in iVU1micro_arm64.cpp.
+static const auto VU1_ACC_REG = v16;
+
+// Phase-9 (2026-04-23): pinned VI[REG_Q] broadcast. Held as v17.4S with all
+// four lanes equal to VU->VI[REG_Q].UL — ready to consume as src2 for any
+// Q-using FMAC op (ADDq / MADDq / MULq / SUBq / MSUBq + accum variants).
+// VI[REG_Q] only changes when the FDIV pipe flushes (inside
+// vu1_TestPipes_VU1 or via vu1Exec / vu1EbitDone), so g_vu1QLive tracks
+// whether the pinned reg still reflects memory. CompileBlock invalidates
+// g_vu1QLive at those points and reloads lazily on the next Q reader.
+//
+// Like VU1_ACC_REG, this is caller-saved (q17 is not AAPCS64-preserved),
+// but we don't need to flush it around BLs that may mutate Q — we just
+// invalidate and reload from the updated memory next time Q is read.
+//
+// IMPORTANT: must match the alias in iVU1micro_arm64.cpp.
+static const auto VU1_Q_REG = v17;
+
+// Compile-time tracker mirroring g_vu1NeedsFlags — set by CompileBlock in
+// iVU1micro_arm64.cpp before each pair's upper emit. When false, the next
+// Q-reader must reload VU1_Q_REG from memory before using it.
+extern bool g_vu1QLive;
 
 static constexpr int64_t vfOff(u32 reg)
 {
@@ -260,14 +304,31 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 	// ------------------------------------------------------------------
 	// Step G: write clamped v5 to dst with xyzw (eff_xyzw) mask. Skip when
 	// dst is VF[0] (hardwired; the C helper's `write` check).
+	//
+	// Phase-8: ACC writes redirect into the pinned VU1_ACC_REG (q16) —
+	// no memory store until block epilogue / vu1Exec hazard.
 	// ------------------------------------------------------------------
 
 	if (skip_dst_write)
 		return;
 
+	const bool to_acc = (dst_off == accOff());
+
 	if (eff_xyzw == 0xFu)
 	{
-		armAsm->Str(q5, MemOperand(VU1_BASE_REG, dst_off));
+		if (to_acc)
+			armAsm->Mov(VU1_ACC_REG.V16B(), v5.V16B());
+		else
+			armAsm->Str(q5, MemOperand(VU1_BASE_REG, dst_off));
+		return;
+	}
+
+	if (to_acc)
+	{
+		if (eff_xyzw & 8) armAsm->Mov(VU1_ACC_REG.V4S(), 0, v5.V4S(), 0);
+		if (eff_xyzw & 4) armAsm->Mov(VU1_ACC_REG.V4S(), 1, v5.V4S(), 1);
+		if (eff_xyzw & 2) armAsm->Mov(VU1_ACC_REG.V4S(), 2, v5.V4S(), 2);
+		if (eff_xyzw & 1) armAsm->Mov(VU1_ACC_REG.V4S(), 3, v5.V4S(), 3);
 		return;
 	}
 
@@ -298,9 +359,27 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 	if (dst_off == vfOffStatic0)
 		return;
 
+	// Phase-8: ACC is pinned in VU1_ACC_REG (q16). Redirect stores to the
+	// pinned register instead of memory.
+	const bool to_acc = (dst_off == accOff());
+
 	if (xyzw == 0xF)
 	{
-		armAsm->Str(q5, MemOperand(VU1_BASE_REG, dst_off));
+		if (to_acc)
+			armAsm->Mov(VU1_ACC_REG.V16B(), v5.V16B());
+		else
+			armAsm->Str(q5, MemOperand(VU1_BASE_REG, dst_off));
+		return;
+	}
+
+	if (to_acc)
+	{
+		// Partial-lane write into the pinned ACC reg — merge v5's selected
+		// lanes in place, no memory round-trip.
+		if (xyzw & 8) armAsm->Mov(VU1_ACC_REG.V4S(), 0, v5.V4S(), 0); // x
+		if (xyzw & 4) armAsm->Mov(VU1_ACC_REG.V4S(), 1, v5.V4S(), 1); // y
+		if (xyzw & 2) armAsm->Mov(VU1_ACC_REG.V4S(), 2, v5.V4S(), 2); // z
+		if (xyzw & 1) armAsm->Mov(VU1_ACC_REG.V4S(), 3, v5.V4S(), 3); // w
 		return;
 	}
 
@@ -363,9 +442,28 @@ static void emitLoadBroadcast(u32 ft, int comp) // comp: 0=x,1=y,2=z,3=w
 	armAsm->Dup(v1.V4S(), v1.V4S(), 0);
 }
 
-// Load Q or I register broadcast into v1.4S
+// Load Q or I register broadcast into v1.4S.
+//
+// Phase-9: Q route uses the pinned VU1_Q_REG (q17) when g_vu1QLive==true
+// (CompileBlock will have emitted a reload if pinning is profitable for
+// this pair). Otherwise it falls back to a direct Ldr+Dup into v1 — same
+// cost as the pre-Phase-9 path, so N=1-Q blocks don't regress. I route is
+// unchanged for now.
 static void emitLoadQI(int64_t vi_off)
 {
+	if (vi_off == viOff(REG_Q))
+	{
+		if (g_vu1QLive)
+		{
+			armAsm->Mov(v1.V16B(), VU1_Q_REG.V16B());
+		}
+		else
+		{
+			armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vi_off));
+			armAsm->Dup(v1.V4S(), w0);
+		}
+		return;
+	}
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vi_off));
 	armAsm->Dup(v1.V4S(), w0);
 }
@@ -456,8 +554,9 @@ static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw)
 	// Load VF[fs] → v0
 	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
 	// v1 must already be loaded with src2
-	// Load ACC → v5
-	armAsm->Ldr(q5, MemOperand(VU1_BASE_REG, accOff()));
+	// Phase-8: ACC lives in pinned VU1_ACC_REG (q16). Copy into v5 for the
+	// ±FMA pipeline below instead of reading from memory.
+	armAsm->Mov(v5.V16B(), VU1_ACC_REG.V16B());
 
 	// vuDouble input clamping (all 3 operands, matching interpreter)
 	if (clampInputs || clampOutput)
@@ -513,8 +612,9 @@ static void emitOpFmac(bool isSub, u32 fs, u32 ft, u32 fd_or_zero)
 
 	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
 	armAsm->Ldr(q1, MemOperand(VU1_BASE_REG, vfOff(ft)));
+	// Phase-8: OPMSUB reads ACC — pull from the pinned register, not memory.
 	if (isSub)
-		armAsm->Ldr(q5, MemOperand(VU1_BASE_REG, accOff()));
+		armAsm->Mov(v5.V16B(), VU1_ACC_REG.V16B());
 
 	if (clampInputs || clampOutput)
 		emitVuClampSetup();
