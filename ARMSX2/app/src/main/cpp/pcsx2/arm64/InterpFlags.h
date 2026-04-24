@@ -52,6 +52,12 @@
 //#define INTERP_VU_BRANCH     // B, BAL, JR, JALR, IBEQ, IBNE, IBLTZ, IBGTZ, IBLEZ, IBGEZ
 //#define INTERP_VU_MISC       // MOVE, MR32, MFIR, MTIR, MFP, flag ops, random, EFU, XITOP, XTOP, XGKICK
 
+// Diagnostic: emit per-block exec counter at VU1 block linkEntry and dump the
+// top-5 hottest blocks (with per-pair disassembly) on recArmVU1::Shutdown —
+// fires when the Compose Stop button is pressed. Adds ~5 insns per block
+// entry (measurable cost on linked-chain entries), so keep off unless profiling.
+//#define VU1_PROFILE_BLOCKS
+
 //DMAC
 //#define INTERP_DMAC          // VIF0, VIF1, GIF, IPU0/1, SIF0/1/2, SPR0/1 + interrupt handlers
 
