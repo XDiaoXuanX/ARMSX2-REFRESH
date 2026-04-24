@@ -8,6 +8,10 @@
 #include "common/Pcsx2Defs.h"
 #include "common/FPControl.h"
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include "arm64/InterpFlags.h"
+#endif
+
 #include <array>
 #include <string>
 #include <optional>
@@ -1491,13 +1495,13 @@ namespace EmuFolders
 #define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
 #define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
 #elif defined(__aarch64__) || defined(_M_ARM64)
-// arm64 has a native VU1 recompiler (iVU1micro_arm64.cpp) plus the
-// XGKICK cycle-delay port that fires via gifUnit.TransferGSPacketData
-// directly (same as microVU's mVU_XGKICK_). TransferGSPacketData
-// internally routes XGKICK to the MTVU path when THREAD_VU1=true, so
-// MTVU works once we enable it here.
+#ifdef INTERP_VU1
+#define THREAD_VU1 false
+#define REC_VU1 false
+#else
 #define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
 #define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
+#endif
 #else
 #define THREAD_VU1 false
 #define REC_VU1 false

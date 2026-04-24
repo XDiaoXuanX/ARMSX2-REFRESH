@@ -2665,7 +2665,9 @@ void VMManager::InitializeCPUProviders()
 	CpuMicroVU0.Reserve();
 	CpuMicroVU1.Reserve();
 #elif defined(__aarch64__) || defined(_M_ARM64)
+#ifndef INTERP_EE
 	recCpu.Reserve();
+#endif
 #ifndef INTERP_IOP
 	psxRec.Reserve();
 #endif
@@ -2704,7 +2706,9 @@ void VMManager::ShutdownCPUProviders()
 #ifndef INTERP_VU1
 	CpuArmVU1.Shutdown();
 #endif
+#ifndef INTERP_EE
 	recCpu.Shutdown();
+#endif
 	if (vu1Thread.IsOpen())
 		vu1Thread.WaitVU();
 #else
@@ -2735,10 +2739,26 @@ void VMManager::UpdateCPUImplementations()
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 #elif defined(__aarch64__) || defined(_M_ARM64)
+#ifdef INTERP_EE
+	Cpu = &intCpu;
+#else
 	Cpu = CHECK_EEREC ? &recCpu : &intCpu;
-	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+#endif
+#ifdef INTERP_VU0
+	CpuVU0 = static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+#else
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuArmVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+#endif
+#ifdef INTERP_VU1
+	CpuVU1 = static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#else
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuArmVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#endif
+#ifdef INTERP_IOP
+	psxCpu = &psxInt;
+#else
+	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+#endif
 #else
 	Cpu = &intCpu;
 	psxCpu = &psxInt;
