@@ -82,9 +82,17 @@ static void SetBranchImm(u32 imm)
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
 	g_branch = 1;
 	g_cpuFlushedPC = true;
+	// Signal to recRecompile's block-end link gate that the successor PC
+	// is statically known. Covers J/JAL, the `_Rs_ == _Rt_` BEQ (MIPS's
+	// `b label` encoding), and every const-folded conditional branch.
+	g_eeStaticBranchPC = imm;
 }
 
-// Helper: for conditional branches with two GPR operands
+// Helper: for conditional branches with two GPR operands. Emits split
+// taken/not-taken exit tails, each independently linkable via
+// emitEELinkableExit. The taken tail is emitted here inline; the
+// not-taken tail is staged for recRecompile's block-end iBranchTest via
+// g_eeStaticBranchPC = fallthrough.
 static void recBranch_GPR64(a64::Condition cond, int rs, int rt, u32 branchTarget, u32 fallthrough)
 {
 	if (GPR_IS_CONST2(rs, rt))
@@ -110,23 +118,59 @@ static void recBranch_GPR64(a64::Condition cond, int rs, int rt, u32 branchTarge
 		armAsm->Cmp(RSCRATCHGPR, RSCRATCHGPR2);
 	}
 
+	// Cset into RDELAYSLOTGPR — survives the delay-slot emit so we can
+	// test it again after the flush.
 	armAsm->Cset(RDELAYSLOTGPR, cond);
 
 	armFlushConstRegs();
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 
+	// WaitLoop-candidate blocks keep the non-split CSEL exit: iBranchTest
+	// will emit a fast-forward-and-jump-to-event tail, which direct-B
+	// linking would bypass (defeating the speedhack). Budget > correctness-
+	// preserving convergence with the interpreter.
+	const bool waitloop_fire = EmuConfig.Speedhacks.WaitLoop && s_nBlockFF;
+	if (waitloop_fire)
+	{
+		armAsm->Mov(RWSCRATCH, branchTarget);
+		armAsm->Mov(RWSCRATCH2, fallthrough);
+		armAsm->Cmp(RDELAYSLOTGPR, 0);
+		armAsm->Csel(RWSCRATCH, RWSCRATCH, RWSCRATCH2, a64::ne);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+
+		g_branch = 1;
+		g_cpuFlushedPC = true;
+		return;
+	}
+
+	// Split exits. RDELAYSLOTGPR == 0 → not taken. Cbz keeps the test
+	// one insn and stays within range for the local label (±1 MB).
+	a64::Label not_taken;
+	armAsm->Cbz(RDELAYSLOTGPR, &not_taken);
+
+	// Taken path: write cpuRegs.pc = branchTarget and emit a linkable
+	// tail. emitEELinkableExit terminates (no fall-through) — the not-
+	// taken label binds immediately after.
 	armAsm->Mov(RWSCRATCH, branchTarget);
-	armAsm->Mov(RWSCRATCH2, fallthrough);
-	armAsm->Cmp(RDELAYSLOTGPR, 0);
-	armAsm->Csel(RWSCRATCH, RWSCRATCH, RWSCRATCH2, a64::ne);
+	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+	emitEELinkableExit(branchTarget);
+
+	// Not-taken path: write cpuRegs.pc = fallthrough and let the block-
+	// end machinery (iBranchTest via s_eeLinkTarget = fallthrough) emit
+	// the not-taken linkable tail.
+	armAsm->Bind(&not_taken);
+	armAsm->Mov(RWSCRATCH, fallthrough);
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
 
 	g_branch = 1;
 	g_cpuFlushedPC = true;
+	g_eeStaticBranchPC = fallthrough;
 }
 
-// Helper: for conditional branches comparing one GPR against zero
+// Helper: for conditional branches comparing one GPR against zero. Same
+// split-exit strategy as recBranch_GPR64 — see that function's comments
+// for the shape rationale.
 static void recBranch_GPR64_vs_Zero(a64::Condition cond, int rs, u32 branchTarget, u32 fallthrough)
 {
 	if (GPR_IS_CONST1(rs))
@@ -154,14 +198,37 @@ static void recBranch_GPR64_vs_Zero(a64::Condition cond, int rs, u32 branchTarge
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 
+	// WaitLoop guard — see recBranch_GPR64 for rationale.
+	const bool waitloop_fire = EmuConfig.Speedhacks.WaitLoop && s_nBlockFF;
+	if (waitloop_fire)
+	{
+		armAsm->Mov(RWSCRATCH, branchTarget);
+		armAsm->Mov(RWSCRATCH2, fallthrough);
+		armAsm->Cmp(RDELAYSLOTGPR, 0);
+		armAsm->Csel(RWSCRATCH, RWSCRATCH, RWSCRATCH2, a64::ne);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+
+		g_branch = 1;
+		g_cpuFlushedPC = true;
+		return;
+	}
+
+	a64::Label not_taken;
+	armAsm->Cbz(RDELAYSLOTGPR, &not_taken);
+
+	// Taken path.
 	armAsm->Mov(RWSCRATCH, branchTarget);
-	armAsm->Mov(RWSCRATCH2, fallthrough);
-	armAsm->Cmp(RDELAYSLOTGPR, 0);
-	armAsm->Csel(RWSCRATCH, RWSCRATCH, RWSCRATCH2, a64::ne);
+	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+	emitEELinkableExit(branchTarget);
+
+	// Not-taken path — block-end iBranchTest emits its linkable tail.
+	armAsm->Bind(&not_taken);
+	armAsm->Mov(RWSCRATCH, fallthrough);
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
 
 	g_branch = 1;
 	g_cpuFlushedPC = true;
+	g_eeStaticBranchPC = fallthrough;
 }
 
 // Helper: likely branch — if NOT taken, skip the delay slot entirely
@@ -205,25 +272,52 @@ static void recBranch_GPR64_Likely(a64::Condition cond, int rs, int rt, u32 bran
 		armAsm->Cmp(RSCRATCHGPR, RSCRATCHGPR2);
 	}
 
-	// If condition is NOT met, skip the delay slot and go to fallthrough
-	a64::Label skipDelaySlot, done;
+	// WaitLoop guard — see recBranch_GPR64 for rationale. Likely-variant
+	// twist: delay slot is conditional (executed only on taken side).
+	// We preserve that here by re-emitting the old combined path when
+	// the block is a wait-loop candidate.
+	const bool waitloop_fire = EmuConfig.Speedhacks.WaitLoop && s_nBlockFF;
+	if (waitloop_fire)
+	{
+		a64::Label skipDS_wl, done_wl;
+		armAsm->B(&skipDS_wl, a64::InvertCondition(cond));
+		recompileNextInstruction(true, false);
+		armFlushConstRegs();
+		armAsm->Mov(RWSCRATCH, branchTarget);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+		armAsm->B(&done_wl);
+		armAsm->Bind(&skipDS_wl);
+		armAsm->Mov(RWSCRATCH, fallthrough);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+		armAsm->Bind(&done_wl);
+		g_branch = 1;
+		g_cpuFlushedPC = true;
+		return;
+	}
+
+	// If condition is NOT met, skip the delay slot and go to fallthrough.
+	// Both paths emit their own linkable exit — taken inline here, not-
+	// taken via g_eeStaticBranchPC routed through block-end iBranchTest.
+	a64::Label skipDelaySlot;
 	armAsm->B(&skipDelaySlot, a64::InvertCondition(cond));
 
-	// Condition met: execute delay slot, then branch to target
+	// Condition met: execute delay slot, then exit to target with a
+	// linkable tail. emitEELinkableExit terminates (no fall-through).
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 	armAsm->Mov(RWSCRATCH, branchTarget);
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
-	armAsm->B(&done);
+	emitEELinkableExit(branchTarget);
 
-	// Not taken: skip delay slot, PC = fallthrough
+	// Not taken: skip delay slot, PC = fallthrough. Block-end iBranchTest
+	// emits the linkable tail.
 	armAsm->Bind(&skipDelaySlot);
 	armAsm->Mov(RWSCRATCH, fallthrough);
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
 
-	armAsm->Bind(&done);
 	g_branch = 1;
 	g_cpuFlushedPC = true;
+	g_eeStaticBranchPC = fallthrough;
 }
 
 static void recBranch_GPR64_vs_Zero_Likely(a64::Condition cond, int rs, u32 branchTarget, u32 fallthrough)
@@ -260,8 +354,36 @@ static void recBranch_GPR64_vs_Zero_Likely(a64::Condition cond, int rs, u32 bran
 
 	armLoadGPR64(RSCRATCHGPR, rs);
 
+	// WaitLoop guard — see recBranch_GPR64 for rationale.
+	const bool waitloop_fire = EmuConfig.Speedhacks.WaitLoop && s_nBlockFF;
+	if (waitloop_fire)
+	{
+		a64::Label skipDS_wl, done_wl;
+		if (cond == a64::lt)
+			armAsm->Tbz(RSCRATCHGPR, 63, &skipDS_wl);
+		else if (cond == a64::ge)
+			armAsm->Tbnz(RSCRATCHGPR, 63, &skipDS_wl);
+		else
+		{
+			armAsm->Cmp(RSCRATCHGPR, 0);
+			armAsm->B(&skipDS_wl, a64::InvertCondition(cond));
+		}
+		recompileNextInstruction(true, false);
+		armFlushConstRegs();
+		armAsm->Mov(RWSCRATCH, branchTarget);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+		armAsm->B(&done_wl);
+		armAsm->Bind(&skipDS_wl);
+		armAsm->Mov(RWSCRATCH, fallthrough);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+		armAsm->Bind(&done_wl);
+		g_branch = 1;
+		g_cpuFlushedPC = true;
+		return;
+	}
+
 	// For lt/ge, use Tbz/Tbnz to test sign bit directly (1 instruction vs 2)
-	a64::Label skipDelaySlot, done;
+	a64::Label skipDelaySlot;
 	if (cond == a64::lt)
 		armAsm->Tbz(RSCRATCHGPR, 63, &skipDelaySlot);
 	else if (cond == a64::ge)
@@ -272,21 +394,23 @@ static void recBranch_GPR64_vs_Zero_Likely(a64::Condition cond, int rs, u32 bran
 		armAsm->B(&skipDelaySlot, a64::InvertCondition(cond));
 	}
 
-	// Condition met: execute delay slot, then branch to target
+	// Condition met: execute delay slot, then exit to target with a
+	// linkable tail. emitEELinkableExit terminates (no fall-through).
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 	armAsm->Mov(RWSCRATCH, branchTarget);
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
-	armAsm->B(&done);
+	emitEELinkableExit(branchTarget);
 
-	// Not taken: skip delay slot, PC = fallthrough
+	// Not taken: skip delay slot, PC = fallthrough. Block-end iBranchTest
+	// emits the linkable tail.
 	armAsm->Bind(&skipDelaySlot);
 	armAsm->Mov(RWSCRATCH, fallthrough);
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
 
-	armAsm->Bind(&done);
 	g_branch = 1;
 	g_cpuFlushedPC = true;
+	g_eeStaticBranchPC = fallthrough;
 }
 
 #endif // at least one native branch

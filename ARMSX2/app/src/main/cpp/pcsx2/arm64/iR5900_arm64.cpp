@@ -42,6 +42,8 @@ extern EEINST* g_pCurInstInfo;
 #include "common/HeapArray.h"
 #include "common/Perf.h"
 
+#include <unordered_map>
+
 using namespace R5900;
 
 // ============================================================================
@@ -101,7 +103,13 @@ static BASEBLOCKEX* s_pCurBlockEx = nullptr;
 u32 s_nEndBlock = 0;
 u32 s_branchTo;
 static bool s_branchIsUnconditional; // true for J/JAL, false for BEQ/BNE etc.
-static bool s_nBlockFF;
+bool s_nBlockFF; // wait-loop candidate — promoted to global so branch emitters
+                 // can fall back to the non-split CSEL path (preserves WaitLoop
+                 // fast-forward).
+
+// See arm64Emitter.h for the contract. SetBranchImm sets this; recRecompile
+// reads it in the block-end link gate and resets it at block entry.
+u32 g_eeStaticBranchPC = 0;
 
 static int* s_pCode = nullptr;
 
@@ -125,6 +133,51 @@ static const void* EnterRecompiledCode = nullptr;
 static const void* DispatchBlockDiscard = nullptr;
 static const void* DispatchPageReset = nullptr;
 static const void* UnmappedRecLUTPage = nullptr;
+
+// ============================================================================
+//  Block linking — direct-B tail chaining across the EE code cache
+// ============================================================================
+//
+// Each linkable block exit records a patch_site (the address of the
+// unconditional B emitted inside iBranchTest's successor slot). When the
+// static target PC later compiles (or is already compiled), we rewrite that
+// B to jump directly to the target block's entry point, bypassing the
+// DispatcherReg LUT lookup. The cycle-budget check (ADDS RCYCLE + B.PL
+// DispatcherEvent) stays at every block exit, so event delivery remains
+// prompt — linking only removes the memory round-trip through the LUT
+// when the budget survives.
+//
+// Only two block-exit shapes are linkable today:
+//   1. Unconditional J/JAL (static target = s_branchTo, g_branch==1 with
+//      s_branchIsUnconditional=true).
+//   2. Block fall-through at s_nEndBlock / page boundary (static target =
+//      natural next PC, g_branch==0).
+// Conditional branches (BEQ/BNE/etc.) use CSEL + runtime PC dispatch in
+// iR5900Branch_arm64.cpp and are NOT linkable without restructuring those
+// emitters into split taken/not-taken tails. JR/JALR and syscalls/traps
+// are indirect — cpuRegs.pc is runtime-determined, so they stay on the
+// DispatcherReg path.
+struct BlockLinkExit
+{
+	u32  target_pc;      // statically-known successor PC
+	u8*  patch_site;     // address of the unconditional B to rewrite
+	u8*  fallthrough;    // unlinked target (DispatcherReg) — used by unpatch
+	u8*  current_target; // where patch_site currently points
+};
+
+struct BlockLinks
+{
+	u8*           entry;         // block's compiled fnptr — linked callers jump here
+	BlockLinkExit exits[2];      // up to 2 static exits: conditional branches emit
+	                             // both taken and not-taken linkable tails.
+	u32           num_exits;     // 0, 1, or 2 — how many `exits[]` slots are live.
+};
+
+// Sidecar registry: startpc (hwaddr) → link info. Blocks register here when
+// they compile; recClear drops entries for invalidated blocks (and unpatches
+// incoming edges). Lookup is by block-start PC, matching the way
+// tryForwardLink / patchWaitingPredecessors resolve exit targets.
+static std::unordered_map<u32, BlockLinks> s_blockLinks;
 
 // ============================================================================
 //  Forward declarations
@@ -884,8 +937,180 @@ static void _DynGen_Dispatchers()
 }
 
 // ============================================================================
+//  Block linking — patch helpers
+// ============================================================================
+
+// Rewrite a patch_site to jump directly to `target`. No-op when the site
+// already points at target. The underlying armEmitJmpPtr overwrites a
+// single 4-byte `B` instruction (26-bit signed offset, ±128 MB reach —
+// comfortably covers the 64 MB EE code cache).
+static void patchEELinkSite(BlockLinkExit& exit, u8* target)
+{
+	if (!exit.patch_site)
+		return;
+	if (exit.current_target == target)
+		return;
+	armEmitJmpPtr(exit.patch_site, target, true);
+	exit.current_target = target;
+}
+
+// Restore a patch_site to its unlinked fallthrough (DispatcherReg). Called
+// when the exit's target block is invalidated by recClear so the caller
+// doesn't B into freed/stale code.
+static void unpatchEELinkSite(BlockLinkExit& exit)
+{
+	patchEELinkSite(exit, exit.fallthrough);
+}
+
+// Look up a compiled block's entry point by hwaddr(startpc). Returns
+// nullptr when the block isn't linkable (not compiled yet, or a block type
+// without a link entry recorded).
+static u8* findEEBlockEntry(u32 target_pc)
+{
+	auto it = s_blockLinks.find(HWADDR(target_pc));
+	if (it == s_blockLinks.end())
+		return nullptr;
+	return it->second.entry;
+}
+
+// Called right after a block compiles: for each live static exit, if its
+// target is already compiled, wire the exit up. Mirrors tryForwardLink
+// in iVU1micro_arm64.cpp.
+static void tryForwardLinkEE(BlockLinks& block)
+{
+	for (u32 e = 0; e < block.num_exits; e++)
+	{
+		BlockLinkExit& exit = block.exits[e];
+		u8* target_entry = findEEBlockEntry(exit.target_pc);
+		if (target_entry)
+			patchEELinkSite(exit, target_entry);
+	}
+}
+
+// Called right after a block compiles at `my_pc` with entry `my_entry`:
+// scan all previously-compiled blocks for any exit whose static target
+// is `my_pc` and patch them forward to us. Mirrors
+// patchWaitingPredecessors in iVU1micro_arm64.cpp.
+//
+// Cost: O(total_blocks) per compile. EE blocks are typically in the low
+// thousands so this is well-bounded. A target_pc → predecessor_list
+// multimap would drop this to O(1); defer until profiling says it matters.
+static void patchWaitingEEPredecessors(u32 my_pc, u8* my_entry)
+{
+	if (!my_entry)
+		return;
+	const u32 my_hw = HWADDR(my_pc);
+	for (auto& kv : s_blockLinks)
+	{
+		BlockLinks& pred = kv.second;
+		for (u32 e = 0; e < pred.num_exits; e++)
+		{
+			BlockLinkExit& exit = pred.exits[e];
+			if (HWADDR(exit.target_pc) != my_hw)
+				continue;
+			if (exit.current_target == my_entry)
+				continue;
+			patchEELinkSite(exit, my_entry);
+		}
+	}
+}
+
+// Called by recClear when a PC range is invalidated. Walks every
+// registered block's exits and unpatches any that target the cleared
+// range — preventing a dangling direct-B into code that's about to be
+// (or has just been) recycled by the bump allocator on next compile.
+// Then removes blocks whose entry is itself in the cleared range.
+static void invalidateEELinks(u32 start_hw, u32 end_hw)
+{
+	// Pass 1: unpatch any exit pointing into the cleared range. This
+	// includes exits of blocks OUTSIDE the cleared range — they're still
+	// live but their link target is going away.
+	for (auto& kv : s_blockLinks)
+	{
+		BlockLinks& pred = kv.second;
+		for (u32 e = 0; e < pred.num_exits; e++)
+		{
+			BlockLinkExit& exit = pred.exits[e];
+			const u32 t = HWADDR(exit.target_pc);
+			if (t >= start_hw && t < end_hw)
+				unpatchEELinkSite(exit);
+		}
+	}
+
+	// Pass 2: drop registry entries for blocks whose own startpc is in
+	// the cleared range. Their compiled code is being discarded; next
+	// dispatch to that PC will recompile and re-register.
+	for (auto it = s_blockLinks.begin(); it != s_blockLinks.end(); )
+	{
+		if (it->first >= start_hw && it->first < end_hw)
+			it = s_blockLinks.erase(it);
+		else
+			++it;
+	}
+}
+
+// ============================================================================
 //  Block end — cycle counting and dispatch
 // ============================================================================
+
+// Link target for the current block's main exit (the one emitted by
+// iBranchTest at block-end). Nonzero → emit the linkable form. Zero →
+// emit the original dispatcher-based form (conditional-runtime path,
+// JR/JALR, syscall/break, WaitLoop-optimized blocks).
+static u32 s_eeLinkTarget = 0;
+
+// Staging for patch-site metadata that recRecompile will commit into
+// the new block's BlockLinks record. Filled by emitEELinkableExit — both
+// iBranchTest's linkable tail AND conditional-branch emitters in
+// iR5900Branch_arm64.cpp push their exits here. Up to 2 slots: a
+// conditional branch emits a taken and a not-taken tail; an
+// unconditional branch or fall-through emits just one.
+static BlockLinkExit s_eeExitsStaging[2];
+static u32           s_eeExitsStagingCount = 0;
+
+// Emits the linkable block-exit tail for `target_pc` and stages the patch
+// metadata. Defined here so both the internal iBranchTest path and the
+// external branch emitters (via the arm64Emitter.h extern) share one
+// implementation — keeping the wire format identical and reducing
+// surface for drift bugs.
+void emitEELinkableExit(u32 target_pc)
+{
+	// Shape:
+	//     ADDS RCYCLE, RCYCLE, cycles
+	//     B.PL <event>          ; budget exhausted
+	//     B    <patch_site>     ; initially DispatcherReg, patched to target
+	//   event:
+	//     <armEmitJmp(DispatcherEvent)>
+	//
+	// B.cond has only ±1 MB range but <event> is a local label 2-3
+	// instructions away — always reachable. The patch B is 26-bit (±128
+	// MB), covers any block in the 64 MB cache.
+	const u32 cycles = scaleblockcycles();
+	armAsm->Adds(RCYCLE, RCYCLE, cycles);
+
+	a64::Label event_path;
+	armAsm->B(&event_path, a64::pl);
+
+	u8* patch_site = armGetCurrentCodePointer();
+	{
+		const s64 disp = static_cast<s64>(
+			reinterpret_cast<intptr_t>(DispatcherReg)
+			- reinterpret_cast<intptr_t>(patch_site));
+		pxAssert((disp & 3) == 0 && vixl::IsInt26(disp >> 2));
+		a64::SingleEmissionCheckScope guard(armAsm);
+		armAsm->b(disp >> 2);
+	}
+
+	armAsm->Bind(&event_path);
+	armEmitJmp(DispatcherEvent);
+
+	pxAssert(s_eeExitsStagingCount < 2);
+	BlockLinkExit& e = s_eeExitsStaging[s_eeExitsStagingCount++];
+	e.target_pc      = target_pc;
+	e.patch_site     = patch_site;
+	e.fallthrough    = const_cast<u8*>(static_cast<const u8*>(DispatcherReg));
+	e.current_target = const_cast<u8*>(static_cast<const u8*>(DispatcherReg));
+}
 
 static void iBranchTest(u32 newpc)
 {
@@ -907,9 +1132,19 @@ static void iBranchTest(u32 newpc)
 		armAsm->Csel(RCYCLE, a64::xzr, RCYCLE, a64::mi);
 		armEmitJmp(DispatcherEvent);
 	}
+	else if (s_eeLinkTarget != 0)
+	{
+		// Linkable main-block exit — delegate to the shared helper that
+		// also services conditional-branch emitters. Stages a patch site
+		// into s_eeExitsStaging for recRecompile to commit.
+		emitEELinkableExit(s_eeLinkTarget);
+	}
 	else
 	{
-		// Normal path: bump the delta, branch on sign.
+		// Unlinked path: bump the delta, branch on sign. Preserved for
+		// cases where we couldn't stage a link (non-const conditional
+		// branches that didn't split their exits, JR/JALR, syscalls)
+		// or suppressed it (WaitLoop's event-only exit).
 		armAsm->Adds(RCYCLE, RCYCLE, cycles);
 		armEmitCondBranch(a64::mi, DispatcherReg); // N=1: still have budget
 		armEmitJmp(DispatcherEvent);               // fall through: event due
@@ -1176,6 +1411,12 @@ static void recRecompile(const u32 startpc)
 		armEmitCall((void*)eeloadHook2);
 
 	g_branch = 0;
+	g_eeStaticBranchPC = 0; // set by SetBranchImm if the branch emitter picks a compile-time successor
+
+	// Reset block-link exit staging — conditional branch emitters push
+	// their taken tail here during the compile, and iBranchTest pushes
+	// the block-end (not-taken / unconditional / fall-through) tail.
+	s_eeExitsStagingCount = 0;
 
 	// Reset recompiler state
 	s_nBlockCycles = 0;
@@ -1400,7 +1641,15 @@ StartRecomp:
 	pxAssert((pc - startpc) >> 2 <= 0xffff);
 	s_pCurBlockEx->size = (pc - startpc) >> 2;
 
-	// Handle block ending
+	// Handle block ending. Compute the static link target (nonzero →
+	// linkable successor) here so iBranchTest knows which exit shape to
+	// emit. Leave zero for conditional branches, JR/JALR, syscalls and
+	// WaitLoop-optimized blocks; those keep the pre-link dispatcher path.
+	//
+	// s_eeExitsStaging may already have 1 entry staged by a conditional
+	// branch emitter (the taken tail); don't clear it here.
+	s_eeLinkTarget = 0;
+
 	if (g_branch == 2) // syscall/break — event check, indirect dispatch
 	{
 		armFlushConstRegs();
@@ -1415,6 +1664,31 @@ StartRecomp:
 			armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
 		}
 		armFlushConstRegs();
+
+		// Linkable shapes:
+		//   - Any branch emitter that called SetBranchImm(x) — captured via
+		//     g_eeStaticBranchPC. That covers J/JAL, the `_Rs_ == _Rt_`
+		//     BEQ form (MIPS's `b label`), and every const-folded
+		//     conditional branch. cpuRegs.pc is guaranteed to end up == x.
+		//   - Fall-through (no branch emitted, block capped at s_nEndBlock):
+		//     cpuRegs.pc ends up == `pc` (just written above).
+		// Non-const conditional branches use CSEL between two PCs at
+		// runtime (g_branch==1, g_eeStaticBranchPC==0) — single successor
+		// PC isn't known, so we can't pick a patch target and they stay
+		// on the DispatcherReg fallback.
+		//
+		// Suppress linking when the WaitLoop speedhack will fire. Its
+		// iBranchTest path jumps unconditionally to DispatcherEvent (no
+		// B.MI successor slot exists to patch).
+		const bool waitloop_fire = EmuConfig.Speedhacks.WaitLoop && s_nBlockFF;
+		if (!waitloop_fire)
+		{
+			if (g_branch == 1 && g_eeStaticBranchPC != 0)
+				s_eeLinkTarget = g_eeStaticBranchPC;
+			else if (g_branch == 0)
+				s_eeLinkTarget = pc;
+		}
+
 		iBranchTest(s_branchTo);
 	}
 
@@ -1429,6 +1703,27 @@ StartRecomp:
 	// to it. Without this, the block stays pointed at JITCompile and gets
 	// recompiled on every dispatch — burning through the code buffer.
 	s_pCurBlock->SetFnptr((uptr)blockStart);
+
+	// Register this block in the link graph. `num_exits` reflects how many
+	// patchable B sites emitEELinkableExit staged during this block — 0
+	// (JR/JALR/syscall/CSEL branch that didn't split), 1 (J/JAL, const-
+	// folded branch, fall-through), or 2 (conditional branch with split
+	// taken/not-taken tails). tryForwardLinkEE wires each outgoing exit
+	// to an already-compiled target; patchWaitingEEPredecessors rewires
+	// any previously-compiled blocks whose static target is us.
+	{
+		BlockLinks bl = {};
+		bl.entry      = reinterpret_cast<u8*>(blockStart);
+		bl.num_exits  = s_eeExitsStagingCount;
+		for (u32 i = 0; i < s_eeExitsStagingCount; i++)
+			bl.exits[i] = s_eeExitsStaging[i];
+
+		const u32 hw = HWADDR(startpc);
+		s_blockLinks[hw] = bl;
+
+		tryForwardLinkEE(s_blockLinks[hw]);
+		patchWaitingEEPredecessors(startpc, bl.entry);
+	}
 
 	if (!(pc & 0x10000000))
 		maxrecmem = std::max((pc & ~0xa0000000), maxrecmem);
@@ -1648,6 +1943,12 @@ static void recResetRaw()
 	recBlocks.Reset();
 	vtlb_ClearLoadStoreInfo();
 
+	// Block-link graph is invalidated wholesale on reset — all the patch
+	// sites we recorded point into code that's about to be overwritten,
+	// and the entry pointers are about to be recycled by the bump
+	// allocator. Drop everything; blocks re-register as they recompile.
+	s_blockLinks.clear();
+
 	g_branch = 0;
 	g_resetEeScalingStats = true;
 
@@ -1861,6 +2162,14 @@ static void recClear(u32 addr, u32 size)
 		BASEBLOCK* pblock = PC_GETBLOCK(cleared);
 		pblock->SetFnptr((uptr)JITCompile);
 	}
+
+	// Invalidate block-link graph over the same range. Any predecessor
+	// holding a direct-B into a freed block has its patch site rewritten
+	// back to DispatcherReg so subsequent dispatches fall through to the
+	// LUT (where the now-JITCompile pointer will recompile). Entries for
+	// blocks inside the cleared range are dropped from the registry.
+	if (upperextent > lowerextent)
+		invalidateEELinks(lowerextent, upperextent);
 }
 
 R5900cpu recCpu = {

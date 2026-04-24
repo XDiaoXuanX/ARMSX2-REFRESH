@@ -134,6 +134,44 @@ extern u32 pc;
 extern int g_branch;
 extern bool g_cpuFlushedPC, g_cpuFlushedCode, g_recompilingDelaySlot, g_maySignalException;
 
+// Set by SetBranchImm (in iR5900Branch_arm64.cpp) whenever the branch
+// emitter writes a compile-time-constant successor PC to cpuRegs.pc.
+// Reset to 0 at the start of recRecompile; nonzero at block end signals
+// that block linking can direct-B this exit to the static target.
+//
+// Catches every SetBranchImm call site: J/JAL (always), the `_Rs_ == _Rt_`
+// degenerate BEQ (which is how MIPS encodes `b label`), const-folded
+// BEQ/BNE/likely-variants, BGEZ/BLTZ/etc. const-fold, COP0/1/2 BC*
+// const-fold. CSEL-based runtime branch emits (line-120 path etc.) leave
+// this at 0 — those exits stay on the DispatcherReg fallback.
+extern u32 g_eeStaticBranchPC;
+
+// Exposed for conditional-branch emitters in iR5900Branch_arm64.cpp.
+// True when the current block was identified as a wait/spin loop by the
+// pre-walk analysis (s_branchTo == startpc with a "harmless" body). When
+// combined with EmuConfig.Speedhacks.WaitLoop, iBranchTest emits a
+// cycle-fast-forward-and-jump-to-event tail instead of the normal
+// linkable exit. Branch emitters MUST fall back to the pre-split CSEL
+// path in that case — otherwise the taken (loop-stay) tail would direct-B
+// back to self, skipping the fast-forward and defeating the speedhack.
+extern bool s_nBlockFF;
+
+// Emit a linkable EE block-exit tail for `target_pc`. Used by conditional-
+// branch emitters that split the exit into taken/not-taken paths — each
+// path writes its own cpuRegs.pc then calls this helper to emit its own
+// ADDS/B.PL event/B <patchable> sequence. The patch site is staged and
+// committed into the block's link metadata at block-end by recRecompile.
+//
+// Caller must have already:
+//   - Flushed const regs (armFlushConstRegs).
+//   - Written the chosen PC to cpuRegs.pc (so the DispatcherEvent fallback
+//     dispatches correctly when the budget is exhausted).
+//
+// Internal detail: scale-block-cycles is read here (same as iBranchTest's
+// inline path). All exits in a given block share the same cycle bump, so
+// calling this multiple times is fine.
+void emitEELinkableExit(u32 target_pc);
+
 // ============================================================================
 //  ARM64 codegen helpers
 // ============================================================================
