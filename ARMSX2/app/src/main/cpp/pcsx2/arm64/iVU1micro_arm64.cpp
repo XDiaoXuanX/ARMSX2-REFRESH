@@ -297,14 +297,23 @@ void mvu1AnalyzeBlock(
 			mo.isKick     = isXgkickOp(lower);
 			mo.isNOP      = isVU1LowerNOP(lower);
 
-			// VF hazard summary — matches the existing vf_hazard expression
-			// in CompileBlock around line 3270. uregs.VFwrite==0 means the
-			// upper isn't writing a VF; without that, no read-after-write
-			// or write-write conflict on VFs is possible.
-			const bool uWritesVF = (uregs.VFwrite != 0);
-			mo.vf_write_collision = uWritesVF && (lregs.VFwrite == uregs.VFwrite);
-			mo.vf_read_after_write = uWritesVF &&
-				(lregs.VFread0 == uregs.VFwrite || lregs.VFread1 == uregs.VFwrite);
+			// VF hazard summary — refined to consider XYZW lane overlap, not
+			// just VF reg index. The original (REG-only) detection treated
+			// every "same VF reg" pair as a conflict, but partial-lane writes
+			// (e.g., MULx writing only X) don't actually conflict with reads
+			// of disjoint lanes (e.g., DIV reading W). Lane-overlap matches
+			// what aliasFmac() does in the Stage A+B pre-walk.
+			//
+			// uregs.VFwrite==0 means the upper isn't writing a VF; without
+			// that, no read-after-write or write-write conflict is possible.
+			const u8 uW_reg  = uregs.VFwrite;
+			const u8 uW_xyzw = uregs.VFwxyzw;
+			mo.vf_write_collision = (uW_reg != 0) &&
+				(lregs.VFwrite == uW_reg) &&
+				((uW_xyzw & lregs.VFwxyzw) != 0);
+			mo.vf_read_after_write = (uW_reg != 0) && (
+				(lregs.VFread0 == uW_reg && (uW_xyzw & lregs.VFr0xyzw) != 0) ||
+				(lregs.VFread1 == uW_reg && (uW_xyzw & lregs.VFr1xyzw) != 0));
 
 			// CLIP hazard summary — matches the vi_hazard expression.
 			const bool uWritesClip = (uregs.VIwrite & (1u << REG_CLIP_FLAG)) != 0;
@@ -3473,13 +3482,46 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// sequentially and lower's write silently clobbers upper's FMAC
 		// result whenever both target the same VF.
 		//
-		// Hazard detection moved to microIR Pass 1 (mvu1AnalyzeBlock). The
-		// expressions below are equivalent to the inline version they replaced
-		// — Pass 1 guards each flag with `!iBit`, so the I-bit short-circuit
-		// is implicit. Single source of truth lets follow-on optimizations
-		// (e.g., XYZW-aware refinement, doSwapOp native fast-path) land at
-		// the IR layer instead of duplicating the gate here.
-		const bool vf_hazard = ir_op.vf_write_collision || ir_op.vf_read_after_write;
+		// Hazard detection moved to microIR Pass 1 (mvu1AnalyzeBlock). Single
+		// source of truth lets follow-on optimizations land at the IR layer
+		// instead of duplicating the gate here.
+		//
+		// doSwapOp native fast-path (audit item #2): vf_read_after_write
+		// pairs no longer fall back to vu1Exec. Native emit runs upper-then-
+		// lower; lower reads the just-written vfX value (lanes that overlap)
+		// instead of the original. This DIVERGES from vu1Exec's save/restore
+		// semantics but matches the old port-in-place's behavior — that port
+		// also emits upper-then-lower without backup for non-flag-reader
+		// lowers, accepting the same divergence. The IR's XYZW-aware
+		// refinement (Pass 1) ensures we only divert pairs where the lanes
+		// actually conflict; lane-disjoint pairs never reached the fallback.
+		//
+		// vf_write_collision still falls back: native emit would have lower
+		// CLOBBER upper's write (different from both vu1Exec's "discard
+		// lower" and old port's "noWriteVF/isNOP suppress"). Supporting it
+		// natively requires the lower emitter to skip its VF writeback —
+		// invasive change deferred to a later pass.
+		//
+		// CLIP cases (clip_*) still fall back: CLIP has no XYZW lanes (single
+		// 24-bit flag), and an XGKICK with _Is_==REG_CLIP_FLAG (vi18) gets
+		// caught by clip_read_after_write — keeping that on the fallback
+		// path preserves the existing XGKICK-from-interp capture handling.
+		//
+		// Guard kept as a static const so the divert can be toggled in one
+		// place if a regression turns up.
+		//
+		// 2026-04-25: REVERTED to false after GoW2 menu showed FMAC pipeline
+		// divergence (rapidly color-changing shoulder armor, vertex meeting
+		// points slightly off — sculpted-looking face). Symptom is the
+		// classic "vertex transform results differ frame-to-frame" sign of
+		// read-after-write divergence affecting transform math. Native
+		// upper-then-lower had lower read upper's just-written vfX lanes
+		// instead of the original — matches old port-in-place behavior in
+		// theory but the games clearly notice. Phase A's XYZW-aware
+		// refinement stays (it's behavior-preserving for true conflicts).
+		static constexpr bool kAllowReadAfterWriteNative = false;
+		const bool vf_hazard = ir_op.vf_write_collision ||
+			(!kAllowReadAfterWriteNative && ir_op.vf_read_after_write);
 		const bool vi_hazard = ir_op.clip_write_collision || ir_op.clip_read_after_write;
 
 		if (vf_hazard || vi_hazard)
