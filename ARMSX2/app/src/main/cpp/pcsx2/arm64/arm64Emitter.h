@@ -313,6 +313,7 @@ struct ArmGprCacheSlot
 	u8   host_code; // 0xff = not cached
 	bool dirty;     // host value is newer than memory
 	bool sxw;       // host reg holds sign-extended-from-32 value (Phase D+)
+	u32  last_use;  // monotonic clock stamp from g_armGprUseClock (LRU eviction)
 };
 
 extern ArmGprCacheSlot g_armGprCache[32];
@@ -329,8 +330,8 @@ bool armGprIsCached(int gpr);
 //   - Not cached: acquires a pool slot, then on read loads from memory or
 //     emits MOV-imm if const-tracked. On write the contents are undefined
 //     until the caller emits a store.
-//   - Pool full: spills the lowest-indexed cached MIPS GPR (Phase C uses
-//     a trivial eviction policy; Phase D will refine).
+//   - Pool full: spills the least-recently-used cached slot, biased to
+//     keep hot ABI/temp regs (r1-r7, r24-r25) resident (kArmGprHighPrioMask).
 // Marks the slot dirty when `for_write` is true. Callers can take .W() on
 // the result for 32-bit form.
 vixl::aarch64::XRegister armGprAlloc(int gpr, bool for_write);

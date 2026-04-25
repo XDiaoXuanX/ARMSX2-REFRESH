@@ -274,6 +274,20 @@ void armDelConstReg(int reg)
 ArmGprCacheSlot g_armGprCache[32];
 u16 g_armGprCachePoolUsed;
 
+// Monotonic per-block clock for LRU stamps. Reset at block entry along with
+// the slot table; bumped on every armGprAlloc hit/miss so eviction can pick
+// the least-recently-used slot.
+static u32 g_armGprUseClock;
+
+// MIPS GPRs we want to keep resident under pressure: r1 (at), r2/r3 (v0/v1),
+// r4-r7 (a0-a3), r24/r25 (t8/t9). These are the busiest regs in
+// compiler-generated code; without a bias the linear-low-first eviction
+// would spill them on every pool exhaustion. Score-based evictor below adds
+// kArmGprHighPrioBonus to their LRU stamp so a low-priority slot is always
+// preferred as victim, falling back to LRU within each class.
+static constexpr u32 kArmGprHighPrioMask = (0xFEu) | (1u << 24) | (1u << 25);
+static constexpr u32 kArmGprHighPrioBonus = 1u << 24;
+
 // Pool of caller-saved host regs available for cache slots. Order is the
 // allocation order (front-first). Indices into this array are what get
 // stored in g_armGprCachePoolUsed.
@@ -299,8 +313,9 @@ static int armGprPoolIndex(u8 host_code)
 	return -1;
 }
 
-// Acquire a free pool slot (or evict the lowest-indexed cached MIPS GPR).
-// Returns the host register code. Marks the index used in g_armGprCachePoolUsed.
+// Acquire a free pool slot, or evict the LRU cached MIPS GPR (high-priority
+// regs biased to stay resident). Returns the host register code. Marks the
+// index used in g_armGprCachePoolUsed.
 static u8 armGprAcquirePoolSlot()
 {
 	for (int i = 0; i < kArmGprCachePoolSize; i++)
@@ -313,32 +328,46 @@ static u8 armGprAcquirePoolSlot()
 		}
 	}
 
-	// Pool full — evict the lowest-indexed cached MIPS GPR. Phase C uses
-	// the simplest possible policy; Phase D will refine (LRU / use-count).
+	// Pool full — pick the least-recently-used cached slot, biased against
+	// high-priority MIPS regs (see kArmGprHighPrioMask). Score is the LRU
+	// stamp plus a priority bonus; lowest score loses. Handing the freed
+	// host code straight to the new owner means the pool bit stays set.
+	int victim = -1;
+	u64 best_score = ~0ull;
 	for (int g = 1; g < 32; g++)
 	{
-		ArmGprCacheSlot& slot = g_armGprCache[g];
+		const ArmGprCacheSlot& slot = g_armGprCache[g];
 		if (slot.host_code == 0xff)
 			continue;
-		const int slot_idx = armGprPoolIndex(slot.host_code);
-		if (slot_idx < 0)
+		if (armGprPoolIndex(slot.host_code) < 0)
 			continue;
-
-		if (slot.dirty)
+		const u64 bonus = (kArmGprHighPrioMask & (1u << g)) ? kArmGprHighPrioBonus : 0u;
+		const u64 score = static_cast<u64>(slot.last_use) + bonus;
+		if (score < best_score)
 		{
-			armAsm->Str(a64::XRegister(slot.host_code),
-				a64::MemOperand(RCPUSTATE, GPR_OFFSET(g)));
+			best_score = score;
+			victim = g;
 		}
-		const u8 host = slot.host_code;
-		slot.host_code = 0xff;
-		slot.dirty = false;
-		slot.sxw = false;
-		// The pool index bit stays set — we hand it straight to the new owner.
-		return host;
 	}
 
-	pxFailRel("armGprAcquirePoolSlot: no slots free and nothing to evict");
-	return 0xff;
+	if (victim < 0)
+	{
+		pxFailRel("armGprAcquirePoolSlot: no slots free and nothing to evict");
+		return 0xff;
+	}
+
+	ArmGprCacheSlot& vslot = g_armGprCache[victim];
+	if (vslot.dirty)
+	{
+		armAsm->Str(a64::XRegister(vslot.host_code),
+			a64::MemOperand(RCPUSTATE, GPR_OFFSET(victim)));
+	}
+	const u8 host = vslot.host_code;
+	vslot.host_code = 0xff;
+	vslot.dirty = false;
+	vslot.sxw = false;
+	vslot.last_use = 0;
+	return host;
 }
 
 void armGprCacheReset()
@@ -348,8 +377,10 @@ void armGprCacheReset()
 		g_armGprCache[i].host_code = 0xff;
 		g_armGprCache[i].dirty = false;
 		g_armGprCache[i].sxw = false;
+		g_armGprCache[i].last_use = 0;
 	}
 	g_armGprCachePoolUsed = 0;
+	g_armGprUseClock = 0;
 }
 
 bool armGprIsCached(int gpr)
@@ -365,6 +396,7 @@ a64::XRegister armGprAlloc(int gpr, bool for_write)
 
 	if (slot.host_code != 0xff)
 	{
+		slot.last_use = ++g_armGprUseClock;
 		// Coherence with the const tracker.  If GPR_SET_CONST(gpr) was called
 		// after this slot was populated (e.g. LUI/ALU-const-path setting a new
 		// const while an earlier op still has the slot cached with an old
@@ -429,6 +461,7 @@ a64::XRegister armGprAlloc(int gpr, bool for_write)
 	slot.host_code = host;
 	slot.dirty = for_write;
 	slot.sxw = false;
+	slot.last_use = ++g_armGprUseClock;
 	return reg;
 }
 
