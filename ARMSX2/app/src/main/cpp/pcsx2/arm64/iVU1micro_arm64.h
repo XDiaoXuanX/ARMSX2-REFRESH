@@ -42,3 +42,22 @@ extern recArmVU1 CpuArmVU1;
 // helper prevents the hybrid-harness pin-skew bug (ISTUB emits a bare BL
 // and the interp sees stale state).
 void emitVU1InterpBL(const void* interp_fn);
+
+// ============================================================================
+//  VF register cache (Phase 1: read-side, write-through with invalidation)
+// ============================================================================
+// Defined in iVU1micro_arm64.cpp; exposed for FMAC emitters in
+// iVU1Upper_arm64.cpp / iVU1Lower_arm64.cpp. See the long comment at the
+// definition site for the design rationale (mirrors the cross-pair VF
+// residency from the old port-in-place's microRegAlloc).
+namespace vixl::aarch64 { class VRegister; }
+
+void vfCacheReset();
+void vfCacheInvalidate(int vfreg);
+void vfCacheInvalidateAll();
+void vfCacheLoadInto(int vfreg, const vixl::aarch64::VRegister& scratch);
+vixl::aarch64::VRegister vfCacheLoadResident(int vfreg);
+
+// Wrapper for armEmitCall that invalidates the VF cache tracker first. Every
+// BL clobbers caller-saved NEON state, so the tracker must drop entries.
+void emitVu1Call(const void* fn);

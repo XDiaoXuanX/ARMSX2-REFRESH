@@ -1206,6 +1206,195 @@ static void emitReloadAccReg(int64_t acc_off)
 	armAsm->Ldr(VU1_ACC_REG.Q(), MemOperand(VU1_BASE_REG, acc_off));
 }
 
+// ============================================================================
+//  VF register cache (Phase 1: read-side, write-through with invalidation)
+// ============================================================================
+//
+// Mirrors the cross-pair VF residency design from the old port-in-place at
+// ARMSX2-master/x86/microVU_IR.h's microRegAlloc. The current rewrite re-Ldr/
+// Str's VF[fs]/VF[ft]/VF[fd] for every FMAC pair (~3 memory ops/op); this
+// cache keeps recently-read VFs in NEON regs across pairs, so a matrix-
+// transform chain reading the same vertex VF four times pays one Ldr instead
+// of four.
+//
+// Phase 1 scope:
+//   - Read-side cache: vfCacheLoadInto(vfreg, scratch) emits Mov scratch <-
+//     cached if vfreg is resident, else Ldr into a free slot + Mov to scratch.
+//   - Write-through: VF stores still go straight to memory; the helper
+//     vfCacheInvalidate(vfreg) drops any cached copy so the next read reloads.
+//   - No deferred writes — Phase 2.
+//   - No partial-lane (xyzw) tracking — Phase 2. Treats every VF as full-128.
+//
+// Slot pool: v17..v24 (8 slots). v16 is ACC (pinned). v0..v15 are FMAC scratch.
+// All NEON regs are caller-saved across BL on AAPCS64 (low halves of v8..v15
+// are preserved but our cache holds full Q-regs), so every BL site MUST call
+// vfCacheInvalidateAll() — see the BL-flush wiring in CompileBlock.
+//
+// Compile-time only — these helpers track state during emit, not at runtime.
+// vfCacheReset() emits no code; it just zeroes the tracker. The emitted code
+// path naturally arrives at the same NEON state because emit-side Ldr/Mov
+// decisions are deterministic given the tracker.
+
+static constexpr int kVfCacheSize = 8;
+static constexpr int kVfCacheBaseReg = 17; // v17..v24
+
+struct VfCacheSlot
+{
+	int  vfreg;     // -1 = empty, else 0..31 (the VF index resident in this slot)
+	u32  last_use;  // monotonic counter for LRU eviction
+};
+
+static VfCacheSlot s_vfCache[kVfCacheSize];
+static u32 s_vfCacheClock;
+
+// Byte offset of VF[reg] from VU1_BASE_REG (= &VU1). Same formula as the
+// per-file vfOff() in iVU1Upper_arm64.cpp / iVU1Lower_arm64.cpp; duplicated
+// here because those are file-static.
+static constexpr int64_t vfCacheOffsetOf(int vfreg)
+{
+	return static_cast<int64_t>(offsetof(VURegs, VF))
+		+ static_cast<int64_t>(vfreg) * static_cast<int64_t>(sizeof(VECTOR));
+}
+
+// Reset the compile-time tracker. Emits no code. Call at block prologue
+// (cache cold) and after any BL (caller-saved NEON state is gone).
+void vfCacheReset()
+{
+	for (int i = 0; i < kVfCacheSize; i++)
+	{
+		s_vfCache[i].vfreg = -1;
+		s_vfCache[i].last_use = 0;
+	}
+	s_vfCacheClock = 0;
+}
+
+// Find vfreg in cache. Returns slot index 0..kVfCacheSize-1 on hit, -1 on miss.
+static int vfCacheFind(int vfreg)
+{
+	for (int i = 0; i < kVfCacheSize; i++)
+	{
+		if (s_vfCache[i].vfreg == vfreg)
+			return i;
+	}
+	return -1;
+}
+
+// Pick a slot to allocate for vfreg. Returns slot index. Prefers empty
+// slots; falls back to LRU eviction (no Str needed in Phase 1 since slots
+// are never dirty under write-through).
+static int vfCacheAllocSlot(int vfreg)
+{
+	int empty = -1;
+	int lru = 0;
+	u32 lru_stamp = ~0u;
+	for (int i = 0; i < kVfCacheSize; i++)
+	{
+		if (s_vfCache[i].vfreg < 0 && empty < 0)
+			empty = i;
+		if (s_vfCache[i].last_use < lru_stamp)
+		{
+			lru_stamp = s_vfCache[i].last_use;
+			lru = i;
+		}
+	}
+	const int slot = (empty >= 0) ? empty : lru;
+	s_vfCache[slot].vfreg = vfreg;
+	s_vfCache[slot].last_use = ++s_vfCacheClock;
+	return slot;
+}
+
+// NEON register code for cache slot `i`. v17..v24.
+static int vfCacheSlotReg(int slot)
+{
+	return kVfCacheBaseReg + slot;
+}
+
+// Emit code to materialize VF[vfreg] into `scratch`. Cache hit → Mov from the
+// resident slot. Cache miss → Ldr from VU1.VF[vfreg] memory into a slot, then
+// Mov to scratch. Returns the emitted instruction count savings vs a plain
+// Ldr (negative = miss-with-extra-Mov, positive = hit-Mov-replaces-Ldr).
+//
+// `vfreg` of 0 short-circuits to the same plain Ldr the existing code emits
+// (VF0 holds the constant {0,0,0,1}; not worth reserving a slot to cache it).
+void vfCacheLoadInto(int vfreg, const a64::VRegister& scratch)
+{
+	if (vfreg == 0)
+	{
+		armAsm->Ldr(scratch.Q(), a64::MemOperand(VU1_BASE_REG, vfCacheOffsetOf(0)));
+		return;
+	}
+	int slot = vfCacheFind(vfreg);
+	if (slot < 0)
+	{
+		slot = vfCacheAllocSlot(vfreg);
+		const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
+		armAsm->Ldr(slotReg.Q(), a64::MemOperand(VU1_BASE_REG, vfCacheOffsetOf(vfreg)));
+	}
+	else
+	{
+		s_vfCache[slot].last_use = ++s_vfCacheClock;
+	}
+	const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
+	if (slotReg.GetCode() != scratch.GetCode())
+		armAsm->Mov(scratch.Q(), slotReg.Q());
+}
+
+// Like vfCacheLoadInto but returns the resident NEON reg directly so the
+// caller can use it in-place without an extra Mov. Caller must NOT modify
+// the returned register — it's the cache's authoritative copy.
+a64::VRegister vfCacheLoadResident(int vfreg)
+{
+	int slot = vfCacheFind(vfreg);
+	if (slot < 0)
+	{
+		slot = vfCacheAllocSlot(vfreg);
+		const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
+		armAsm->Ldr(slotReg.Q(), a64::MemOperand(VU1_BASE_REG, vfCacheOffsetOf(vfreg)));
+	}
+	else
+	{
+		s_vfCache[slot].last_use = ++s_vfCacheClock;
+	}
+	return a64::VRegister(vfCacheSlotReg(slot), 128);
+}
+
+// Drop the cached copy of `vfreg`, if any. Call right after a Str writes
+// VF[vfreg] to memory so the next read reloads the new value.
+void vfCacheInvalidate(int vfreg)
+{
+	if (vfreg <= 0)
+		return;
+	const int slot = vfCacheFind(vfreg);
+	if (slot >= 0)
+	{
+		s_vfCache[slot].vfreg = -1;
+		s_vfCache[slot].last_use = 0;
+	}
+}
+
+// Drop every cached entry. Call before any BL — caller-saved NEON state is
+// lost. Cache cold-restarts; next reads reload from memory.
+void vfCacheInvalidateAll()
+{
+	for (int i = 0; i < kVfCacheSize; i++)
+	{
+		s_vfCache[i].vfreg = -1;
+		s_vfCache[i].last_use = 0;
+	}
+	s_vfCacheClock = 0;
+}
+
+// Wrapper for armEmitCall that drops the VF cache tracker first. Use for
+// every BL in the VU1 emit path — AAPCS64 caller-saves all NEON regs, so
+// the cache state must be considered lost across any helper call. Phase 1
+// is write-through (slots are never dirty), so the only work here is
+// resetting the compile-time tracker.
+void emitVu1Call(const void* fn)
+{
+	vfCacheInvalidateAll();
+	armEmitCall(fn);
+}
+
 // ISTUB helper — emits the full pinned-register flush / interpreter BL /
 // reload dance for ops that routed to the C interpreter via
 // REC_VU1_UPPER_INTERP / REC_VU1_LOWER_INTERP. Keeps the hybrid harness
@@ -1236,6 +1425,10 @@ void emitVU1InterpBL(const void* interp_fn)
 	emitFlushFmaccountReg(fmaccount_off);
 	emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
 	emitFlushAccReg(acc_off);
+	// VF cache slot mappings are compile-time only — no Str needed (Phase 1
+	// is write-through). The BL clobbers all NEON state, so the tracker
+	// must drop every entry; subsequent reads reload from memory.
+	vfCacheInvalidateAll();
 	armEmitCall(interp_fn);
 	emitReloadCycleReg(cycle_off);
 	emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
@@ -1288,7 +1481,7 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 		armAsm->Mov(x0, VU1_BASE_REG);
 		armAsm->Mov(w1, regs.VFread0);
 		armAsm->Mov(w2, regs.VFr0xyzw);
-		armEmitCall(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
 		emitReloadCycleReg(cycle_off);
 	}
 	if (!skip1 && regs.VFread1 != 0)
@@ -1298,7 +1491,7 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 		armAsm->Mov(x0, VU1_BASE_REG);
 		armAsm->Mov(w1, regs.VFread1);
 		armAsm->Mov(w2, regs.VFr1xyzw);
-		armEmitCall(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
 		emitReloadCycleReg(cycle_off);
 	}
 }
@@ -1338,7 +1531,7 @@ static void emitTestLowerStalls(const _VURegsNum& lregs,
 			{
 				emitFlushCycleReg(cycle_off);
 				armAsm->Mov(x0, VU1_BASE_REG);
-				armEmitCall(reinterpret_cast<const void*>(vu1_TestFDIVPipeWait));
+				emitVu1Call(reinterpret_cast<const void*>(vu1_TestFDIVPipeWait));
 				emitReloadCycleReg(cycle_off);
 			}
 			break;
@@ -1348,7 +1541,7 @@ static void emitTestLowerStalls(const _VURegsNum& lregs,
 			{
 				emitFlushCycleReg(cycle_off);
 				armAsm->Mov(x0, VU1_BASE_REG);
-				armEmitCall(reinterpret_cast<const void*>(vu1_TestEFUPipeWait));
+				emitVu1Call(reinterpret_cast<const void*>(vu1_TestEFUPipeWait));
 				emitReloadCycleReg(cycle_off);
 			}
 			break;
@@ -1360,7 +1553,7 @@ static void emitTestLowerStalls(const _VURegsNum& lregs,
 				emitFlushCycleReg(cycle_off);
 				armAsm->Mov(x0, VU1_BASE_REG);
 				armAsm->Mov(w1, lregs.VIread);
-				armEmitCall(reinterpret_cast<const void*>(vu1_TestALUStallReg));
+				emitVu1Call(reinterpret_cast<const void*>(vu1_TestALUStallReg));
 				emitReloadCycleReg(cycle_off);
 			}
 			break;
@@ -1660,6 +1853,13 @@ static void deleteAllVariants()
 
 static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 {
+	// VF cache: clear the compile-time tracker before any pair emit. The
+	// previous block compile leaked state into the tracker; without reset
+	// here, the first FMAC of the new block would emit `Mov scratch, vN`
+	// thinking some VF was already resident, but the runtime NEON state of
+	// the new block has none of that.
+	vfCacheReset();
+
 	// --- Size check ---
 	const size_t data_size    = numPairs * 2 * sizeof(_VURegsNum);
 	const size_t code_worst   = static_cast<size_t>(numPairs) * 512 + 64;
@@ -2644,7 +2844,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
 			emitFlushAccReg(acc_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			armEmitCall(reinterpret_cast<const void*>(vu1Exec));
+			emitVu1Call(reinterpret_cast<const void*>(vu1Exec));
 			emitReloadCycleReg(cycle_off);
 			emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
 			emitReloadFmaccountReg(fmaccount_off);
@@ -2670,7 +2870,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				if (pending_xgkick_fire)
 				{
 					armAsm->Mov(x0, VU1_BASE_REG);
-					armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
+					emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
 					pending_xgkick_fire = false;
 				}
 				// If this pair is an XGKICK that reached the interp via the
@@ -2687,7 +2887,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				if (isXgkickOp(lower))
 				{
 					armAsm->Mov(x0, VU1_BASE_REG);
-					armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_capture_from_interp));
+					emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_capture_from_interp));
 					pending_xgkick_fire = true;
 				}
 			}
@@ -2760,7 +2960,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// the pin around the BL.
 			emitFlushFmaccountReg(fmaccount_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			armEmitCall(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
+			emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
 			emitReloadFmaccountReg(fmaccount_off);
 		}
 
@@ -2788,7 +2988,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		{
 			armAsm->Mov(x0, VU1_BASE_REG);
 			armAsm->Mov(w1, kick_cycles_sync[i]);
-			armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_hack_sync));
+			emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_hack_sync));
 		}
 
 		// 7. Execute upper instruction.
@@ -2847,7 +3047,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			if (!xgkickhack && pending_xgkick_fire && isXgkickOp(lower))
 			{
 				armAsm->Mov(x0, VU1_BASE_REG);
-				armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
+				emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
 				pending_xgkick_fire = false;
 			}
 			// Execute lower instruction (stalls already tested above).
@@ -2921,7 +3121,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		if ((dbit_set || tbit_set) && !branch_pipe && !prev_was_branch)
 		{
 			armAsm->Mov(w0, upper);
-			armEmitCall(reinterpret_cast<const void*>(vu1CheckDTBits));
+			emitVu1Call(reinterpret_cast<const void*>(vu1CheckDTBits));
 		}
 
 		// 12. Branch countdown (inline).
@@ -2943,7 +3143,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, branchpc_off));
 			armAsm->Str(w4, MemOperand(VU1_BASE_REG, tpc_off));
 			armAsm->Mov(x0, VU1_BASE_REG);
-			armEmitCall(reinterpret_cast<const void*>(vu1HandleDelayBranch));
+			emitVu1Call(reinterpret_cast<const void*>(vu1HandleDelayBranch));
 			armAsm->Bind(&skip_branch);
 		}
 
@@ -2977,7 +3177,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// FMAC pipe via _vuFMACflush (decrements fmaccount per slot).
 			emitFlushFmaccountReg(fmaccount_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			armEmitCall(reinterpret_cast<const void*>(vu1EbitDone));
+			emitVu1Call(reinterpret_cast<const void*>(vu1EbitDone));
 			emitReloadCycleReg(cycle_off);
 			emitReloadFmaccountReg(fmaccount_off);
 			armAsm->Bind(&skip_ebit);
@@ -3004,7 +3204,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			if (pending_xgkick_fire)
 			{
 				armAsm->Mov(x0, VU1_BASE_REG);
-				armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
+				emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
 				pending_xgkick_fire = false;
 			}
 			// Re-arm for the next pair if this one captured an XGKICK.
@@ -3041,7 +3241,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	if (!xgkickhack && pending_xgkick_fire)
 	{
 		armAsm->Mov(x0, VU1_BASE_REG);
-		armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
 	}
 
 	// Step 6b block-end clamp. Elision of per-pair VIBackupCycles decrement
@@ -3190,7 +3390,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// helper call and remain live for a tail-Br into linkEntry.
 		armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, tpc_off));
 		armAsm->Mov(w0, w4);
-		armEmitCall(reinterpret_cast<const void*>(vu1_indirect_dispatch));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_indirect_dispatch));
 		Label indirect_fall_through;
 		armAsm->Cbz(x0, &indirect_fall_through);
 		armAsm->Br(x0);

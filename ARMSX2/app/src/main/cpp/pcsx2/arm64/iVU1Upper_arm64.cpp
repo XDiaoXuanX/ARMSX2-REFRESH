@@ -82,6 +82,21 @@ static constexpr int64_t accOff()
 // `dst != &VU->VF[0]` check.
 static constexpr int64_t vfOffStatic0 = static_cast<int64_t>(offsetof(VURegs, VF));
 
+// VF cache write-coherence: the writeback helpers receive an int64_t dst_off
+// that's either accOff() or vfOff(fd). When fd >= 0, any cached copy of that
+// VF in the read-side cache must be dropped so the next read reloads the new
+// value. Phase 1 invalidates on ANY write (full or partial); Phase 2 will
+// track per-lane dirty bits to keep partial writes coherent without losing
+// the cached copy.
+static inline void vfCacheInvalidateDstOff(int64_t dst_off)
+{
+	if (dst_off >= vfOffStatic0 && dst_off < vfOffStatic0 + 32 * static_cast<int64_t>(sizeof(VECTOR)))
+	{
+		const int vf = static_cast<int>((dst_off - vfOffStatic0) / static_cast<int64_t>(sizeof(VECTOR)));
+		vfCacheInvalidate(vf);
+	}
+}
+
 // ============================================================================
 //  Inline MAC/STATUS flag computation + result clamping + writeback.
 //  (Replaces the vu1_fmac_writeback / vu1_opmula_writeback / vu1_opmsub_writeback
@@ -244,6 +259,12 @@ static void emitPartialLaneStore(int64_t base_off, u32 xyzw)
 
 static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode mode)
 {
+	// Drop any cached copy of the destination VF — Phase 1 write-through.
+	// Done up front so all writeback paths through this function are covered
+	// (the wrapper emitFmacWriteback also calls vfCacheInvalidateDstOff,
+	// which is idempotent — the second call is a no-op).
+	vfCacheInvalidateDstOff(dst_off);
+
 	const bool  skip_dst_write   = (dst_off == vfOffStatic0); // VF[0] hardwired
 	const bool  overflow_clamp   = CHECK_VU_OVERFLOW(1);
 	const bool  opm_mode         = (mode == FmacWritebackMode::OpmXYZ);
@@ -416,6 +437,7 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 static void emitFmacWriteback(int64_t dst_off, u32 xyzw)
 {
 	emitFmacInlineWriteback(dst_off, xyzw, FmacWritebackMode::GenericFmac);
+	vfCacheInvalidateDstOff(dst_off);
 }
 
 // Store v5 to dst_off with xyzw mask, used by the flag-skipping fast path.
@@ -429,6 +451,11 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 	// still updates flags — in the no-flag path there's nothing to do.
 	if (dst_off == vfOffStatic0)
 		return;
+
+	// Drop any cached copy of the destination VF before the store — Phase 1
+	// is write-through, so the next read must reload from the freshly-stored
+	// memory rather than return the stale cached copy.
+	vfCacheInvalidateDstOff(dst_off);
 
 	// Phase-8: ACC is pinned in VU1_ACC_REG (q16). Redirect stores to the
 	// pinned register instead of memory.
@@ -472,6 +499,7 @@ static void emitNoFlagWriteback(u32 fd, u32 xyzw)
 {
 	if (fd == 0) return; // VF[0] hardwired; interpreter no-ops the whole insn
 	const int64_t dst_off = vfOff(fd);
+	vfCacheInvalidate(static_cast<int>(fd));
 
 	if (xyzw == 0xF)
 	{
@@ -496,11 +524,25 @@ static void emitNoFlagWriteback(u32 fd, u32 xyzw)
 //    Full vector:       ldr q1 from VF[ft]
 // ============================================================================
 
-// Load second operand broadcast from VF[ft] component into v1.4S
+// Load second operand broadcast from VF[ft] component into v1.4S.
+// Uses the VF cache: a hit lets us Dup directly from a resident slot
+// without touching memory. A miss loads the full 16-byte VF into a slot
+// (vs the prior 4-byte single-lane Ldr) — slightly more dcache traffic on
+// the first read, but every subsequent broadcast across the chain is a
+// register-only Dup. Matters most for matrix-transform chains that read
+// the same vertex VF four times in a row.
 static void emitLoadBroadcast(u32 ft, int comp) // comp: 0=x,1=y,2=z,3=w
 {
-	armAsm->Ldr(s1, MemOperand(VU1_BASE_REG, vfOff(ft) + comp * 4));
-	armAsm->Dup(v1.V4S(), v1.V4S(), 0);
+	if (ft == 0)
+	{
+		// VF0 holds the constant {0,0,0,1}; broadcasting from memory is
+		// fine — not worth a cache slot.
+		armAsm->Ldr(s1, MemOperand(VU1_BASE_REG, vfOff(0) + comp * 4));
+		armAsm->Dup(v1.V4S(), v1.V4S(), 0);
+		return;
+	}
+	const auto resident = vfCacheLoadResident(static_cast<int>(ft));
+	armAsm->Dup(v1.V4S(), resident.V4S(), comp);
 }
 
 // Load Q or I register broadcast into v1.4S.
@@ -549,9 +591,10 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw)
 	// deferred, we replicate that behavior with FMINNM/FMAXNM in NEON.
 	const bool clampOutput = !needsFlags && CHECK_VU_OVERFLOW(1);
 
-	// Load VF[fs] → v0
-	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
-	// v1 must already be loaded with src2
+	// Load VF[fs] → v0 (via cache: hit → Mov from resident slot, miss → Ldr).
+	// v1 must already be loaded with src2 (by emitLoadBroadcast / emitLoadQI /
+	// the FMAC_*_FULL caller's Ldr).
+	vfCacheLoadInto(static_cast<int>(fs), v0);
 
 	// vuDouble input clamping (matches interpreter's vuDouble on every operand)
 	if (clampInputs || clampOutput)
@@ -593,9 +636,9 @@ static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw)
 	const bool clampInputs = CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1);
 	const bool clampOutput = !needsFlags && CHECK_VU_OVERFLOW(1);
 
-	// Load VF[fs] → v0
-	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
-	// v1 must already be loaded with src2
+	// Load VF[fs] → v0 (via cache).
+	vfCacheLoadInto(static_cast<int>(fs), v0);
+	// v1 must already be loaded with src2.
 	// Phase-8: ACC lives in pinned VU1_ACC_REG (q16). Copy into v5 for the
 	// ±FMA pipeline below instead of reading from memory.
 	armAsm->Mov(v5.V16B(), VU1_ACC_REG.V16B());
@@ -652,8 +695,8 @@ static void emitOpFmac(bool isSub, u32 fs, u32 ft, u32 fd_or_zero)
 	const bool clampInputs = CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1);
 	const bool clampOutput = !needsFlags && CHECK_VU_OVERFLOW(1);
 
-	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
-	armAsm->Ldr(q1, MemOperand(VU1_BASE_REG, vfOff(ft)));
+	vfCacheLoadInto(static_cast<int>(fs), v0);
+	vfCacheLoadInto(static_cast<int>(ft), v1);
 	// Phase-8: OPMSUB reads ACC — pull from the pinned register, not memory.
 	if (isSub)
 		armAsm->Mov(v5.V16B(), VU1_ACC_REG.V16B());
@@ -730,7 +773,7 @@ static void emitOpFmac(bool isSub, u32 fs, u32 ft, u32 fd_or_zero)
 // MUST use emitNoFlagWriteback — MAX/MINI on PS2 don't update MAC/Status.
 static void emitMaxFmac(bool isMini, u32 fs, u32 fd, u32 xyzw)
 {
-	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
+	vfCacheLoadInto(static_cast<int>(fs), v0);
 	// v1 must already be loaded with src2
 
 	// Signed integer max/min on 32-bit lanes.
@@ -766,7 +809,7 @@ static void emitMaxFmac(bool isMini, u32 fs, u32 fd, u32 xyzw)
 // returns early when _Ft_==0, and does not touch MAC/Status flags.
 static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 {
-	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
+	vfCacheLoadInto(static_cast<int>(fs), v0);
 	armAsm->Fabs(v5.V4S(), v0.V4S());
 	emitNoFlagWriteback(ft, xyzw);
 }
@@ -835,7 +878,7 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 			} \
 			return; \
 		} \
-		armAsm->Ldr(q1, MemOperand(VU1_BASE_REG, vfOff(ft))); \
+		vfCacheLoadInto(static_cast<int>(ft), v1); \
 		emitBinaryFmac(op, fs, dst, xyzw); \
 	}
 
@@ -880,7 +923,7 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 fs = (VU1.code >> 11) & 0x1F; \
 		const u32 ft = (VU1.code >> 16) & 0x1F; \
 		const u32 xyzw = (VU1.code >> 21) & 0xF; \
-		armAsm->Ldr(q1, MemOperand(VU1_BASE_REG, vfOff(ft))); \
+		vfCacheLoadInto(static_cast<int>(ft), v1); \
 		int64_t dst = (toACC) ? accOff() : vfOff(fd); \
 		emitTernaryFmac(isSub, fs, dst, xyzw); \
 	}
@@ -914,7 +957,7 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 fs = (VU1.code >> 11) & 0x1F; \
 		const u32 ft = (VU1.code >> 16) & 0x1F; \
 		const u32 xyzw = (VU1.code >> 21) & 0xF; \
-		armAsm->Ldr(q1, MemOperand(VU1_BASE_REG, vfOff(ft))); \
+		vfCacheLoadInto(static_cast<int>(ft), v1); \
 		emitMaxFmac(isMini, fs, fd, xyzw); \
 	}
 
@@ -1282,7 +1325,7 @@ static void vu1_OPMSUB(VURegs* VU)
 #define REC_VU1_UPPER_CALL(name) \
 	void recVU1_##name() { \
 		armAsm->Mov(x0, VU1_BASE_REG); \
-		armEmitCall(reinterpret_cast<const void*>(vu1_##name)); \
+		emitVu1Call(reinterpret_cast<const void*>(vu1_##name)); \
 	}
 
 // ============================================================================

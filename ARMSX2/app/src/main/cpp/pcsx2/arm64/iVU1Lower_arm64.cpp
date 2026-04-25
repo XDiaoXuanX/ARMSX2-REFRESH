@@ -230,7 +230,7 @@ static float vu1CalculateEATAN(float inputvalue)
 #define REC_VU1_LOWER_CALL(name) \
 	void recVU1_##name() { \
 		armAsm->Mov(x0, VU1_BASE_REG); \
-		armEmitCall(reinterpret_cast<const void*>(vu1_##name)); \
+		emitVu1Call(reinterpret_cast<const void*>(vu1_##name)); \
 	}
 
 // --- Load/Store wrappers ---
@@ -1317,7 +1317,7 @@ void recVU1_LQ() {
 	if (EmuConfig.Gamefixes.IbitHack)
 	{
 		armAsm->Mov(x0, VU1_BASE_REG);
-		armEmitCall(reinterpret_cast<const void*>(vu1_LQ));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_LQ));
 		return;
 	}
 	const u32 ft = W_Ft(&VU1);
@@ -1442,7 +1442,7 @@ void recVU1_SQ() {
 	if (EmuConfig.Gamefixes.IbitHack)
 	{
 		armAsm->Mov(x0, VU1_BASE_REG);
-		armEmitCall(reinterpret_cast<const void*>(vu1_SQ));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_SQ));
 		return;
 	}
 	const u32 fs = W_Fs(&VU1);
@@ -1567,7 +1567,7 @@ void recVU1_ILW() {
 	if (EmuConfig.Gamefixes.IbitHack)
 	{
 		armAsm->Mov(x0, VU1_BASE_REG);
-		armEmitCall(reinterpret_cast<const void*>(vu1_ILW));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_ILW));
 		return;
 	}
 	const u32 it = W_It(&VU1);
@@ -1599,7 +1599,7 @@ void recVU1_ISW() {
 	if (EmuConfig.Gamefixes.IbitHack)
 	{
 		armAsm->Mov(x0, VU1_BASE_REG);
-		armEmitCall(reinterpret_cast<const void*>(vu1_ISW));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_ISW));
 		return;
 	}
 	const u32 it = W_It(&VU1);
@@ -2607,9 +2607,9 @@ void recVU1_XGKICK()
 {
 	armAsm->Mov(x0, VU1_BASE_REG);
 	if (CHECK_XGKICKHACK)
-		armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_hack_capture));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_hack_capture));
 	else
-		armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK));
 }
 #endif
 
