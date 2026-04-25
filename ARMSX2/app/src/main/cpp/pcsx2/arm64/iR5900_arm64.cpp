@@ -107,6 +107,14 @@ bool s_nBlockFF; // wait-loop candidate — promoted to global so branch emitter
                  // can fall back to the non-split CSEL path (preserves WaitLoop
                  // fast-forward).
 
+// Timeout-loop detection. Matches the `addiu rN, rN, -K; bne rN, $0, self; nop`
+// idiom — the only legal block shape is exactly those three instructions, and
+// rN must be the same on the addiu and the bne. When set, recRecompile emits
+// an O(1) skip in place of the loop body that decrements rN by the cycles
+// consumed and exits to the dispatcher. Mirrors x86 recSkipTimeoutLoop in
+// ix86-32/iR5900.cpp:2118-2157.
+static s32 s_eeTimeoutReg = -1;
+
 // See arm64Emitter.h for the contract. SetBranchImm sets this; recRecompile
 // reads it in the block-end link gate and resets it at block entry.
 u32 g_eeStaticBranchPC = 0;
@@ -1710,6 +1718,45 @@ StartRecomp:
 		}
 	}
 
+	// Timeout-loop detection. Block must be exactly:
+	//   addi/addiu rN, rN, -K   (negative immediate, same source/dest reg)
+	//   bne rN, $0, self        (branch back to start)
+	//   nop                     (delay slot)
+	// Anything else (or any non-zero op outside this triplet) disqualifies.
+	// Mirrors x86 detection at ix86-32/iR5900.cpp:2280-2345.
+	s_eeTimeoutReg = -1;
+	if (s_branchTo == startpc && (s_nEndBlock - startpc) <= 12)
+	{
+		bool is_timeout_loop = true;
+		s32 timeout_reg = -1;
+		for (u32 j = startpc; j < s_nEndBlock && is_timeout_loop; j += 4)
+		{
+			cpuRegs.code = *(u32*)PSM(j);
+			const u32 op = cpuRegs.code >> 26;
+			if (op == 8 || op == 9) // addi / addiu
+			{
+				if (timeout_reg >= 0 || _Rs_ != _Rt_ || _Imm_ >= 0)
+					is_timeout_loop = false;
+				else
+					timeout_reg = _Rs_;
+			}
+			else if (op == 5) // bne
+			{
+				if (timeout_reg != static_cast<s32>(_Rs_) || _Rt_ != 0
+				    || j + 4 >= s_nEndBlock || *(u32*)PSM(j + 4) != 0)
+				{
+					is_timeout_loop = false;
+				}
+			}
+			else if (cpuRegs.code != 0)
+			{
+				is_timeout_loop = false;
+			}
+		}
+		if (is_timeout_loop && timeout_reg >= 1)
+			s_eeTimeoutReg = timeout_reg;
+	}
+
 	// Build instruction info cache + run backprop liveness analysis. The
 	// pass mirrors x86 ix86-32/iR5900.cpp:2532-2545: walk the block in
 	// REVERSE from a past-the-end sentinel (all regs assumed live across
@@ -1756,6 +1803,69 @@ StartRecomp:
 	armEmitCall((void*)eeTraceBlock);
 	armEmitReloadCycleAfterCall();
 #endif
+
+	// Timeout-loop skip. The block is `addi rN,rN,-K; bne rN,$0,self; nop`,
+	// which decrements rN once per loop iteration (one iter per scaleblockcycles
+	// worth of EE cycles, hardcoded as 8 here to match x86 recSkipTimeoutLoop).
+	// Instead of running the loop, decrement rN by the iterations that fit in
+	// the remaining cycle budget and jump to the dispatcher.
+	//
+	// Math (delta form, RCYCLE = cycle - nextEventCycle, < 0 = budget left):
+	//   if RCYCLE >= 0:           DispatcherEvent  (event already due)
+	//   proj = (u64)rN * 8 + RCYCLE
+	//   new_RCYCLE = min(proj, 0)
+	//   iters = (new_RCYCLE - RCYCLE) / 8
+	//   rN -= iters; RCYCLE = new_RCYCLE
+	//   if rN != 0:               DispatcherEvent  (event hit before loop done)
+	//   else:                     pc = s_nEndBlock; DispatcherReg
+	if (EmuConfig.Speedhacks.WaitLoop && s_eeTimeoutReg >= 1)
+	{
+		// Early out — RCYCLE >= 0 means the event is already due. Skip the
+		// timeout math entirely; let the dispatcher service the event.
+		armAsm->Cmp(RCYCLE, a64::xzr);
+		armEmitCondBranch(a64::ge, DispatcherEvent);
+
+		// w0 = rN (32-bit unsigned), x1 = (u64)rN * 8 + RCYCLE
+		armAsm->Ldr(a64::w0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(s_eeTimeoutReg)));
+		armAsm->Add(a64::x1, RCYCLE, a64::Operand(a64::x0, a64::LSL, 3));
+
+		// new_RCYCLE = min(x1, 0). Cmp x1 vs 0 then csel: if x1 >= 0 (loop
+		// would overrun budget) take 0, else keep x1.
+		armAsm->Cmp(a64::x1, a64::xzr);
+		armAsm->Csel(a64::x2, a64::xzr, a64::x1, a64::ge);
+
+		// iters = (new_RCYCLE - old_RCYCLE) / 8. The diff is non-negative
+		// here (new >= old in both branches), so ASR vs LSR are equivalent.
+		armAsm->Sub(a64::x3, a64::x2, RCYCLE);
+		armAsm->Lsr(a64::x3, a64::x3, 3);
+
+		// rN -= iters; store back; install new RCYCLE.
+		armAsm->Sub(a64::w0, a64::w0, a64::w3);
+		armAsm->Str(a64::w0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(s_eeTimeoutReg)));
+		armAsm->Mov(RCYCLE, a64::x2);
+
+		// If rN != 0, the cycle budget hit nextEventCycle before rN reached
+		// zero — service the event. If rN == 0, the loop completed; advance
+		// pc past the loop and go through DispatcherReg (no event due).
+		a64::Label completed;
+		armAsm->Cbz(a64::w0, &completed);
+		armEmitJmp(DispatcherEvent);
+
+		armAsm->Bind(&completed);
+		armAsm->Mov(RWSCRATCH, s_nEndBlock);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, PC_OFFSET));
+		g_cpuFlushedPC = true;
+		armEmitJmp(DispatcherReg);
+
+		// Short-circuit the per-instruction emit loop. The block-end handler
+		// will still emit its standard tail (iBranchTest etc.), but it's
+		// dead code after the unconditional jumps above. Suppressing block
+		// linking via WaitLoop semantics matches the existing s_nBlockFF
+		// path's intent.
+		g_branch = 1;
+		s_nBlockFF = true;
+		pc = s_nEndBlock;
+	}
 
 	while (!g_branch && pc < s_nEndBlock)
 	{

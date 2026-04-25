@@ -1080,18 +1080,40 @@ static void emitReloadCycleReg(int64_t cycle_off)
 static const auto VU1_FMAC_WPOS_REG = w24;
 static const auto VU1_IALU_WPOS_REG = w25;
 
-// Phase-6 opt #1: pinned pointers to the linkEntry gate globals. Both are
-// callee-saved (x19-x28 per AAPCS64). Loaded once at block prologue,
-// restored at epilogue. Collapses each linkEntry budget+termination check
-// from ~9 instructions (two adrp+add+ldr sequences) down to ~5 (direct
-// Ldr via the pinned base). Since every linked-chain block entry runs
-// this gate, the compounded savings are significant.
+// Phase-6 opt #1: pinned pointer to the linkEntry gate global. Callee-
+// saved (x19-x28 per AAPCS64). Loaded once at block prologue, restored
+// at epilogue. Collapses linkEntry's termination check from ~5
+// instructions (adrp+add+ldr) down to ~3 (direct Ldr via the pinned base).
+// Since every linked-chain block entry runs this gate, the compounded
+// savings are significant.
 //
-//   x26 → &s_vu1_cycle_limit  (u64)
+// The cycle-limit half of opt #1 (formerly x26 → &s_vu1_cycle_limit) was
+// dropped to free x26 for VU1_FMACCOUNT_REG below — the cycle-limit
+// address now materializes fresh in scratch x5 inside the linkEntry gate
+// (+2 insn per gate execution). The fmaccount pin saves more in the per-
+// pair body than the gate loses, for any block with FMAC pairs.
+//
 //   x27 → &s_vu1_program_ended (THREAD_VU1) OR &VU0 (!THREAD_VU1,
 //         used with vpu_stat_off for the VPU_STAT 0x100 test)
-static const auto VU1_CYCLE_LIMIT_ADDR_REG = x26;
 static const auto VU1_TERM_ADDR_REG        = x27;
+
+// Phase-9b (2026-04-25): pinned VU->fmaccount register. u32 ring counter
+// incremented by emitFMACAddPair (every FMAC pair) and decremented by
+// helpers that drain the FMAC pipe — _vuFMACflush (via _vuTestPipes,
+// _vuFlushAll, vu1Exec, hack_xgkick capture path, emitVU1InterpBL). Read
+// (not written) by vu1_TestFMACStallReg per stall check.
+//
+// Pinning saves the per-FMAC-pair Ldr+Add+Str (3 insn) → Add (1 insn) at
+// the cost of flushing/reloading around the BLs above. Net win is modest
+// (~0.5 insn/FMAC pair after offset costs) but the infrastructure mirrors
+// the cycle/wpos pins.
+//
+//   w26 ↔ VU->fmaccount  (32-bit u32; x26 zero-extended for 64-bit form)
+//
+// Reuses the x26 slot freed by dropping the cycle-limit pin above. The
+// prologue Stp/Ldp save/restore at [sp+56..63] is unchanged — same
+// physical reg, just with fmaccount semantics now.
+static const auto VU1_FMACCOUNT_REG = w26;
 
 // Phase-7 (2026-04-20): pinned VU->macflag / VU->statusflag / VU->clipflag
 // registers for the duration of a compiled block. These three u32 fields are
@@ -1141,6 +1163,21 @@ static void emitReloadWposRegs(int64_t fmacwpos_off, int64_t ialuwpos_off)
 	armAsm->Ldr(VU1_IALU_WPOS_REG, MemOperand(VU1_BASE_REG, ialuwpos_off));
 }
 
+// Phase-9b: VU->fmaccount pin flush/reload. Flush before any BL that reads
+// VU->fmaccount (vu1_TestFMACStallReg's loop bound, _vuTestPipes, _vuFMACflush
+// via _vuFlushAll/vu1EbitDone/vu1Exec/emitVU1InterpBL/hack_xgkick capture).
+// Reload after BLs that decrement VU->fmaccount (everything in that list
+// except vu1_TestFMACStallReg, which is read-only — flush only there).
+static void emitFlushFmaccountReg(int64_t fmaccount_off)
+{
+	armAsm->Str(VU1_FMACCOUNT_REG, MemOperand(VU1_BASE_REG, fmaccount_off));
+}
+
+static void emitReloadFmaccountReg(int64_t fmaccount_off)
+{
+	armAsm->Ldr(VU1_FMACCOUNT_REG, MemOperand(VU1_BASE_REG, fmaccount_off));
+}
+
 // Flag register flush/reload. Called at block epilogue and around the
 // vu1Exec hazard-fallback BL.
 static void emitFlushFlagRegs(int64_t macflag_off, int64_t statusflag_off, int64_t clipflag_off)
@@ -1188,6 +1225,7 @@ void emitVU1InterpBL(const void* interp_fn)
 	const int64_t cycle_off      = (int64_t)offsetof(VURegs, cycle);
 	const int64_t fmacwpos_off   = (int64_t)offsetof(VURegs, fmacwritepos);
 	const int64_t ialuwpos_off   = (int64_t)offsetof(VURegs, ialuwritepos);
+	const int64_t fmaccount_off  = (int64_t)offsetof(VURegs, fmaccount);
 	const int64_t macflag_off    = (int64_t)offsetof(VURegs, macflag);
 	const int64_t statusflag_off = (int64_t)offsetof(VURegs, statusflag);
 	const int64_t clipflag_off   = (int64_t)offsetof(VURegs, clipflag);
@@ -1195,11 +1233,13 @@ void emitVU1InterpBL(const void* interp_fn)
 
 	emitFlushCycleReg(cycle_off);
 	emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
+	emitFlushFmaccountReg(fmaccount_off);
 	emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
 	emitFlushAccReg(acc_off);
 	armEmitCall(interp_fn);
 	emitReloadCycleReg(cycle_off);
 	emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
+	emitReloadFmaccountReg(fmaccount_off);
 	emitReloadFlagRegs(macflag_off, statusflag_off, clipflag_off);
 	emitReloadAccReg(acc_off);
 }
@@ -1232,13 +1272,19 @@ void emitVU1InterpBL(const void* interp_fn)
 // vu1_TestFMACStallReg reads `VU->cycle` and conditionally writes it when
 // a stall adjustment is needed, so the Stage C2 cached cycle register
 // (x21) must be flushed/reloaded around each BL.
+//
+// Phase-9b: vu1_TestFMACStallReg also reads (but never writes) VU->fmaccount
+// as the loop bound, so the pinned VU1_FMACCOUNT_REG (w26) must be flushed
+// before each BL. No reload — the BL doesn't mutate fmaccount.
 static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 {
-	const int64_t cycle_off = (int64_t)offsetof(VURegs, cycle);
+	const int64_t cycle_off     = (int64_t)offsetof(VURegs, cycle);
+	const int64_t fmaccount_off = (int64_t)offsetof(VURegs, fmaccount);
 
 	if (!skip0 && regs.VFread0 != 0)
 	{
 		emitFlushCycleReg(cycle_off);
+		emitFlushFmaccountReg(fmaccount_off);
 		armAsm->Mov(x0, VU1_BASE_REG);
 		armAsm->Mov(w1, regs.VFread0);
 		armAsm->Mov(w2, regs.VFr0xyzw);
@@ -1248,6 +1294,7 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 	if (!skip1 && regs.VFread1 != 0)
 	{
 		emitFlushCycleReg(cycle_off);
+		emitFlushFmaccountReg(fmaccount_off);
 		armAsm->Mov(x0, VU1_BASE_REG);
 		armAsm->Mov(w1, regs.VFread1);
 		armAsm->Mov(w2, regs.VFr1xyzw);
@@ -1389,9 +1436,10 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 	                        (lowerFMAC ? lregs.VIwrite : 0u);
 
 	const int64_t fmac_off       = (int64_t)offsetof(VURegs, fmac);
-	const int64_t fmaccount_off  = (int64_t)offsetof(VURegs, fmaccount);
 	// Phase-7: macflag/statusflag/clipflag live in pinned regs w19/w20/w28
 	// for the whole block, so no offsetof lookups are needed here.
+	// Phase-9b: fmaccount lives in the pinned VU1_FMACCOUNT_REG (w26); no
+	// memory load/store here either — the per-pair `Add` bumps the pin.
 	static_assert(offsetof(fmacPipe, clipflag) == offsetof(fmacPipe, statusflag) + 4,
 		"Stp(statusflag, clipflag) requires adjacent u32 layout in fmacPipe");
 	static_assert(offsetof(fmacPipe, macflag) == offsetof(fmacPipe, Cycle) + 4,
@@ -1481,10 +1529,11 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 	else
 		armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(x7, f_statusflag));
 
-	// fmaccount++
-	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fmaccount_off));
-	armAsm->Add(w4, w4, 1);
-	armAsm->Str(w4, MemOperand(VU1_BASE_REG, fmaccount_off));
+	// fmaccount++ — Phase-9b: bumped in the pinned VU1_FMACCOUNT_REG (w26).
+	// Block-end flush + per-BL flush (around vu1_TestFMACStallReg /
+	// vu1_TestPipes_VU1 / vu1Exec / vu1EbitDone / hack_xgkick / interp BLs)
+	// keeps memory in sync wherever a downstream reader expects it.
+	armAsm->Add(VU1_FMACCOUNT_REG, VU1_FMACCOUNT_REG, 1);
 }
 
 // Stage C1 inline pipeline add for non-FMAC lower pipes (FDIV/EFU/IALU).
@@ -1643,6 +1692,16 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// accumulate here — we already read `upper` / decode `lregs` for the
 	// regs pre-walk.
 	//   block_has_ebit         / block_has_dbit_or_tbit : step 13 countdown.
+	//   block_has_branch       : step 12 countdown. Mirrors the step-13 gate
+	//                            shape — VU1 has no per-pair budget abort,
+	//                            so any branch set in a prior block was
+	//                            countdowned to 0 in that same block before
+	//                            exit. "VU->branch == 0 at entry" therefore
+	//                            holds for any block whose own pre-walk sees
+	//                            no VUPIPE_BRANCH lower. Hazard fallback is
+	//                            invariant-preserving: vu1Exec interprets
+	//                            the whole pair (countdown included), so the
+	//                            native body resumes with coherent state.
 	//   block_has_ibxx         : only IBxx reads VIBackupCycles via
 	//                            emitHazardVIRead (JR/JALR skip the hazard
 	//                            path despite `VIread != 0`). Opcodes per
@@ -1662,6 +1721,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	//                            (write VI without emitBackupVI).
 	bool block_has_ebit           = false;
 	bool block_has_dbit_or_tbit   = false;
+	bool block_has_branch         = false;
 	bool block_has_ibxx           = false;
 	bool block_has_vi_backup_set  = false;
 	{
@@ -1690,6 +1750,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				const _VURegsNum& lregs_i = lregs_data[i];
 				if ((lregs_i.VIwrite & 0xFFFFu) != 0u && lregs_i.pipe != VUPIPE_BRANCH)
 					block_has_vi_backup_set = true;
+
+				// Matches the per-pair `branch_pipe` test (line ~2521):
+				// !ibit && lregs.pipe == VUPIPE_BRANCH. The !ibit clause is
+				// implicit here — we're inside the `if (!ibit)` arm.
+				if (lregs_i.pipe == VUPIPE_BRANCH)
+					block_has_branch = true;
 			}
 			// I-bit pairs: lregs_data[i] stays zeroed (no lower instruction).
 
@@ -2086,7 +2152,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	//   [sp+32..39] = x23 (VU1_BASE_REG)
 	//   [sp+40..47] = x24 (VU1_FMAC_WPOS_REG — Stage C3 cached fmacwritepos)
 	//   [sp+48..55] = x25 (VU1_IALU_WPOS_REG — Stage C3 cached ialuwritepos)
-	//   [sp+56..63] = x26 (VU1_CYCLE_LIMIT_ADDR_REG — opt #1 pinned gate addr)
+	//   [sp+56..63] = x26 (VU1_FMACCOUNT_REG — Phase-9b cached VU->fmaccount;
+	//                      formerly cycle-limit gate addr, dropped to free x26)
 	//   [sp+64..71] = x27 (VU1_TERM_ADDR_REG — opt #1 pinned gate addr)
 	//   [sp+72..79] = x19 (VU1_MACFLAG_REG    — Phase-7 cached VU->macflag)
 	//   [sp+80..87] = x20 (VU1_STATUSFLAG_REG — Phase-7 cached VU->statusflag)
@@ -2094,15 +2161,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	armAsm->Stp(x29, x30, MemOperand(sp, -96, PreIndex));
 	armAsm->Stp(VU1_CYCLE_REG, x22, MemOperand(sp, 16));
 	armAsm->Stp(VU1_BASE_REG, x24, MemOperand(sp, 32));
-	armAsm->Stp(x25, VU1_CYCLE_LIMIT_ADDR_REG, MemOperand(sp, 48));
+	armAsm->Stp(x25, x26, MemOperand(sp, 48));
 	armAsm->Stp(VU1_TERM_ADDR_REG, x19, MemOperand(sp, 64));
 	armAsm->Stp(x20, x28, MemOperand(sp, 80));
 	armAsm->Mov(x29, sp);
 	armMoveAddressToReg(VU1_BASE_REG, &VU1);
-	// Opt #1: pin the linkEntry gate addresses. Loaded once per block;
+	// Opt #1: pin the termination gate address. Loaded once per block;
 	// every codeEntry+linkEntry pair amortizes the cost across all linked
-	// entries within the chain.
-	armMoveAddressToReg(VU1_CYCLE_LIMIT_ADDR_REG, &s_vu1_cycle_limit);
+	// entries within the chain. The cycle-limit half was dropped in
+	// Phase-9b; that address now materializes fresh inside the gate.
 	if (THREAD_VU1)
 		armMoveAddressToReg(VU1_TERM_ADDR_REG, &s_vu1_program_ended);
 	else
@@ -2118,6 +2185,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	const int64_t regi_off       = (int64_t)((int64_t)offsetof(VURegs, VI) + REG_I   * (int64_t)sizeof(REG_VI));
 	const int64_t fmacwpos_off   = (int64_t)offsetof(VURegs, fmacwritepos);
 	const int64_t ialuwpos_off   = (int64_t)offsetof(VURegs, ialuwritepos);
+	const int64_t fmaccount_off  = (int64_t)offsetof(VURegs, fmaccount);
 	const int64_t vibackup_off   = (int64_t)offsetof(VURegs, VIBackupCycles);
 	const int64_t macflag_off    = (int64_t)offsetof(VURegs, macflag);
 	const int64_t statusflag_off = (int64_t)offsetof(VURegs, statusflag);
@@ -2145,6 +2213,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// touching memory. Same for w25 / IALU. The block-end flush (pre-
 	// epilogue) writes both back in a single Str pair.
 	emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
+
+	// Phase-9b: prime the pinned VU->fmaccount register. emitFMACAddPair
+	// bumps w26 in place every FMAC pair; flushed before BLs that read
+	// fmaccount and reloaded after BLs that may decrement it.
+	emitReloadFmaccountReg(fmaccount_off);
 
 	// Phase-7: prime the pinned flag registers from memory. emitFMACAddPair
 	// reads all three per pair (captures into the fmac pipe slot) and the
@@ -2208,12 +2281,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	//
 	//      Matches the old `stopped` computation in Execute's while body.
 	//
-	// Opt #1: both gate-target addresses are pre-pinned in
-	// VU1_CYCLE_LIMIT_ADDR_REG (x26) and VU1_TERM_ADDR_REG (x27) by the
-	// prologue. linkEntry collapses to Ldr + Cmp + B per check.
+	// Opt #1: termination address is pre-pinned in VU1_TERM_ADDR_REG (x27)
+	// by the prologue. The cycle-limit address half was dropped in Phase-9b
+	// to free x26 for VU1_FMACCOUNT_REG; materialize fresh in scratch x5
+	// here (+1 insn per gate execution; amortized across all linked-chain
+	// entries — net win when the block has any FMAC pairs).
 	{
 		// 1. Cycle budget.
-		armAsm->Ldr(x5, MemOperand(VU1_CYCLE_LIMIT_ADDR_REG));
+		armMoveAddressToReg(x5, &s_vu1_cycle_limit);
+		armAsm->Ldr(x5, MemOperand(x5));
 		armAsm->Cmp(VU1_CYCLE_REG, x5);
 		armAsm->B(&budget_exceeded_exit, hs);
 
@@ -2562,12 +2638,16 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// and reload q16 out across the BL.
 			emitFlushCycleReg(cycle_off);
 			emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
+			// Phase-9b: vu1Exec runs a full pair through interp, which may
+			// call _vuTestPipes / _vuFMACflush and mutate fmaccount.
+			emitFlushFmaccountReg(fmaccount_off);
 			emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
 			emitFlushAccReg(acc_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
 			armEmitCall(reinterpret_cast<const void*>(vu1Exec));
 			emitReloadCycleReg(cycle_off);
 			emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
+			emitReloadFmaccountReg(fmaccount_off);
 			emitReloadFlagRegs(macflag_off, statusflag_off, clipflag_off);
 			emitReloadAccReg(acc_off);
 			// Non-hack path only: honor pending XGKICK fire from prior pair
@@ -2675,8 +2755,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		if (!skip_info[i].skipTestPipes)
 		{
 			emitFlushCycleReg(cycle_off);
+			// Phase-9b: vu1_TestPipes_VU1 reads fmaccount as the FMAC-flush
+			// loop bound and decrements it per flushed slot. Flush+reload
+			// the pin around the BL.
+			emitFlushFmaccountReg(fmaccount_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
 			armEmitCall(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
+			emitReloadFmaccountReg(fmaccount_off);
 		}
 
 		// 6b. Decrement VIBackupCycles (needed for correct VI backup reads
@@ -2793,6 +2878,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			{
 				emitFlushCycleReg(cycle_off);
 				emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
+				// Phase-9b: hack-mode XGKICK capture eventually runs
+				// _vuTestPipes inside _vuXGKICKTransfer(0, true), which
+				// reads + decrements fmaccount.
+				emitFlushFmaccountReg(fmaccount_off);
 			}
 			if (!suppress_branch)
 				emitVU1Lower(lower); // switch dispatch — emits native ARM64 for this op
@@ -2800,6 +2889,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			{
 				emitReloadCycleReg(cycle_off);
 				emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
+				emitReloadFmaccountReg(fmaccount_off);
 			}
 		}
 
@@ -2835,6 +2925,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		}
 
 		// 12. Branch countdown (inline).
+		//
+		// Gated on block_has_branch: if no pair in this block has a
+		// VUPIPE_BRANCH lower, VU->branch is never written here, and any
+		// prior block's branch was countdowned to 0 in that block (VU1 has
+		// no per-pair budget abort; every block runs to natural completion).
+		// Same correctness shape as step 13's ebit gate.
+		if (block_has_branch)
 		{
 			Label skip_branch;
 			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, branch_off));
@@ -2876,9 +2973,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			armAsm->B(&skip_ebit, ne);             // still > 0: keep counting
 			// ebit just reached 0: end of microprogram
 			emitFlushCycleReg(cycle_off);
+			// Phase-9b: vu1EbitDone calls _vuFlushAll, which drains the
+			// FMAC pipe via _vuFMACflush (decrements fmaccount per slot).
+			emitFlushFmaccountReg(fmaccount_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
 			armEmitCall(reinterpret_cast<const void*>(vu1EbitDone));
 			emitReloadCycleReg(cycle_off);
+			emitReloadFmaccountReg(fmaccount_off);
 			armAsm->Bind(&skip_ebit);
 		}
 
@@ -3107,6 +3208,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// Stage C3: flush the cached FMAC/IALU write-position registers to
 	// memory before restoring the caller's x24/x25.
 	emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
+	// Phase-9b: flush the cached fmaccount before restoring caller's x26.
+	emitFlushFmaccountReg(fmaccount_off);
 	// Phase-7: flush the cached flag regs before restoring x19/x20/x28.
 	emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
 	// Phase-8: flush the pinned ACC reg to memory before Ret. q16 is
@@ -3117,7 +3220,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// --- Epilogue (96-byte frame; mirrors the prologue layout above) ---
 	armAsm->Ldp(x20, x28, MemOperand(sp, 80));
 	armAsm->Ldp(VU1_TERM_ADDR_REG, x19, MemOperand(sp, 64));
-	armAsm->Ldp(x25, VU1_CYCLE_LIMIT_ADDR_REG, MemOperand(sp, 48));
+	armAsm->Ldp(x25, x26, MemOperand(sp, 48));
 	armAsm->Ldp(VU1_BASE_REG, x24, MemOperand(sp, 32));
 	armAsm->Ldp(VU1_CYCLE_REG, x22, MemOperand(sp, 16));
 	armAsm->Ldp(x29, x30, MemOperand(sp, 96, PostIndex));
