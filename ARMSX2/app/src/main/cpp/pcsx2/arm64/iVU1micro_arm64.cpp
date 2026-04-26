@@ -465,6 +465,11 @@ extern u32 g_vu1CurrentPC;
 // ir.info[i].needs_vi_backup before the lower emit. When false, the
 // emitBackupVI BL is elided entirely.
 extern bool g_vu1NeedsVIBackup;
+// U/O flag-bits gate. Set once per block from CompileBlock pre-walk —
+// true iff any in-block op reads MAC/STATUS_FLAG, the overflow gamefix
+// is enabled, or vuFlagHack is off (exact mode). When false,
+// emitFmacInlineWriteback skips ~12 NEON + ~6 GPR insn per writeback.
+extern bool g_vu1NeedsUOFlags;
 
 // ============================================================================
 //  Block cache
@@ -2766,10 +2771,16 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// When the toggle is on (default), the elision logic runs as before.
 	bool pair_needs_flags[VU1_MAX_BLOCK_PAIRS];
 	const bool flagHackOn = EmuConfig.Speedhacks.vuFlagHack;
+	// block_reads_uo: any in-block op reads MAC_FLAG or STATUS_FLAG. Used to
+	// gate emitFmacInlineWriteback's U/O ladder. CLIP_FLAG is excluded —
+	// FCxxx ops read CLIP, never MAC/STATUS, so they don't pull U/O.
+	bool block_reads_uo = false;
 	{
 		constexpr u32 FLAG_READ_MASK = (1u << REG_MAC_FLAG)
 		                              | (1u << REG_STATUS_FLAG)
 		                              | (1u << REG_CLIP_FLAG);
+		constexpr u32 UO_READ_MASK = (1u << REG_MAC_FLAG)
+		                            | (1u << REG_STATUS_FLAG);
 		bool sawFlagReader = false; // any pair > current reads flags
 		int  fmacFromEnd   = 0;     // count of FMAC pairs at indices > current
 		for (int i = static_cast<int>(numPairs) - 1; i >= 0; i--)
@@ -2787,14 +2798,26 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			}
 			pair_needs_flags[i] = needsFlags;
 
+			const u32 readsCombined = (uregs.VIread | lregs.VIread);
 			// Update sawFlagReader for the NEXT (earlier) iteration. The
 			// current pair's own flag read does not pull its own flag write
 			// — pipe latency means a same-pair FMxxx reads VI[FLAG] from
 			// 4+ cycles ago, not the upper FMAC's just-now-written value.
-			if ((uregs.VIread | lregs.VIread) & FLAG_READ_MASK)
+			if (readsCombined & FLAG_READ_MASK)
 				sawFlagReader = true;
+			if (readsCombined & UO_READ_MASK)
+				block_reads_uo = true;
 		}
 	}
+
+	// Set the U/O computation gate once per block. True when:
+	//   - vuFlagHack off (exact mode forces full computation), OR
+	//   - any in-block op reads MAC/STATUS (FMxxx/FSxxx + CFC2 of vi16/vi17), OR
+	//   - the overflow gamefix is on (clamp path needs the inf mask).
+	// Cross-block readers of MAC/STATUS get the same OLD-equivalent semantic
+	// gap upstream's CHECK_VUOVERFLOWHACK gating produces (rare; matches
+	// upstream's compatibility tradeoff).
+	g_vu1NeedsUOFlags = !flagHackOn || block_reads_uo || CHECK_VU_OVERFLOW(1);
 
 	// Precompute link_info here for the exit-selector emit below. An earlier
 	// version also used this to gate step 2 (TPC write) per pair, but the

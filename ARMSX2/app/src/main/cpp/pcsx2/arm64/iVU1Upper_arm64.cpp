@@ -34,6 +34,30 @@ using namespace vixl::aarch64;
 bool g_vu1NeedsFlags = true;
 
 // ============================================================================
+//  U/O flag-bits gate
+//
+//  Set by CompileBlock once per block. When false, emitFmacInlineWriteback
+//  skips the per-lane denormal (U) / inf (O) detection in Step A, the
+//  denormal-flush in Step B, the U/O lane-pack ops in Step C, and the U/O
+//  status-bit Tst/Cset/Orr in Step F. Net savings: ~12 NEON + ~6 GPR insn
+//  per writeback.
+//
+//  Block-level analysis: true iff any in-block op has VIread of MAC_FLAG or
+//  STATUS_FLAG, OR `CHECK_VU_OVERFLOW(1)` (gamefix forces full computation
+//  for the inf-clamp path), OR vuFlagHack is off (exact mode).
+//
+//  Cross-block soundness: this matches OLD's mVUupdateFlags semantics —
+//  upstream gates the entire O-bit ladder behind CHECK_VUOVERFLOWHACK and
+//  never computes U at all. Games that read MAC/STATUS only in cross-block
+//  fashion get the same OLD-equivalent semantic gap (very rare; CFC2/FMxxx
+//  on flag regs is uncommon).
+//
+//  Default true matches pre-existing behavior for any path that bypasses
+//  the per-block analysis (e.g., direct interpreter execution).
+// ============================================================================
+bool g_vu1NeedsUOFlags = true;
+
+// ============================================================================
 //  Native NEON codegen helpers
 // ============================================================================
 
@@ -258,6 +282,12 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 {
 	const bool  skip_dst_write   = (dst_off == vfOffStatic0); // VF[0] hardwired
 	const bool  overflow_clamp   = CHECK_VU_OVERFLOW(1);
+	// compute_uo: emit U (denormal) and O (inf/NaN) flag bits + denormal flush
+	// + inf clamp. False when no in-block op reads MAC/STATUS and the user has
+	// not enabled the overflow gamefix — matches OLD's mVUupdateFlags pattern
+	// (which never computes U and only computes O behind CHECK_VUOVERFLOWHACK).
+	// Saves ~12 NEON + ~6 GPR insn per writeback for typical blocks.
+	const bool  compute_uo       = g_vu1NeedsUOFlags || overflow_clamp;
 	const bool  opm_mode         = (mode == FmacWritebackMode::OpmXYZ);
 	// In OPMULA/OPMSUB the ISA treats xyz as the active lanes and never
 	// touches macflag[w] — force effective xyzw to 0xE so our lane loop
@@ -276,15 +306,20 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 	// v4 = sign bit (0 or 1 per lane).
 	armAsm->Ushr(v4.V4S(), v5.V4S(), 31);
 
-	// v6 = v_zero_mask : 0xFFFFFFFF if (v5 == ±0), else 0.
-	armAsm->Cmeq(v6.V4S(), v2.V4S(), 0);
 	// v7 = v_exp0_mask : 0xFFFFFFFF if (exp == 0) — covers both zero AND denormal.
+	// This is the Z bit source (PS2 spec: Z fires for zero OR denormal).
 	armAsm->Cmeq(v7.V4S(), v3.V4S(), 0);
-	// v6 = v_denorm_mask : (exp == 0) AND NOT zero.
-	armAsm->Bic(v6.V16B(), v7.V16B(), v6.V16B());
-	// v8 = 0xFF broadcast, then v8 = v_inf_mask : (exp == 0xFF).
-	armAsm->Movi(v8.V4S(), 0xFF);
-	armAsm->Cmeq(v8.V4S(), v3.V4S(), v8.V4S());
+
+	if (compute_uo)
+	{
+		// v6 = v_zero_mask : 0xFFFFFFFF if (v5 == ±0), else 0.
+		armAsm->Cmeq(v6.V4S(), v2.V4S(), 0);
+		// v6 = v_denorm_mask : (exp == 0) AND NOT zero.
+		armAsm->Bic(v6.V16B(), v7.V16B(), v6.V16B());
+		// v8 = 0xFF broadcast, then v8 = v_inf_mask : (exp == 0xFF).
+		armAsm->Movi(v8.V4S(), 0xFF);
+		armAsm->Cmeq(v8.V4S(), v3.V4S(), v8.V4S());
+	}
 
 	// ------------------------------------------------------------------
 	// Step B: apply result clamping to v5.
@@ -292,22 +327,25 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 	//   inf/NaN lanes (with overflow gate)  → sign | 0x7F7FFFFF.
 	// ------------------------------------------------------------------
 
-	// v3 = 0x80000000 per lane (sign-bit-placed).
-	armAsm->Shl(v3.V4S(), v4.V4S(), 31);
-	// v5 ← denorm ? v3 : v5 (flush denormals to ±0).
-	// Bit Vd,Vn,Vm : Vd = (Vd & ~Vm) | (Vn & Vm).
-	armAsm->Bit(v5.V16B(), v3.V16B(), v6.V16B());
-
-	if (overflow_clamp)
+	if (compute_uo)
 	{
-		// v2 = 0x7F7FFFFF broadcast (MAX_FLOAT bit pattern).
-		armAsm->Mov(w4, 0xFFFFu);
-		armAsm->Movk(w4, 0x7F7F, 16);
-		armAsm->Dup(v2.V4S(), w4);
-		// v2 = sign | MAX_FLOAT.
-		armAsm->Orr(v2.V16B(), v3.V16B(), v2.V16B());
-		// v5 ← inf ? (sign|MAX) : v5.
-		armAsm->Bit(v5.V16B(), v2.V16B(), v8.V16B());
+		// v3 = 0x80000000 per lane (sign-bit-placed).
+		armAsm->Shl(v3.V4S(), v4.V4S(), 31);
+		// v5 ← denorm ? v3 : v5 (flush denormals to ±0).
+		// Bit Vd,Vn,Vm : Vd = (Vd & ~Vm) | (Vn & Vm).
+		armAsm->Bit(v5.V16B(), v3.V16B(), v6.V16B());
+
+		if (overflow_clamp)
+		{
+			// v2 = 0x7F7FFFFF broadcast (MAX_FLOAT bit pattern).
+			armAsm->Mov(w4, 0xFFFFu);
+			armAsm->Movk(w4, 0x7F7F, 16);
+			armAsm->Dup(v2.V4S(), w4);
+			// v2 = sign | MAX_FLOAT.
+			armAsm->Orr(v2.V16B(), v3.V16B(), v2.V16B());
+			// v5 ← inf ? (sign|MAX) : v5.
+			armAsm->Bit(v5.V16B(), v2.V16B(), v8.V16B());
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -322,18 +360,20 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 
 	// v7 narrows mask → 0/1. Shift the 0xFFFFFFFF pattern right by 31.
 	armAsm->Ushr(v7.V4S(), v7.V4S(), 31);   // Z bits at bit 0
-	armAsm->Ushr(v6.V4S(), v6.V4S(), 31);   // U bits at bit 0
-	armAsm->Ushr(v8.V4S(), v8.V4S(), 31);   // O bits at bit 0
-
-	// Shift sign/U/O to their positions within the per-lane nibble tower.
+	// Shift sign to its position within the per-lane nibble tower.
 	armAsm->Shl(v4.V4S(), v4.V4S(), 4);     // S bit moves to bit 4
-	armAsm->Shl(v6.V4S(), v6.V4S(), 8);     // U bit moves to bit 8
-	armAsm->Shl(v8.V4S(), v8.V4S(), 12);    // O bit moves to bit 12
-
-	// Combine: v3 = Z | S<<4 | U<<8 | O<<12, per lane.
+	// Combine Z and S.
 	armAsm->Orr(v3.V16B(), v7.V16B(), v4.V16B());
-	armAsm->Orr(v3.V16B(), v3.V16B(), v6.V16B());
-	armAsm->Orr(v3.V16B(), v3.V16B(), v8.V16B());
+
+	if (compute_uo)
+	{
+		armAsm->Ushr(v6.V4S(), v6.V4S(), 31);   // U bits at bit 0
+		armAsm->Ushr(v8.V4S(), v8.V4S(), 31);   // O bits at bit 0
+		armAsm->Shl(v6.V4S(), v6.V4S(), 8);     // U bit moves to bit 8
+		armAsm->Shl(v8.V4S(), v8.V4S(), 12);    // O bit moves to bit 12
+		armAsm->Orr(v3.V16B(), v3.V16B(), v6.V16B());
+		armAsm->Orr(v3.V16B(), v3.V16B(), v8.V16B());
+	}
 
 	// ------------------------------------------------------------------
 	// Step D: pack v3's 4 lanes into a single 16-bit macflag value.
@@ -381,12 +421,18 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 	armAsm->Tst(w6, 0x00F0u);
 	armAsm->Cset(w4, ne);
 	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 1));
-	armAsm->Tst(w6, 0x0F00u);
-	armAsm->Cset(w4, ne);
-	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 2));
-	armAsm->Tst(w6, 0xF000u);
-	armAsm->Cset(w4, ne);
-	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 3));
+	if (compute_uo)
+	{
+		// Skipping when !compute_uo is equivalent: U/O macflag bits are
+		// always 0 in that path, so Tst would always set Z and Cset would
+		// always emit 0 — the Orr is a no-op.
+		armAsm->Tst(w6, 0x0F00u);
+		armAsm->Cset(w4, ne);
+		armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 2));
+		armAsm->Tst(w6, 0xF000u);
+		armAsm->Cset(w4, ne);
+		armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 3));
+	}
 	// statusflag lives in the pinned reg; no memory store here.
 
 	// ------------------------------------------------------------------
