@@ -98,37 +98,38 @@ void Host::PumpMessagesOnCPUThread()
 	for (auto& fn : queue)
 		fn();
 
-	// SDL event pump
+	// Drain OS events into SDL's queue ourselves; SDL_PollEvent would do this
+	// implicitly, but we use SDL_PeepEvents below to leave gamepad/joystick
+	// events in the queue for SDLInputSource::PollEvents (called from
+	// VMManager::Internal::PollInputOnCPUThread immediately after this).
+	SDL_PumpEvents();
+
 	SDL_Event ev;
-	while (SDL_PollEvent(&ev))
+	while (SDL_PeepEvents(&ev, 1, SDL_GETEVENT, SDL_EVENT_QUIT, SDL_EVENT_QUIT) > 0)
 	{
-		switch (ev.type)
+		VMManager::SetState(VMState::Stopping);
+		s_running = false;
+	}
+	while (SDL_PeepEvents(&ev, 1, SDL_GETEVENT, SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP) > 0)
+	{
+		if (ev.key.repeat)
+			continue;
+		const auto key = InputManager::MakeHostKeyboardKey(static_cast<u32>(ev.key.scancode));
+		const float value = (ev.type == SDL_EVENT_KEY_DOWN) ? 1.0f : 0.0f;
+		InputManager::InvokeEvents(key, value);
+		// Always forward releases to ImGui - an input hook may have
+		// eaten the event, leaving ImGui with a stuck key.
+		if (ev.type == SDL_EVENT_KEY_UP)
+			ImGuiManager::ProcessHostKeyEvent(key, 0.0f);
+	}
+	while (SDL_PeepEvents(&ev, 1, SDL_GETEVENT, SDL_EVENT_WINDOW_FIRST, SDL_EVENT_WINDOW_LAST) > 0)
+	{
+		if (ev.type == SDL_EVENT_WINDOW_RESIZED)
 		{
-			case SDL_EVENT_QUIT:
-				VMManager::SetState(VMState::Stopping);
-				s_running = false;
-				break;
-			case SDL_EVENT_KEY_DOWN:
-			case SDL_EVENT_KEY_UP:
-				if (!ev.key.repeat)
-				{
-					const auto key = InputManager::MakeHostKeyboardKey(static_cast<u32>(ev.key.scancode));
-					const float value = (ev.type == SDL_EVENT_KEY_DOWN) ? 1.0f : 0.0f;
-					InputManager::InvokeEvents(key, value);
-					// Always forward releases to ImGui - an input hook may have
-					// eaten the event, leaving ImGui with a stuck key.
-					if (ev.type == SDL_EVENT_KEY_UP)
-						ImGuiManager::ProcessHostKeyEvent(key, 0.0f);
-				}
-				break;
-			case SDL_EVENT_WINDOW_RESIZED:
-				s_window_width = ev.window.data1;
-				s_window_height = ev.window.data2;
-				if (MTGS::IsOpen())
-					MTGS::UpdateDisplayWindow();
-				break;
-			default:
-				break;
+			s_window_width = ev.window.data1;
+			s_window_height = ev.window.data2;
+			if (MTGS::IsOpen())
+				MTGS::UpdateDisplayWindow();
 		}
 	}
 }
