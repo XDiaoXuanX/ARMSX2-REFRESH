@@ -75,6 +75,18 @@ android {
     }
 }
 
+// Android Studio's "Build > Clean Project" runs the `clean` task, but AGP
+// leaves `app/.cxx/` (the CMake/Ninja workspace) in place. Stale .cxx state
+// can lead to ghost builds — old object files linking against newer headers,
+// or vice versa. Wire `cleanCxx` into `clean` so the native build workspace
+// gets wiped too.
+tasks.register<Delete>("cleanCxx") {
+    delete(layout.projectDirectory.dir(".cxx"))
+}
+tasks.named("clean") {
+    dependsOn("cleanCxx")
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
