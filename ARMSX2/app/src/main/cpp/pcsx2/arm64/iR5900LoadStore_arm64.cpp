@@ -12,8 +12,10 @@
 
 #include "Common.h"
 #include "R5900OpcodeTables.h"
+#include "VU.h"
 #include "arm64/arm64Emitter.h"
 #include "arm64/AsmHelpers.h"
+#include "iRecAnalysis.h"
 #include "vtlb.h"
 
 using namespace R5900;
@@ -51,8 +53,8 @@ static constexpr s64 FPR_OFFSET(int reg) { return FPUREGS_BASE + offsetof(fpuReg
 #define ISTUB_LWR      1
 #define ISTUB_LDL      1
 #define ISTUB_LDR      1
-#define ISTUB_LQ       1   // 128-bit — keep as interp
-#define ISTUB_LQC2     1   // 128-bit VU — keep as interp
+#define ISTUB_LQ       0   // 128-bit — native NEON Ldr q-reg
+#define ISTUB_LQC2     0   // 128-bit VU — native, falls back on SYNC/FINISH
 #endif
 
 #if defined(INTERP_STORE) || defined(INTERP_EE)
@@ -77,8 +79,8 @@ static constexpr s64 FPR_OFFSET(int reg) { return FPUREGS_BASE + offsetof(fpuReg
 #define ISTUB_SWR      1
 #define ISTUB_SDL      1
 #define ISTUB_SDR      1
-#define ISTUB_SQ       1   // 128-bit — keep as interp
-#define ISTUB_SQC2     1   // 128-bit VU — keep as interp
+#define ISTUB_SQ       0   // 128-bit — native NEON Str q-reg
+#define ISTUB_SQC2     0   // 128-bit VU — native, falls back on SYNC/FINISH
 #endif
 
 // ============================================================================
@@ -452,16 +454,89 @@ void recLDR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LDR); }
 void recLDR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LDR); }
 #endif
 
+// ---- LQ — Load Quadword (128-bit) to GPR ----
+//
+// Address forced to 16-byte alignment (`addr & ~0x0F`) per PS2 spec — matches
+// upstream recLoadQuad in x86/ix86-32/iR5900LoadStore.cpp:64-97. Fastmem path
+// is a single 128-bit Ldr q-reg + Str q-reg into the GPR slot. Slow path BLs
+// vtlb_memRead128 which returns r128 in q0 (AAPCS64 vector return).
 #if ISTUB_LQ
 void recLQ() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LQ); }
 #else
-void recLQ() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LQ); }
+void recLQ()
+{
+	armComputeAddress();
+	armAsm->And(a64::w0, a64::w0, ~0xFu);
+
+	if (armUseFastmem())
+	{
+		armPreVtlbCall();
+		const u8* code_start = armGetCurrentCodePointer();
+		armAsm->Ldr(a64::q0, a64::MemOperand(RFASTMEMBASE, a64::x0));
+		armRecordFastmem(code_start, RXARG1.GetCode(), a64::q0.GetCode(), 128, false, true, false);
+		if (_Rt_)
+		{
+			armDelConstReg(_Rt_);
+			armAsm->Str(a64::q0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+		}
+	}
+	else
+	{
+		armPreVtlbCall();
+		armEmitFlushCycleBeforeCall();
+		armEmitCall((const void*)&vtlb_memRead128);
+		armEmitReloadCycleAfterCall();
+		if (_Rt_)
+		{
+			armDelConstReg(_Rt_);
+			armAsm->Str(a64::q0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+		}
+	}
+}
 #endif
 
+// ---- LQC2 — Load Quadword to COP2 (VU0 VF register) ----
+//
+// Mirrors x86 recLQC2 in microVU_Macro.inl:808. Falls back to interp when the
+// analysis pass flagged EEINST_COP2_SYNC_VU0 / EEINST_COP2_FINISH_VU0 (so
+// vu0Sync / vu0Finish runs first — same fallback shape as QMFC2/QMTC2 in
+// iR5900COP2_arm64.cpp). Otherwise emits native 128-bit load to &VU0.VF[_Ft_].
 #if ISTUB_LQC2
 void recLQC2() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LQC2); }
 #else
-void recLQC2() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LQC2); }
+void recLQC2()
+{
+	if (g_pCurInstInfo && (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0)))
+	{
+		armCallInterpreter(R5900::Interpreter::OpcodeImpl::LQC2);
+		return;
+	}
+
+	armComputeAddress();
+	armAsm->And(a64::w0, a64::w0, ~0xFu);
+
+	if (armUseFastmem())
+	{
+		armPreVtlbCall();
+		const u8* code_start = armGetCurrentCodePointer();
+		armAsm->Ldr(a64::q0, a64::MemOperand(RFASTMEMBASE, a64::x0));
+		armRecordFastmem(code_start, RXARG1.GetCode(), a64::q0.GetCode(), 128, false, true, false);
+	}
+	else
+	{
+		armPreVtlbCall();
+		armEmitFlushCycleBeforeCall();
+		armEmitCall((const void*)&vtlb_memRead128);
+		armEmitReloadCycleAfterCall();
+	}
+
+	if (_Rt_)
+	{
+		// _Rt_ is the VF index (named _Ft_ in interp). Store q0 → VU0.VF[_Rt_].
+		armAsm->Mov(RSCRATCHGPR, reinterpret_cast<uintptr_t>(&VU0.VF[_Rt_]));
+		armAsm->Str(a64::q0, a64::MemOperand(RSCRATCHGPR));
+	}
+}
 #endif
 
 // ============================================================================
@@ -629,16 +704,74 @@ void recSDR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SDR); }
 void recSDR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SDR); }
 #endif
 
+// ---- SQ — Store Quadword (128-bit) from GPR ----
 #if ISTUB_SQ
 void recSQ() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SQ); }
 #else
-void recSQ() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SQ); }
+void recSQ()
+{
+	armComputeAddress();
+	armAsm->And(a64::w0, a64::w0, ~0xFu);
+
+	// Commit any pending const-prop value before the direct 128-bit Ldr.
+	armFlushConstReg(_Rt_);
+	armAsm->Ldr(a64::q0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+
+	if (armUseFastmem())
+	{
+		armPreVtlbCall();
+		const u8* code_start = armGetCurrentCodePointer();
+		armAsm->Str(a64::q0, a64::MemOperand(RFASTMEMBASE, a64::x0));
+		armRecordFastmem(code_start, RXARG1.GetCode(), a64::q0.GetCode(), 128, false, false, false);
+	}
+	else
+	{
+		armPreVtlbCall();
+		armEmitFlushCycleBeforeCall();
+		// vtlb_memWrite128(addr, r128 value): addr in w0 (already there),
+		// value in q0 (already loaded above).
+		armEmitCall((const void*)&vtlb_memWrite128);
+		armEmitReloadCycleAfterCall();
+	}
+}
 #endif
 
+// ---- SQC2 — Store Quadword to memory from COP2 (VU0 VF register) ----
+//
+// Same SYNC/FINISH fallback shape as LQC2.
 #if ISTUB_SQC2
 void recSQC2() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SQC2); }
 #else
-void recSQC2() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SQC2); }
+void recSQC2()
+{
+	if (g_pCurInstInfo && (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0)))
+	{
+		armCallInterpreter(R5900::Interpreter::OpcodeImpl::SQC2);
+		return;
+	}
+
+	armComputeAddress();
+	armAsm->And(a64::w0, a64::w0, ~0xFu);
+
+	// Load value from VU0.VF[_Rt_] (interp uses _Ft_; same field for COP2).
+	armAsm->Mov(RSCRATCHGPR, reinterpret_cast<uintptr_t>(&VU0.VF[_Rt_]));
+	armAsm->Ldr(a64::q0, a64::MemOperand(RSCRATCHGPR));
+
+	if (armUseFastmem())
+	{
+		armPreVtlbCall();
+		const u8* code_start = armGetCurrentCodePointer();
+		armAsm->Str(a64::q0, a64::MemOperand(RFASTMEMBASE, a64::x0));
+		armRecordFastmem(code_start, RXARG1.GetCode(), a64::q0.GetCode(), 128, false, false, false);
+	}
+	else
+	{
+		armPreVtlbCall();
+		armEmitFlushCycleBeforeCall();
+		armEmitCall((const void*)&vtlb_memWrite128);
+		armEmitReloadCycleAfterCall();
+	}
+}
 #endif
 
 } // namespace OpcodeImpl

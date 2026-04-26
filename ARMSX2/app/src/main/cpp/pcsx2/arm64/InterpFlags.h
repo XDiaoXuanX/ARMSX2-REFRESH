@@ -56,7 +56,7 @@
 // top-5 hottest blocks (with per-pair disassembly) on recArmVU1::Shutdown —
 // fires when the Compose Stop button is pressed. Adds ~5 insns per block
 // entry (measurable cost on linked-chain entries), so keep off unless profiling.
-#define VU1_PROFILE_BLOCKS
+//#define VU1_PROFILE_BLOCKS
 
 // Diagnostic: per-op JIT symbol registration with simpleperf. When defined,
 // each emitted op is registered as a separate symbol (e.g. `EE_OP_lui_0x123`,

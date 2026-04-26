@@ -36,58 +36,85 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc,
 
 		switch (size_in_bits)
 		{
-			case 8:  armEmitCall((const void*)&vtlb_memRead<mem8_t>);  break;
-			case 16: armEmitCall((const void*)&vtlb_memRead<mem16_t>); break;
-			case 32: armEmitCall((const void*)&vtlb_memRead<mem32_t>); break;
-			case 64: armEmitCall((const void*)&vtlb_memRead<mem64_t>); break;
+			case 8:   armEmitCall((const void*)&vtlb_memRead<mem8_t>);  break;
+			case 16:  armEmitCall((const void*)&vtlb_memRead<mem16_t>); break;
+			case 32:  armEmitCall((const void*)&vtlb_memRead<mem32_t>); break;
+			case 64:  armEmitCall((const void*)&vtlb_memRead<mem64_t>); break;
+			case 128: armEmitCall((const void*)&vtlb_memRead128);       break;
 			default: pxFailRel("Unexpected fastmem load size"); break;
 		}
 
-		// vtlb_memRead returns unsigned in w0/x0. Sign-extend if needed.
-		if (is_signed)
+		if (size_in_bits == 128)
 		{
-			switch (size_in_bits)
-			{
-				case 8:  armAsm->Sxtb(RXRET, RWRET); break;
-				case 16: armAsm->Sxth(RXRET, RWRET); break;
-				case 32: armAsm->Sxtw(RXRET, RWRET); break;
-				default: break; // 64-bit: no sign extension needed
-			}
-		}
-
-		// Move result to the data register if it's not already x0
-		if (data_register != RXRET.GetCode())
-			armAsm->Mov(a64::XRegister(data_register), RXRET);
-	}
-	else
-	{
-		// Store: set up (w0 = address, w1/x1 = value) for vtlb_memWrite<T>
-		if (address_register == RXARG2.GetCode() && data_register == RXARG1.GetCode())
-		{
-			// Registers are swapped — use scratch to resolve
-			armAsm->Mov(RXVIXLSCRATCH, a64::XRegister(address_register));
-			armAsm->Mov(RXARG2, a64::XRegister(data_register));
-			armAsm->Mov(RWARG1, a64::WRegister(RXVIXLSCRATCH.GetCode()));
+			// vtlb_memRead128 returns r128 in q0 (AAPCS64 vector return).
+			// data_register is a Q-reg code (0..31) — Mov if not already q0.
+			if (data_register != 0)
+				armAsm->Mov(a64::VRegister(data_register, a64::kQRegSize).V16B(), a64::q0.V16B());
 		}
 		else
 		{
-			if (data_register != RXARG2.GetCode())
-				armAsm->Mov(RXARG2, a64::XRegister(data_register));
+			// vtlb_memRead returns unsigned in w0/x0. Sign-extend if needed.
+			if (is_signed)
+			{
+				switch (size_in_bits)
+				{
+					case 8:  armAsm->Sxtb(RXRET, RWRET); break;
+					case 16: armAsm->Sxth(RXRET, RWRET); break;
+					case 32: armAsm->Sxtw(RXRET, RWRET); break;
+					default: break; // 64-bit: no sign extension needed
+				}
+			}
+
+			// Move result to the data register if it's not already x0
+			if (data_register != RXRET.GetCode())
+				armAsm->Mov(a64::XRegister(data_register), RXRET);
+		}
+	}
+	else
+	{
+		if (size_in_bits == 128)
+		{
+			// 128-bit store: vtlb_memWrite128(u32 addr in w0, r128 value in q0).
+			// data_register is a Q-reg code; address is in a GPR. Different
+			// register banks so no swap-conflict possible.
+			if (data_register != 0)
+				armAsm->Mov(a64::q0.V16B(), a64::VRegister(data_register, a64::kQRegSize).V16B());
 			if (address_register != RWARG1.GetCode())
 				armAsm->Mov(RWARG1, a64::WRegister(address_register));
+
+			armEmitFlushCycleBeforeCall();
+			armEmitCall((const void*)&vtlb_memWrite128);
 		}
-
-		// Flush RCYCLE → cpuRegs.cycle so the slow path sees the correct
-		// "now". Done AFTER the arg moves so x9 can't clobber x0/x1's source.
-		armEmitFlushCycleBeforeCall();
-
-		switch (size_in_bits)
+		else
 		{
-			case 8:  armEmitCall((const void*)&vtlb_memWrite<mem8_t>);  break;
-			case 16: armEmitCall((const void*)&vtlb_memWrite<mem16_t>); break;
-			case 32: armEmitCall((const void*)&vtlb_memWrite<mem32_t>); break;
-			case 64: armEmitCall((const void*)&vtlb_memWrite<mem64_t>); break;
-			default: pxFailRel("Unexpected fastmem store size"); break;
+			// Store: set up (w0 = address, w1/x1 = value) for vtlb_memWrite<T>
+			if (address_register == RXARG2.GetCode() && data_register == RXARG1.GetCode())
+			{
+				// Registers are swapped — use scratch to resolve
+				armAsm->Mov(RXVIXLSCRATCH, a64::XRegister(address_register));
+				armAsm->Mov(RXARG2, a64::XRegister(data_register));
+				armAsm->Mov(RWARG1, a64::WRegister(RXVIXLSCRATCH.GetCode()));
+			}
+			else
+			{
+				if (data_register != RXARG2.GetCode())
+					armAsm->Mov(RXARG2, a64::XRegister(data_register));
+				if (address_register != RWARG1.GetCode())
+					armAsm->Mov(RWARG1, a64::WRegister(address_register));
+			}
+
+			// Flush RCYCLE → cpuRegs.cycle so the slow path sees the correct
+			// "now". Done AFTER the arg moves so x9 can't clobber x0/x1's source.
+			armEmitFlushCycleBeforeCall();
+
+			switch (size_in_bits)
+			{
+				case 8:  armEmitCall((const void*)&vtlb_memWrite<mem8_t>);  break;
+				case 16: armEmitCall((const void*)&vtlb_memWrite<mem16_t>); break;
+				case 32: armEmitCall((const void*)&vtlb_memWrite<mem32_t>); break;
+				case 64: armEmitCall((const void*)&vtlb_memWrite<mem64_t>); break;
+				default: pxFailRel("Unexpected fastmem store size"); break;
+			}
 		}
 	}
 
