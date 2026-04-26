@@ -3157,9 +3157,26 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// entries — net win when the block has any FMAC pairs).
 	{
 		// 1. Cycle budget.
+		// VUSyncHack honoring (gamefix #15): when set, fire the gate if the
+		// upcoming block WOULD overshoot the limit, instead of only when we
+		// already have. Mirrors x86 microVU_Compile.inl:481-484 — that path
+		// does `eax = cycles - block_size` then jumps if negative; we
+		// equivalently compare `current + numPairs >= limit`. numPairs is a
+		// safe upper bound on the block's actual cycle cost (1 cycle/pair
+		// + stalls; block size bounded by VU1_MAX_BLOCK_PAIRS = 256, well
+		// within Add's 12-bit immediate range). FullVU0SyncHack is VU0-
+		// specific and intentionally ignored here.
 		armMoveAddressToReg(x5, &s_vu1_cycle_limit);
 		armAsm->Ldr(x5, MemOperand(x5));
-		armAsm->Cmp(VU1_CYCLE_REG, x5);
+		if (EmuConfig.Gamefixes.VUSyncHack)
+		{
+			armAsm->Add(x6, VU1_CYCLE_REG, numPairs);
+			armAsm->Cmp(x6, x5);
+		}
+		else
+		{
+			armAsm->Cmp(VU1_CYCLE_REG, x5);
+		}
 		armAsm->B(&budget_exceeded_exit, hs);
 
 		// 2. Termination.

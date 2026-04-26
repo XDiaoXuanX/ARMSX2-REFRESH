@@ -162,10 +162,50 @@ static void emitVuClampVec(const VRegister& vn)
 	armAsm->Umin(vn, vn, v7.V4S());
 }
 
+// VuAddSubHack (Tri-ace games): when |exp(to) - exp(from)| >= 25, the
+// smaller-exponent operand contributes nothing to the sum at the bit-exact
+// level the game's encryption check expects. Zero its mantissa+exponent
+// (preserving sign) before the FADD. Mirrors x86 ADD_SS_TriAceHack at
+// microVU_Misc.inl:509-535. Only applies to single-lane ADDi/ADDq per
+// upstream (multi-lane ADDi/ADDq uses SSE_ADD2PS without the hack). Scratch:
+// v6-v9. Caller must emit clamp setup BEFORE this if both are needed.
+static void emitVuAddSubHack(const VRegister& to, const VRegister& from)
+{
+	armAsm->Ushr(v6.V4S(), to.V4S(), 23);
+	armAsm->Ushr(v7.V4S(), from.V4S(), 23);
+	armAsm->Movi(v8.V4S(), 0xFF);
+	armAsm->And (v6.V16B(), v6.V16B(), v8.V16B());
+	armAsm->And (v7.V16B(), v7.V16B(), v8.V16B());
+	armAsm->Sub (v7.V4S(), v7.V4S(), v6.V4S()); // v7 = exp(from) - exp(to)
+	armAsm->Movi(v8.V4S(), 0x80, vixl::aarch64::LSL, 24); // sign mask
+	{
+		armAsm->Movi(v9.V4S(), 25);
+		armAsm->Cmge(v9.V4S(), v7.V4S(), v9.V4S());
+		armAsm->And (v6.V16B(), to.V16B(), v8.V16B());
+		armAsm->Bsl (v9.V16B(), v6.V16B(), to.V16B());
+		armAsm->Mov (to.V16B(), v9.V16B());
+	}
+	{
+		armAsm->Movi(v9.V4S(), 25);
+		armAsm->Neg (v9.V4S(), v9.V4S());
+		// CMLE only takes immediate-zero RHS; (v7 <= -25) <=> (-25 >= v7).
+		armAsm->Cmge(v9.V4S(), v9.V4S(), v7.V4S());
+		armAsm->And (v6.V16B(), from.V16B(), v8.V16B());
+		armAsm->Bsl (v9.V16B(), v6.V16B(), from.V16B());
+		armAsm->Mov (from.V16B(), v9.V16B());
+	}
+}
+
 // --- Binary FMAC: dst = VF[fs] OP src2 ---
 // op: 0=ADD, 1=SUB, 2=MUL
-static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw)
+// isScalarAdd: caller is ADDi/ADDq (scalar broadcast ADD). Gates VuAddSubHack.
+static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw,
+                           bool isScalarAdd = false)
 {
+	// VuAddSubHack gate (Tri-ace ADDi/ADDq with single-lane mask only).
+	const bool singleLane = (xyzw == 0x1u || xyzw == 0x2u || xyzw == 0x4u || xyzw == 0x8u);
+	const bool addSubHack = isScalarAdd && CHECK_VUADDSUBHACK && singleLane;
+
 	// Load VF[fs] → v0
 	armAsm->Ldr(q0, MemOperand(VU0_BASE_REG, vfOff(fs)));
 	// v1 must already be loaded with src2
@@ -182,6 +222,10 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw)
 		emitVuClampVec(v0.V4S());
 		emitVuClampVec(v1.V4S());
 	}
+
+	// VuAddSubHack: apply AFTER clamp (which uses v6/v7 — we overwrite).
+	if (addSubHack)
+		emitVuAddSubHack(v0, v1);
 
 	// Perform NEON op: v5 = v0 OP v1
 	switch (op) {
@@ -286,7 +330,7 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 xyzw = (VU0.code >> 21) & 0xF; \
 		emitLoadQI(viOff(REG_Q)); \
 		int64_t dst = (toACC) ? accOff() : vfOff(fd); \
-		emitBinaryFmac(op, fs, dst, xyzw); \
+		emitBinaryFmac(op, fs, dst, xyzw, /*isScalarAdd=*/((op) == 0)); \
 	}
 
 #define FMAC_BINARY_I(name, op, toACC) \
@@ -296,7 +340,7 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 xyzw = (VU0.code >> 21) & 0xF; \
 		emitLoadQI(viOff(REG_I)); \
 		int64_t dst = (toACC) ? accOff() : vfOff(fd); \
-		emitBinaryFmac(op, fs, dst, xyzw); \
+		emitBinaryFmac(op, fs, dst, xyzw, /*isScalarAdd=*/((op) == 0)); \
 	}
 
 #define FMAC_BINARY_FULL(name, op, toACC) \

@@ -565,9 +565,63 @@ static void emitVuClampVec(const VRegister& vn)
 	armAsm->Umin(vn, vn, v7.V4S());
 }
 
+// VuAddSubHack (Tri-ace games): when |exp(to) - exp(from)| >= 25, the
+// smaller-exponent operand contributes nothing to the sum at the bit-exact
+// level the game's encryption check expects. Zero its mantissa+exponent
+// (preserving sign) before the FADD. Mirrors x86 ADD_SS_TriAceHack at
+// microVU_Misc.inl:509-535. Applied per lane via NEON; only the active xyzw
+// lane(s) write back so non-active lane outcomes are discarded harmlessly.
+//
+// Per upstream: only ADDi/ADDq scalar ops with single-lane mask apply this.
+// Multi-lane ADDi/ADDq uses SSE_ADD2PS which doesn't include the hack. Other
+// ops (SUB, MUL, ADD broadcast, full-vector ADD) never apply it.
+//
+// Scratch: uses v6-v9. Caller must emit emitVuClampSetup BEFORE this if
+// clamps are also needed (clamp leaves v6/v7 with constants we then
+// overwrite).
+static void emitVuAddSubHack(const VRegister& to, const VRegister& from)
+{
+	// Per-lane exponent extract: (raw >> 23) & 0xFF.
+	armAsm->Ushr(v6.V4S(), to.V4S(), 23);
+	armAsm->Ushr(v7.V4S(), from.V4S(), 23);
+	armAsm->Movi(v8.V4S(), 0xFF);
+	armAsm->And (v6.V16B(), v6.V16B(), v8.V16B());
+	armAsm->And (v7.V16B(), v7.V16B(), v8.V16B());
+	// v7 = exp(from) - exp(to) (signed). Matches upstream ecx variable.
+	armAsm->Sub (v7.V4S(), v7.V4S(), v6.V4S());
+
+	// Sign-only mask: 0x80000000 broadcast (8-bit imm 0x80 shifted left 24).
+	armAsm->Movi(v8.V4S(), 0x80, vixl::aarch64::LSL, 24);
+
+	// Case (exp_diff >= 25): zero 'to' except sign.
+	{
+		armAsm->Movi(v9.V4S(), 25);
+		armAsm->Cmge(v9.V4S(), v7.V4S(), v9.V4S()); // mask: v7 >= 25
+		armAsm->And (v6.V16B(), to.V16B(), v8.V16B()); // sign-only 'to'
+		// Bsl(vd, vn, vm): vd = (vd & vn) | (~vd & vm). v9 selects: lanes
+		// where v9 is all-1 take v6 (sign-only), else take 'to' (unchanged).
+		armAsm->Bsl (v9.V16B(), v6.V16B(), to.V16B());
+		armAsm->Mov (to.V16B(), v9.V16B());
+	}
+
+	// Case (exp_diff <= -25): zero 'from' except sign. NEON CMLE only takes
+	// an immediate-zero RHS, so express via Cmge with operands swapped:
+	// (v7 <= -25) <=> (-25 >= v7).
+	{
+		armAsm->Movi(v9.V4S(), 25);
+		armAsm->Neg (v9.V4S(), v9.V4S()); // v9 = -25 (per lane)
+		armAsm->Cmge(v9.V4S(), v9.V4S(), v7.V4S()); // mask: -25 >= v7  ==  v7 <= -25
+		armAsm->And (v6.V16B(), from.V16B(), v8.V16B());
+		armAsm->Bsl (v9.V16B(), v6.V16B(), from.V16B());
+		armAsm->Mov (from.V16B(), v9.V16B());
+	}
+}
+
 // --- Binary FMAC: dst = VF[fs] OP src2 ---
 // op: 0=ADD, 1=SUB, 2=MUL
-static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw)
+// isScalarAdd: caller is ADDi/ADDq (scalar broadcast ADD). Gates VuAddSubHack.
+static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw,
+                           bool isScalarAdd = false)
 {
 	const bool needsFlags  = g_vu1NeedsFlags;
 	const bool clampInputs = CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1);
@@ -575,6 +629,10 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw)
 	// VU_MAC_UPDATE clamps inf/NaN→±MAX inside the C path. With flags
 	// deferred, we replicate that behavior with FMINNM/FMAXNM in NEON.
 	const bool clampOutput = !needsFlags && CHECK_VU_OVERFLOW(1);
+
+	// VuAddSubHack gate (Tri-ace ADDi/ADDq with single-lane mask only).
+	const bool singleLane = (xyzw == 0x1u || xyzw == 0x2u || xyzw == 0x4u || xyzw == 0x8u);
+	const bool addSubHack = isScalarAdd && CHECK_VUADDSUBHACK && singleLane;
 
 	// Load VF[fs] → v0 (via cache: hit → Mov from resident slot, miss → Ldr).
 	// v1 must already be loaded with src2 (by emitLoadBroadcast / emitLoadQI /
@@ -589,6 +647,11 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw)
 		emitVuClampVec(v0.V4S());
 		emitVuClampVec(v1.V4S());
 	}
+
+	// VuAddSubHack: apply AFTER clamp (which uses v6/v7 for constants we
+	// overwrite). Scalar single-lane ADDi/ADDq only — see helper comment.
+	if (addSubHack)
+		emitVuAddSubHack(v0, v1);
 
 	// Perform NEON op: v5 = v0 OP v1
 	switch (op) {
@@ -830,7 +893,7 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 xyzw = (VU1.code >> 21) & 0xF; \
 		emitLoadQI(viOff(REG_Q)); \
 		int64_t dst = (toACC) ? accOff() : vfOff(fd); \
-		emitBinaryFmac(op, fs, dst, xyzw); \
+		emitBinaryFmac(op, fs, dst, xyzw, /*isScalarAdd=*/((op) == 0)); \
 	}
 
 #define FMAC_BINARY_I(name, op, toACC) \
@@ -840,7 +903,7 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 xyzw = (VU1.code >> 21) & 0xF; \
 		emitLoadQI(viOff(REG_I)); \
 		int64_t dst = (toACC) ? accOff() : vfOff(fd); \
-		emitBinaryFmac(op, fs, dst, xyzw); \
+		emitBinaryFmac(op, fs, dst, xyzw, /*isScalarAdd=*/((op) == 0)); \
 	}
 
 #define FMAC_BINARY_FULL(name, op, toACC) \
