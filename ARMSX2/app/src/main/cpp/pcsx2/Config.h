@@ -903,7 +903,16 @@ struct Pcsx2Config
 		u8 ShadeBoost_Gamma = DEFAULT_SHADEBOOST_GAMMA;
 		u8 PNGCompressionLevel = 1;
 
-		u16 SWExtraThreads = 2;
+		// SW worker threads. Empirical: 75-80% per-thread CPU is "fully
+		// saturated" for the job-batched SW rasterizer (it's not the same
+		// utilization curve as EE/VU which show 100% when busy). On 8-core
+		// ARM phones (SD8 Elite, etc.) 4 workers gives the highest GoW2
+		// title-screen throughput — going lower drops below 100% emulation
+		// speed. SetHardwareDependentDefaultSettings tunes this at fresh-
+		// install per core count; this Config.h value is the cold default.
+		u16 SWExtraThreads = 4;
+		// compute_best_thread_height comment: ideal = log2(64 / threads).
+		// For 4 SW threads → 4 (16-row tiles).
 		u16 SWExtraThreadsHeight = 4;
 
 		int SaveDrawStart = 0;

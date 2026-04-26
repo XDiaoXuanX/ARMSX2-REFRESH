@@ -3660,6 +3660,58 @@ static void InitializeProcessorList()
 		s_processor_list.push_back(proc_id);
 	}
 	Console.WriteLn(str.view());
+
+	// Pre-populate the SW renderer pool here, independent of pin-state.
+	//
+	// Why: SetEmuThreadAffinities runs LATE in VM init (after GS renderer
+	// creation), so when GSRasterizerList::Create reads the SW pool it can
+	// see an empty list and emit "Not pinning SW threads, ... but only have 0".
+	// The list represents a hardware property — which OS procs share the GS
+	// thread's cluster — and doesn't depend on whether pinning is currently
+	// enabled. Compute it once here so callers always see a populated list.
+	//
+	// Mirrors the cluster-mask path in SetEmuThreadAffinities: if cpuinfo
+	// resolves cluster IDs, we union the clusters of the top 3 entries
+	// (EE/VU/GS targets); otherwise fall back to "GS cluster + remaining
+	// procs in same cluster". SetEmuThreadAffinities still re-runs this
+	// logic later when pinning is actually applied — that's idempotent.
+	if (!processors.empty())
+	{
+		const cpuinfo_processor* ee_proc = processors[0];
+		const cpuinfo_processor* vu_proc = processors[std::min<size_t>(1, processors.size() - 1)];
+		const cpuinfo_processor* gs_proc = processors[std::min<size_t>(2, processors.size() - 1)];
+
+		const u64 ee_cluster_mask = ClusterAffinityMaskForOSId(GetProcessorIdForProcessor(ee_proc));
+		const u64 vu_cluster_mask = ClusterAffinityMaskForOSId(GetProcessorIdForProcessor(vu_proc));
+		const u64 gs_cluster_mask = ClusterAffinityMaskForOSId(GetProcessorIdForProcessor(gs_proc));
+		const u64 perf_mask = ee_cluster_mask | vu_cluster_mask | gs_cluster_mask;
+
+		s_software_renderer_processor_list.clear();
+		if (perf_mask != 0)
+		{
+			for (u32 bit = 0; bit < 64; ++bit)
+			{
+				if (perf_mask & (static_cast<u64>(1) << bit))
+					s_software_renderer_processor_list.push_back(bit);
+			}
+		}
+		else
+		{
+			// No cluster info — use s_processor_list ordering (already sorted by perf).
+			// Skip the top 3 (EE/VU/GS) and take the rest in the GS cluster.
+			const u32 gs_cluster_id = (gs_proc && gs_proc->cluster) ? gs_proc->cluster->cluster_id : 0;
+			for (size_t i = 3; i < s_processor_list.size(); i++)
+			{
+				const u32 proc_index = s_processor_list[i];
+				const cpuinfo_processor* p = FindCpuinfoProcessorForOSId(proc_index);
+				const u32 proc_cluster_id = (p && p->cluster) ? p->cluster->cluster_id : 0;
+				if (proc_cluster_id != gs_cluster_id)
+					break;
+				s_software_renderer_processor_list.push_back(proc_index);
+			}
+		}
+		INFO_LOG("Pre-populated SW renderer pool: {} processors", s_software_renderer_processor_list.size());
+	}
 }
 
 void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
@@ -3686,7 +3738,14 @@ void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
 		si.SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
 	}
 
-	const int extra_threads = (core_count > 3) ? 3 : 2;
+	// SW worker count. Empirical on Oryon/SD8E-class SoCs: 4 workers gives
+	// the highest sustained throughput (75-80% per-thread CPU is "saturated"
+	// for the SW rasterizer's job-batched workload — going lower drops the
+	// emulation rate below 100%). On 8-core phones EE/MTVU/MTGS take 3
+	// cores, leaving 5 for SW workers; 4 fits comfortably with headroom.
+	// Pre-Oryon big.LITTLE devices typically have 4-6 big cores, so 3
+	// workers there.
+	const int extra_threads = (core_count >= 8) ? 4 : 3;
 	Console.WriteLn(fmt::format("  Setting Extra Software Rendering Threads to {}.", extra_threads));
 	si.SetIntValue("EmuCore/GS", "extrathreads", extra_threads);
 }
@@ -3754,7 +3813,16 @@ void VMManager::SetEmuThreadAffinities()
 	if (s_thread_affinities_set == new_pin_enable)
 		return;
 
-	s_thread_affinities_set = EmuConfig.EnableThreadPinning;
+	// Track whether pinning is *currently effective*, not just whether the
+	// user enabled it in config. Previously this stored EmuConfig.EnableThreadPinning
+	// regardless of new_pin_enable, which on a shutdown call (state=Shutdown,
+	// new_pin_enable=false but EnableThreadPinning=true) left this flag as
+	// `true` while the actual pinning + SW renderer proc list got cleared
+	// below. The next VM start then early-returned at the guard above (`true
+	// == true`), never re-populating s_software_renderer_processor_list. SW
+	// workers ended up unpinned with an empty proc pool — the symptom users
+	// see as "Not pinning SW threads, we need 3 processors, but only have 0".
+	s_thread_affinities_set = new_pin_enable;
 
 	EnsureCPUInfoInitialized();
 
