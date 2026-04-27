@@ -242,6 +242,28 @@ namespace Threading
 				m_sema.Post();
 		}
 
+		/// Post `count` times atomically. Used to batch signals to a single
+		/// waiter — when `count > 1` and the counter was negative (waiters
+		/// blocked), wakes only as many waiters as were actually queued
+		/// (`min(count, -prev)`); the rest stay accumulated in the counter
+		/// for subsequent Wait() callers to drain without a syscall.
+		///
+		/// MTVU uses this to coalesce per-VU-execute Posts into one batch
+		/// per ring-buffer drain — reduces sem_post syscall storm during
+		/// heavy GIF traffic (FFXII intro-style cinematic VU bursts).
+		void Post(int count)
+		{
+			if (count <= 0)
+				return;
+			const int prev = m_counter.fetch_add(count, std::memory_order_release);
+			if (prev < 0)
+			{
+				const int to_wake = std::min(count, -prev);
+				for (int i = 0; i < to_wake; i++)
+					m_sema.Post();
+			}
+		}
+
 		void Wait()
 		{
 			if (m_counter.fetch_sub(1, std::memory_order_acquire) <= 0)

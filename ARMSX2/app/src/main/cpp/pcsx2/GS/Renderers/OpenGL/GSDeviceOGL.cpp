@@ -1100,7 +1100,21 @@ void GSDeviceOGL::PopTimestampQuery()
 	while (m_waiting_timestamp_queries > 0)
 	{
 #if defined(__ANDROID__)
-		glBeginQuery(GL_TIME_ELAPSED, m_timestamp_queries[m_read_timestamp_query]);
+		// GLES doesn't expose glGetQueryObjectiv / glGetQueryObjectui64v; both
+		// availability and result use the u32 form. Caps at ~4.29s of
+		// nanoseconds — fine for per-frame timing. Provided by the
+		// EXT_disjoint_timer_query extension (GL_TIME_ELAPSED_EXT === 0x88BF
+		// === GL_TIME_ELAPSED here).
+		//
+		// Prior version of this branch was broken: it called glBeginQuery on
+		// the read slot then immediately tried to read its result (always 0,
+		// query never ended) and incremented m_waiting_timestamp_queries
+		// instead of decrementing — accumulator stayed stuck at 0 in HW
+		// renderer OSD ("GPU: 0%" symptom).
+		GLuint available = 0;
+		glGetQueryObjectuiv(m_timestamp_queries[m_read_timestamp_query], GL_QUERY_RESULT_AVAILABLE, &available);
+		if (!available)
+			break;
 
 		GLuint result = 0;
 		glGetQueryObjectuiv(m_timestamp_queries[m_read_timestamp_query], GL_QUERY_RESULT, &result);
@@ -1115,6 +1129,7 @@ void GSDeviceOGL::PopTimestampQuery()
 		u64 result = 0;
 		glGetQueryObjectui64v(m_timestamp_queries[m_read_timestamp_query], GL_QUERY_RESULT, &result);
 		m_accumulated_gpu_time += static_cast<float>(static_cast<double>(result) / 1000000.0);
+#endif
 		m_read_timestamp_query = (m_read_timestamp_query + 1) % NUM_TIMESTAMP_QUERIES;
 		m_waiting_timestamp_queries--;
 	}
@@ -1122,9 +1137,7 @@ void GSDeviceOGL::PopTimestampQuery()
 	if (m_timestamp_query_started)
 	{
 		glEndQuery(GL_TIME_ELAPSED);
-
 		m_write_timestamp_query = (m_write_timestamp_query + 1) % NUM_TIMESTAMP_QUERIES;
-#endif
 		m_timestamp_query_started = false;
 		m_waiting_timestamp_queries++;
 	}

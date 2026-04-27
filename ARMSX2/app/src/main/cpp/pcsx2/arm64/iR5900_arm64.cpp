@@ -187,6 +187,20 @@ struct BlockLinks
 // tryForwardLink / patchWaitingPredecessors resolve exit targets.
 static std::unordered_map<u32, BlockLinks> s_blockLinks;
 
+// Reverse index: target_hw → list of predecessor startpc(hw)s. A block is
+// added to the list for each of its UNIQUE exit target HWs when it compiles.
+// patchWaitingEEPredecessors uses this to find candidate predecessors in
+// O(preds_at_target) instead of O(total_blocks) — without it, every new
+// compile scanned every existing block's exits, costing 35% of CPU during
+// first-cache lag spikes (FFXII / GTASA / Darkwatch).
+//
+// Stale entries (predecessor block invalidated by recClear) are skipped
+// lazily during the patch walk via an s_blockLinks.find() check; the lists
+// shrink only on full reset (recResetRaw) since per-block GC requires
+// remembering each block's exit targets and EE blocks' BlockLinks already
+// hold them — but lazy cleanup keeps the patch loop's hot path branch-light.
+static std::unordered_map<u32, std::vector<u32>> s_eeWaitingForHw;
+
 // ============================================================================
 //  Forward declarations
 // ============================================================================
@@ -1243,22 +1257,57 @@ static void tryForwardLinkEE(BlockLinks& block)
 	}
 }
 
+// Add a freshly-registered block to the reverse index for each of its UNIQUE
+// exit-target HWs. Caller has already inserted the block into s_blockLinks.
+// Dedup matters because a self-loop (cond branch with both arms identical)
+// would otherwise add the same pred twice — patchWaitingEEPredecessors
+// already filters by exit.target match, so dup pred entries waste only
+// memory, but keep the index tight.
+static void indexEEBlockExits(u32 my_pc, const BlockLinks& bl)
+{
+	const u32 my_hw = HWADDR(my_pc);
+	for (u32 e = 0; e < bl.num_exits; e++)
+	{
+		const u32 target_hw = HWADDR(bl.exits[e].target_pc);
+		bool dup = false;
+		for (u32 j = 0; j < e; j++)
+		{
+			if (HWADDR(bl.exits[j].target_pc) == target_hw)
+			{
+				dup = true;
+				break;
+			}
+		}
+		if (!dup)
+			s_eeWaitingForHw[target_hw].push_back(my_hw);
+	}
+}
+
 // Called right after a block compiles at `my_pc` with entry `my_entry`:
-// scan all previously-compiled blocks for any exit whose static target
-// is `my_pc` and patch them forward to us. Mirrors
-// patchWaitingPredecessors in iVU1micro_arm64.cpp.
+// for any previously-compiled block whose static exit target is `my_pc`,
+// patch that exit's B site to jump directly to us.
 //
-// Cost: O(total_blocks) per compile. EE blocks are typically in the low
-// thousands so this is well-bounded. A target_pc → predecessor_list
-// multimap would drop this to O(1); defer until profiling says it matters.
+// Walks the reverse index s_eeWaitingForHw[my_hw] — typically a handful
+// of preds — instead of every block in s_blockLinks. Pre-index, this loop
+// dominated CPU during first-cache lag bursts (35% of one trace on
+// FFXII / GTASA / Darkwatch when the block table held thousands of entries).
+// Lazily skips stale pred entries (block invalidated by recClear); they
+// stay in the index until recResetRaw flushes everything.
 static void patchWaitingEEPredecessors(u32 my_pc, u8* my_entry)
 {
 	if (!my_entry)
 		return;
 	const u32 my_hw = HWADDR(my_pc);
-	for (auto& kv : s_blockLinks)
+	auto wit = s_eeWaitingForHw.find(my_hw);
+	if (wit == s_eeWaitingForHw.end())
+		return;
+	const auto& preds = wit->second;
+	for (u32 pred_hw : preds)
 	{
-		BlockLinks& pred = kv.second;
+		auto bit = s_blockLinks.find(pred_hw);
+		if (bit == s_blockLinks.end())
+			continue; // stale entry — pred block was invalidated
+		BlockLinks& pred = bit->second;
 		for (u32 e = 0; e < pred.num_exits; e++)
 		{
 			BlockLinkExit& exit = pred.exits[e];
@@ -2182,6 +2231,11 @@ StartRecomp:
 		const u32 hw = HWADDR(startpc);
 		s_blockLinks[hw] = bl;
 
+		// Reverse index entry — must happen BEFORE patchWaitingEEPredecessors
+		// so any predecessors discovered for THIS block can find us, and after
+		// s_blockLinks insert so a self-loop's tryForwardLinkEE finds the entry.
+		indexEEBlockExits(startpc, s_blockLinks[hw]);
+
 		tryForwardLinkEE(s_blockLinks[hw]);
 		patchWaitingEEPredecessors(startpc, bl.entry);
 	}
@@ -2409,6 +2463,7 @@ static void recResetRaw()
 	// and the entry pointers are about to be recycled by the bump
 	// allocator. Drop everything; blocks re-register as they recompile.
 	s_blockLinks.clear();
+	s_eeWaitingForHw.clear();
 
 	g_branch = 0;
 	g_resetEeScalingStats = true;

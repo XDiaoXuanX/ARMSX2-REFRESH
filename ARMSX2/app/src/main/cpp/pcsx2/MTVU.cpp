@@ -135,6 +135,22 @@ void VU_Thread::ExecuteRingBuffer()
 		if (m_shutdown_flag.load(std::memory_order_acquire))
 			break;
 
+		// Batch semaXGkick.Post() calls across the inner ring drain. Per-
+		// execute Post hits a futex syscall whenever MTGS is waiting (FFXII
+		// intro had MTGS catching up constantly → 8% of MTVU's CPU was
+		// sem_post→syscall). Coalescing reduces it to ~1 syscall per batch.
+		//
+		// Deadlock guard (FFX intro 3D scene hang): the VU JIT's XGKICK can
+		// fill the GIF path buffer mid-Execute, causing it to call
+		// `Gif_MTGS_Wait` which spins until MTGS drains the gsPackQueue.
+		// MTGS only drains after `semaXGkick.Wait()` returns. So we MUST
+		// have Posted any prior pending counts BEFORE entering Execute, or
+		// MTGS is stuck waiting and MTVU is stuck spinning. Pre-flushing at
+		// the top of MTVU_VU_EXECUTE collapses the batch when consecutive
+		// executes are queued — but preserves it when non-execute commands
+		// (WRITE_MICRO / WRITE_DATA / VIF_UNPACK) are interleaved, which is
+		// common since EE submits mixed work in a single ring drain.
+		int pending_xgkick_posts = 0;
 		while (m_ato_read_pos.load(std::memory_order_relaxed) != GetWritePos())
 		{
 			u32 tag = Read();
@@ -142,6 +158,13 @@ void VU_Thread::ExecuteRingBuffer()
 			{
 				case MTVU_VU_EXECUTE:
 				{
+					// Pre-flush so MTGS can drain GIF buffer DURING this
+					// Execute (else XGKICK's Gif_MTGS_Wait deadlocks).
+					if (pending_xgkick_posts)
+					{
+						semaXGkick.Post(pending_xgkick_posts);
+						pending_xgkick_posts = 0;
+					}
 					VU1.cycle = 0;
 					s32 addr = Read();
 					vifRegs.top = Read();
@@ -152,7 +175,7 @@ void VU_Thread::ExecuteRingBuffer()
 					CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
 					CpuVU1->Execute(vu1RunCycles);
 					gifUnit.gifPath[GIF_PATH_1].FinishGSPacketMTVU();
-					semaXGkick.Post(); // Tell MTGS a path1 packet is complete
+					pending_xgkick_posts++; // Batched → flushed before NEXT execute or at loop end
 					vuCycles[vuCycleIdx].store(VU1.cycle, std::memory_order_release);
 					vuCycleIdx = (vuCycleIdx + 1) & 3;
 					break;
@@ -201,6 +224,16 @@ void VU_Thread::ExecuteRingBuffer()
 			}
 
 			CommitReadPos();
+		}
+
+		// Drain any batched VU_EXECUTE Posts. One syscall to wake MTGS
+		// regardless of the batch size (Post(N) wakes min(N, waiters)
+		// futexes; the extra count goes into m_counter for MTGS to drain
+		// via TryWait without further syscalls).
+		if (pending_xgkick_posts)
+		{
+			semaXGkick.Post(pending_xgkick_posts);
+			pending_xgkick_posts = 0;
 		}
 	}
 
