@@ -27,6 +27,11 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Sign release with the debug keystore so it's installable on-device
+            // without a separate signing config. NOT for distribution — the debug
+            // keystore is well-known and not secure for Play Store uploads.
+            // Replace with a real release signingConfig before publishing.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
