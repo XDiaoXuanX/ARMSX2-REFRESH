@@ -442,6 +442,63 @@ void mvu1AnalyzeBlock(
 			break;
 		}
 	}
+
+	// Dead VF write elision (FMAC opt #14): forward-walk up to 4 pairs ahead
+	// to find a covering overwrite of this pair's VF write with no
+	// intervening read of any live lane. Memory consistency is preserved by
+	// the overwrite's own write-through Str — the downstream block sees the
+	// up-to-date value at flush. Pairs in the last 4 are still eligible:
+	// the overwrite (if found within block) provides the persisted value;
+	// if no in-block overwrite is found, dead==false and the write fires
+	// normally. Hazard pairs (vf_read_after_write / vf_write_collision)
+	// fall through interp anyway, so the flag is moot for them — but
+	// computing it uniformly is cheap and harmless.
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		ir.info[i].dead_vf_write_upper = false;
+		ir.info[i].dead_vf_write_lower = false;
+	}
+
+	auto isDeadWrite = [&](u32 K, u32 dst_vf, u32 dst_mask) -> bool
+	{
+		if (dst_vf == 0 || dst_mask == 0)
+			return false;
+		u32 covered = 0;
+		const u32 limit = std::min<u32>(K + 4, numPairs - 1);
+		for (u32 j = K + 1; j <= limit; j++)
+		{
+			const _VURegsNum& uj = uregs_data[j];
+			const _VURegsNum& lj = lregs_data[j];
+
+			// Reads of dst_vf from this pair (both upper and lower).
+			u32 reads = 0;
+			if (uj.VFread0 == dst_vf) reads |= uj.VFr0xyzw;
+			if (uj.VFread1 == dst_vf) reads |= uj.VFr1xyzw;
+			if (lj.VFread0 == dst_vf) reads |= lj.VFr0xyzw;
+			if (lj.VFread1 == dst_vf) reads |= lj.VFr1xyzw;
+
+			// If any still-live lane of K's write is read, K is alive.
+			const u32 live = dst_mask & ~covered;
+			if (reads & live)
+				return false;
+
+			// Add this pair's writes (upper + lower) to the covered mask.
+			if (uj.VFwrite == dst_vf) covered |= uj.VFwxyzw;
+			if (lj.VFwrite == dst_vf) covered |= lj.VFwxyzw;
+
+			if ((covered & dst_mask) == dst_mask)
+				return true;
+		}
+		return false;
+	};
+
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		const _VURegsNum& ui = uregs_data[i];
+		const _VURegsNum& li = lregs_data[i];
+		ir.info[i].dead_vf_write_upper = isDeadWrite(i, ui.VFwrite, ui.VFwxyzw);
+		ir.info[i].dead_vf_write_lower = isDeadWrite(i, li.VFwrite, li.VFwxyzw);
+	}
 }
 
 } // namespace armvu1ir
@@ -470,6 +527,11 @@ extern bool g_vu1NeedsVIBackup;
 // is enabled, or vuFlagHack is off (exact mode). When false,
 // emitFmacInlineWriteback skips ~12 NEON + ~6 GPR insn per writeback.
 extern bool g_vu1NeedsUOFlags;
+// Dead VF write elision (FMAC opt #14). Set per-pair-per-emit before
+// dispatching emitVU1Upper (using upper analysis) and emitVU1Lower
+// (using lower analysis). When true, the FMAC writeback's VF cache store
+// is elided — flags still update, ACC writes never elided.
+extern bool g_vu1DeadVFWrite;
 
 // ============================================================================
 //  Block cache
@@ -3955,6 +4017,9 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// branch within 4 pairs reads this writer's VI (or this pair is
 		// in the cross-block conservative tail).
 		g_vu1NeedsVIBackup = ir_op.needs_vi_backup;
+		// FMAC opt #14: gate VF writeback's cache store on Pass 1's
+		// dead-write analysis for THIS pair's UPPER op.
+		g_vu1DeadVFWrite = ir_op.dead_vf_write_upper;
 
 		VU1_PERF_BEGIN(_pp_s7);
 		emitVU1Upper(upper); // switch dispatch — emits native ARM64 for this op
@@ -4012,6 +4077,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			armAsm->Str(w4, MemOperand(VU1_BASE_REG, code_off));
 			VU1.code = lower; // compile-time context
 			g_vu1CurrentPC = pc; // compile-time PC for native branches
+			// FMAC opt #14: gate VF writeback's cache store on Pass 1's
+			// dead-write analysis for THIS pair's LOWER op. Lower FMACs
+			// are rare (most lowers are non-FMAC pipes), but lower MOVE/
+			// MR32/MFIR/MFP also write VFs through vfCacheStore directly
+			// — those don't currently consult the gate, only FMAC paths
+			// (emitFmac{InlineWriteback,StoreMasked,NoFlagWriteback}) do.
+			g_vu1DeadVFWrite = ir_op.dead_vf_write_lower;
 
 			// Hackmode XGKICK: recVU1_XGKICK emits a BL to
 			// vu1_XGKICK_hack_capture which internally runs

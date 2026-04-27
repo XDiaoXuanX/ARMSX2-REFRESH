@@ -108,6 +108,16 @@ struct alignas(16) microOp
 	// 4 pairs reading our late writes — without cross-block info we can't
 	// rule it out). When false, the emitBackupVI BL is elided entirely.
 	bool needs_vi_backup;
+
+	// Dead VF write elision (FMAC opt #14): set when this pair writes a VF
+	// that some forward pair (within 4 pairs) overwrites with a covering
+	// xyzw mask AND no intervening pair reads any live lane of this write.
+	// When true, the FMAC writeback's VF cache store is elided (flag
+	// computation still runs since downstream readers may need it).
+	// Tracked separately for upper and lower writes since a single pair
+	// can write two distinct VFs.
+	bool dead_vf_write_upper;
+	bool dead_vf_write_lower;
 };
 
 // Block-level IR. Lives alongside the existing skip_info[] / pair_needs_flags[]

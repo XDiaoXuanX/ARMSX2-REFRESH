@@ -58,6 +58,22 @@ bool g_vu1NeedsFlags = true;
 bool g_vu1NeedsUOFlags = true;
 
 // ============================================================================
+//  Dead VF write elision (FMAC opt #14)
+//
+//  Set per-pair-per-emit by CompileBlock: true iff this op's VF write is
+//  proven dead by Pass 1 (forward-walk found a covering overwrite within
+//  4 pairs with no intervening read of any live lane). When true,
+//  emitFmacInlineWriteback / emitFmacStoreMasked still compute flags but
+//  skip the VF cache store (saves 1 force-load + 1-4 lane Movs + 1-4 Strs
+//  per dead writer; flag pipeline stays correct).
+//
+//  Default false (safe / pre-existing behavior). ACC writes are NEVER
+//  treated as dead — the pinned VU1_ACC_REG persists across pairs and
+//  the analysis only marks VF (not ACC) writes.
+// ============================================================================
+bool g_vu1DeadVFWrite = false;
+
+// ============================================================================
 //  Native NEON codegen helpers
 // ============================================================================
 
@@ -483,6 +499,13 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 		return;
 	}
 
+	// FMAC opt #14: dead VF write elision. Pass 1 proved a covering
+	// overwrite within 4 pairs forward with no live-lane read in between,
+	// so the cache store + write-through Str are wasted work. Skipped
+	// AFTER the to_acc branch above so ACC writes (never dead) still fire.
+	if (g_vu1DeadVFWrite)
+		return;
+
 	// Phase 2: defer the VF[fd] Str into the cache slot. The actual memory
 	// store fires at block end / hazard / BL via vfCacheFlushAndInvalidate.
 	const int dst_vf = vfIndexFromDstOff(dst_off);
@@ -528,6 +551,13 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 		return;
 	}
 
+	// FMAC opt #14: dead VF write elision. Same gate as the flag-path
+	// writeback — checked AFTER the to_acc branch so ACC writes are
+	// unaffected. No flags are computed in this path, so the saving here
+	// is purely the cache store + write-through Str.
+	if (g_vu1DeadVFWrite)
+		return;
+
 	// Phase 2: defer the VF[fd] write into the cache. The Str fires at
 	// block end / hazard / BL via vfCacheFlushAndInvalidate.
 	const int dst_vf = vfIndexFromDstOff(dst_off);
@@ -557,6 +587,9 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 static void emitNoFlagWriteback(u32 fd, u32 xyzw)
 {
 	if (fd == 0) return; // VF[0] hardwired; interpreter no-ops the whole insn
+	// FMAC opt #14: skip dead writes. MAX/MINI/ABS don't touch flags, so
+	// there's nothing else to do — pure cache-store skip.
+	if (g_vu1DeadVFWrite) return;
 	// Phase 2: defer the write into the cache. Memory store fires at the
 	// next flush point. Mirrors emitFmacStoreMasked's VF path.
 	vfCacheStore(static_cast<int>(fd), v5, static_cast<u8>(xyzw));
