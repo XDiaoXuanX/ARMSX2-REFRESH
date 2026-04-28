@@ -499,6 +499,77 @@ void mvu1AnalyzeBlock(
 		ir.info[i].dead_vf_write_upper = isDeadWrite(i, ui.VFwrite, ui.VFwxyzw);
 		ir.info[i].dead_vf_write_lower = isDeadWrite(i, li.VFwrite, li.VFwxyzw);
 	}
+
+	// Same-VF different-lane batching (FMAC opt #17): adjacent FMAC upper
+	// writers targeting the same VF, K writing X-only and K+1 writing
+	// Y-only (or vice versa) batch into one Str d covering the XY half.
+	// Saves 1 store per matched pair vs the partial-lane peephole's two
+	// Str s.
+	//
+	// Stash uses d10 (lower 64 of v10) — AAPCS64 callee-saved, so BLs
+	// in K's tail (branch/ebit/XGKICK countdowns) or K+1's prologue
+	// (stall checks, TestPipes) can't clobber it. The upper 64 of v10
+	// is caller-saved, so we deliberately restrict to the XY pair only.
+	// ZW-style batching would need a different stash.
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		ir.info[i].batch_with_next = false;
+		ir.info[i].batch_from_prev = false;
+	}
+
+	for (u32 i = 0; i + 1 < numPairs; i++)
+	{
+		const _VURegsNum& ui = uregs_data[i];
+		const _VURegsNum& un = uregs_data[i + 1];
+		const _VURegsNum& li = lregs_data[i];
+		const _VURegsNum& ln = lregs_data[i + 1];
+
+		// Both pairs must have FMAC upper writers targeting the same VF.
+		if (ui.pipe != VUPIPE_FMAC || un.pipe != VUPIPE_FMAC)
+			continue;
+		const u32 vfX = ui.VFwrite;
+		if (vfX == 0 || vfX != un.VFwrite)
+			continue;
+
+		// Strict XY pattern: K writes exactly X (mask 0x8), K+1 writes
+		// exactly Y (mask 0x4), or the symmetric flip. Other lane pairs
+		// would need lanes 2/3 of the stash which sit in the caller-
+		// saved upper 64 of v10.
+		const bool xy = (ui.VFwxyzw == 0x8u && un.VFwxyzw == 0x4u);
+		const bool yx = (ui.VFwxyzw == 0x4u && un.VFwxyzw == 0x8u);
+		if (!xy && !yx)
+			continue;
+
+		// K+1 must not read VF[X] in any lane. Reading K's deferred lane
+		// would see stale memory; reading any other lane is technically
+		// safe but we forbid all reads to keep the cache contract simple.
+		if (un.VFread0 == vfX || un.VFread1 == vfX)
+			continue;
+		if (ln.VFread0 == vfX || ln.VFread1 == vfX)
+			continue;
+
+		// K's lower must not read OR write VF[X]. A lower read sees the
+		// pre-K cache slot (we deferred K's upper); a lower write would
+		// add a second deferred-mask layer we don't track.
+		if (li.VFread0 == vfX || li.VFread1 == vfX)
+			continue;
+		if (li.VFwrite == vfX)
+			continue;
+
+		// Hazard pairs run through vu1Exec interp, never reach the JIT
+		// writeback paths. Skip both endpoints.
+		if (ir.info[i].vf_read_after_write || ir.info[i].vf_write_collision)
+			continue;
+		if (ir.info[i].clip_read_after_write || ir.info[i].clip_write_collision)
+			continue;
+		if (ir.info[i + 1].vf_read_after_write || ir.info[i + 1].vf_write_collision)
+			continue;
+		if (ir.info[i + 1].clip_read_after_write || ir.info[i + 1].clip_write_collision)
+			continue;
+
+		ir.info[i].batch_with_next     = true;
+		ir.info[i + 1].batch_from_prev = true;
+	}
 }
 
 } // namespace armvu1ir
@@ -532,6 +603,13 @@ extern bool g_vu1NeedsUOFlags;
 // (using lower analysis). When true, the FMAC writeback's VF cache store
 // is elided — flags still update, ACC writes never elided.
 extern bool g_vu1DeadVFWrite;
+// Same-VF different-lane batching (FMAC opt #17). Set per-pair-per-emit
+// before dispatching emitVU1Upper. batch_with_next defers the K writeback
+// to a callee-saved stash; batch_from_prev merges and emits one combined
+// store. Only set on the first/second halves of a Pass-1-detected XY
+// pair; ACC writes ignore the gates.
+extern bool g_vu1BatchWithNext;
+extern bool g_vu1BatchFromPrev;
 
 // ============================================================================
 //  Block cache
@@ -2861,6 +2939,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// per AAPCS64, so it doesn't survive across the prior block's epilogue
 	// Ret + Execute's outer dispatch back into our codeEntry prologue.
 	vu1BroadcastCacheReset();
+	// FMAC opt #17: same-VF different-lane batching state. Even though d10
+	// is callee-saved, the deferred state must not leak across block
+	// boundaries — Pass 1 only marks pairs within the current block.
+	vu1BatchCacheReset();
 	// #18 deep-dive: fmaccount Add-batching state. Reset per block since the
 	// pinned w26 is reloaded fresh in the prologue.
 	s_vu1_deferred_fmaccount = 0;
@@ -4096,6 +4178,9 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// FMAC opt #14: gate VF writeback's cache store on Pass 1's
 		// dead-write analysis for THIS pair's UPPER op.
 		g_vu1DeadVFWrite = ir_op.dead_vf_write_upper;
+		// FMAC opt #17: same-VF different-lane batching gates.
+		g_vu1BatchWithNext = ir_op.batch_with_next;
+		g_vu1BatchFromPrev = ir_op.batch_from_prev;
 
 		VU1_PERF_BEGIN(_pp_s7);
 		emitVU1Upper(upper); // switch dispatch — emits native ARM64 for this op
@@ -4160,6 +4245,9 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// — those don't currently consult the gate, only FMAC paths
 			// (emitFmac{InlineWriteback,StoreMasked,NoFlagWriteback}) do.
 			g_vu1DeadVFWrite = ir_op.dead_vf_write_lower;
+			// FMAC opt #17: lower never participates in upper-write batching.
+			g_vu1BatchWithNext = false;
+			g_vu1BatchFromPrev = false;
 
 			// Hackmode XGKICK: recVU1_XGKICK emits a BL to
 			// vu1_XGKICK_hack_capture which internally runs

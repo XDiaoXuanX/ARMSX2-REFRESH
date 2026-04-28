@@ -125,3 +125,10 @@ void viCacheStore(int vireg, const vixl::aarch64::Register& src_reg);
 // and any v1-writing helper. Defined in iVU1Upper_arm64.cpp.
 void vu1BroadcastCacheReset();
 void vu1BroadcastCacheNoteVfWritten(int vfreg);
+
+// ============================================================================
+//  Same-VF different-lane batching (FMAC opt #17)
+// ============================================================================
+// Resets the deferred batch state. Called at block start and after any
+// site that could break our invariant about d10 holding K's deferred lane.
+void vu1BatchCacheReset();

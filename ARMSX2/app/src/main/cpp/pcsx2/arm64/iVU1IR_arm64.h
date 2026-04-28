@@ -118,6 +118,16 @@ struct alignas(16) microOp
 	// can write two distinct VFs.
 	bool dead_vf_write_upper;
 	bool dead_vf_write_lower;
+
+	// Same-VF different-lane batching (FMAC opt #17): minimal X-then-Y
+	// pattern. batch_with_next on K means K's upper FMAC writes VF[X].x
+	// and K+1's upper FMAC writes VF[X].y — K's writeback defers to the
+	// callee-saved d10 stash (lanes 0/1) instead of Str s5; K+1's
+	// writeback overlays its lane and emits one Str d for the combined
+	// XY half. batch_from_prev on K+1 is the partner flag set when K's
+	// batch_with_next is true.
+	bool batch_with_next;
+	bool batch_from_prev;
 };
 
 // Block-level IR. Lives alongside the existing skip_info[] / pair_needs_flags[]

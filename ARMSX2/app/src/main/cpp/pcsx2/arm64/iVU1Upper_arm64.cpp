@@ -74,6 +74,42 @@ bool g_vu1NeedsUOFlags = true;
 bool g_vu1DeadVFWrite = false;
 
 // ============================================================================
+//  Same-VF different-lane batching (FMAC opt #17)
+//
+//  Pass 1 detects adjacent FMAC pairs writing the same VF on disjoint X/Y
+//  lanes (K writes vfX.x, K+1 writes vfX.y). K's writeback defers — instead
+//  of Str s5 it copies v5's relevant lane into the d10 stash. K+1's
+//  writeback overlays its lane into d10 and emits one Str d covering the
+//  combined XY half (via vfCacheStore with mask 0xC, which the partial-
+//  lane peephole encodes as a single 64-bit store at base+0).
+//
+//  Stash uses d10 (lower 64 bits of v10). AAPCS64 marks d8-d15 as callee-
+//  saved, so BLs in K's tail or K+1's prologue preserve it. Lower ops
+//  don't touch v10 (verified by grep). The cache slot's lane state stays
+//  coherent because vfCacheStore on the combined mask updates both the
+//  slot and memory in one shot — between K and K+1 the slot still holds
+//  pre-K values, which is correct for any lane that wasn't M_K (forbidden
+//  to read by Pass 1's gate).
+//
+//  g_vu1BatchWithNext / g_vu1BatchFromPrev are set per-emit by CompileBlock
+//  before dispatching emitVU1Upper.
+// ============================================================================
+bool g_vu1BatchWithNext = false;
+bool g_vu1BatchFromPrev = false;
+
+namespace
+{
+	bool s_batchPendingActive    = false;
+	int  s_batchPendingVf        = 0;
+	u8   s_batchPendingFirstMask = 0;
+}
+
+void vu1BatchCacheReset()
+{
+	s_batchPendingActive = false;
+}
+
+// ============================================================================
 //  Broadcast operand cache (FMAC opt #16)
 //
 //  emitLoadBroadcast loads VF[ft][comp] broadcasted into v1. For consecutive
@@ -337,6 +373,47 @@ static void emitPartialLaneStore(int64_t base_off, u32 xyzw)
 	}
 }
 
+// FMAC opt #17: batched VF cache store. When g_vu1BatchWithNext is set we
+// stash v5's relevant lane (X = lane 0, or Y = lane 1) into d10 and skip
+// the cache store; the partner pair's emit (g_vu1BatchFromPrev) overlays
+// its lane and emits a single combined store. d10's lower 64 bits are
+// AAPCS64-callee-saved, so BLs between K and K+1 don't clobber it.
+//
+// Returns true if it consumed the write (deferred or batch-completed),
+// false if the caller should fall through to vfCacheStore.
+static bool tryBatchedVfCacheStore(int dst_vf, u32 mask)
+{
+	if (g_vu1BatchWithNext)
+	{
+		// Pass 1 detects only the X-only / Y-only adjacent pattern, so
+		// the only meaningful lane bits at this point are 0x8 (X→lane 0)
+		// and 0x4 (Y→lane 1).
+		if (mask & 0x8u) armAsm->Mov(v10.V4S(), 0, v5.V4S(), 0);
+		if (mask & 0x4u) armAsm->Mov(v10.V4S(), 1, v5.V4S(), 1);
+		s_batchPendingActive    = true;
+		s_batchPendingVf        = dst_vf;
+		s_batchPendingFirstMask = static_cast<u8>(mask);
+		return true;
+	}
+
+	if (g_vu1BatchFromPrev && s_batchPendingActive && s_batchPendingVf == dst_vf)
+	{
+		if (mask & 0x4u) armAsm->Mov(v10.V4S(), 1, v5.V4S(), 1);
+		if (mask & 0x8u) armAsm->Mov(v10.V4S(), 0, v5.V4S(), 0);
+		const u8 combined = static_cast<u8>(s_batchPendingFirstMask | mask);
+		s_batchPendingActive = false;
+		// vfCacheStore on mask 0xC routes through vfCacheEmitPartialLaneStore's
+		// `Str slotReg.D() at base+0` fast path — one 64-bit store covering
+		// XY in a single insn. The slot's lanes 0/1 are merged from v10's
+		// lanes 0/1 (which we just populated), so the slot ends up with the
+		// correct combined value.
+		vfCacheStore(dst_vf, v10, combined);
+		return true;
+	}
+
+	return false;
+}
+
 static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode mode)
 {
 	const bool  skip_dst_write   = (dst_off == vfOffStatic0); // VF[0] hardwired
@@ -553,7 +630,13 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 	// store fires at block end / hazard / BL via vfCacheFlushAndInvalidate.
 	const int dst_vf = vfIndexFromDstOff(dst_off);
 	if (dst_vf > 0)
-		vfCacheStore(dst_vf, v5, static_cast<u8>(eff_xyzw));
+	{
+		// FMAC opt #17: try the same-VF different-lane batching helper
+		// first. On a matched K it stashes v5's lane and skips the
+		// store; on a matched K+1 it merges and Strs the combined XY.
+		if (!tryBatchedVfCacheStore(dst_vf, eff_xyzw))
+			vfCacheStore(dst_vf, v5, static_cast<u8>(eff_xyzw));
+	}
 	else
 		emitPartialLaneStore(dst_off, eff_xyzw); // fallback for unrecognized dst
 }
@@ -606,7 +689,9 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 	const int dst_vf = vfIndexFromDstOff(dst_off);
 	if (dst_vf > 0)
 	{
-		vfCacheStore(dst_vf, v5, static_cast<u8>(xyzw));
+		// FMAC opt #17: same-VF different-lane batching.
+		if (!tryBatchedVfCacheStore(dst_vf, xyzw))
+			vfCacheStore(dst_vf, v5, static_cast<u8>(xyzw));
 		return;
 	}
 
@@ -633,6 +718,10 @@ static void emitNoFlagWriteback(u32 fd, u32 xyzw)
 	// FMAC opt #14: skip dead writes. MAX/MINI/ABS don't touch flags, so
 	// there's nothing else to do — pure cache-store skip.
 	if (g_vu1DeadVFWrite) return;
+	// FMAC opt #17: same-VF different-lane batching. MAX/MINI/ABS are
+	// FMAC-pipe ops, so Pass 1 may flag them as a batch endpoint.
+	if (tryBatchedVfCacheStore(static_cast<int>(fd), xyzw))
+		return;
 	// Phase 2: defer the write into the cache. Memory store fires at the
 	// next flush point. Mirrors emitFmacStoreMasked's VF path.
 	vfCacheStore(static_cast<int>(fd), v5, static_cast<u8>(xyzw));
