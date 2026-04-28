@@ -220,7 +220,7 @@ target_link_libraries(common PUBLIC
 )
 
 fixup_file_properties(common)
-target_compile_features(common PUBLIC cxx_std_17)
+target_compile_features(common PUBLIC cxx_std_20)
 target_include_directories(common PUBLIC ../3rdparty/include ../)
 target_compile_definitions(common PUBLIC "${PCSX2_DEFS}")
 target_compile_options(common PRIVATE "${PCSX2_WARNINGS}")

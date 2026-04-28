@@ -1896,6 +1896,12 @@ static int vfCacheEnsureLoaded(int vfreg)
 // {0,0,0,1}; not worth reserving a slot to cache it).
 void vfCacheLoadInto(int vfreg, const a64::VRegister& scratch)
 {
+	// FMAC opt #16: loading into v1 destroys any cached broadcast there.
+	// vixl's v1 has GetCode() == 1; comparing by code avoids dragging the
+	// vixl global v1 into this header-light TU's cache reset hook.
+	if (scratch.GetCode() == 1)
+		vu1BroadcastCacheReset();
+
 	if (vfreg == 0)
 	{
 		armAsm->Ldr(scratch.Q(), a64::MemOperand(VU1_BASE_REG, vfCacheOffsetOf(0)));
@@ -1941,6 +1947,11 @@ void vfCacheStore(int vfreg, const a64::VRegister& src_reg, u8 xyzw_mask)
 {
 	if (vfreg <= 0 || xyzw_mask == 0)
 		return;
+
+	// FMAC opt #16: writing VF[vfreg] makes any cached broadcast of the
+	// same VF stale. Notified before the slot/Mov/Str dance so subsequent
+	// emitLoadBroadcast(vfreg, _) re-emits the load.
+	vu1BroadcastCacheNoteVfWritten(vfreg);
 
 	int slot = vfCacheFind(vfreg);
 	if (slot < 0)
@@ -2035,6 +2046,9 @@ void vfCacheFlushAndInvalidate()
 		s_vfCache[i].last_use = 0;
 	}
 	s_vfCacheClock = 0;
+	// FMAC opt #16: BL clobbers caller-saved v1, so the broadcast cache
+	// (which lives in v1) is invalidated alongside the per-VF cache.
+	vu1BroadcastCacheReset();
 }
 
 // Drop the cached copy of `vfreg`, if any. Call when external code (e.g., a
@@ -2843,6 +2857,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	vfCacheReset();
 	// VI cache: same lifecycle as VF cache — empty at every block compile.
 	viCacheReset();
+	// FMAC opt #16: broadcast operand cache is per-block — v1 is caller-saved
+	// per AAPCS64, so it doesn't survive across the prior block's epilogue
+	// Ret + Execute's outer dispatch back into our codeEntry prologue.
+	vu1BroadcastCacheReset();
 	// #18 deep-dive: fmaccount Add-batching state. Reset per block since the
 	// pinned w26 is reloaded fresh in the prologue.
 	s_vu1_deferred_fmaccount = 0;

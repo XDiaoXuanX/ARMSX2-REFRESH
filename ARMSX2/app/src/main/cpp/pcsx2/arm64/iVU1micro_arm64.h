@@ -114,3 +114,14 @@ vixl::aarch64::Register viCacheLoadResident(int vireg);
 // `Sxth(dest, viCacheLoadResident(reg))` directly when reg can be 0.
 void viCacheLoadSignedInto(int vireg, const vixl::aarch64::Register& dest);
 void viCacheStore(int vireg, const vixl::aarch64::Register& src_reg);
+
+// ============================================================================
+//  Broadcast operand cache (FMAC opt #16)
+// ============================================================================
+// emitLoadBroadcast (in iVU1Upper_arm64.cpp) caches the last (ft, comp) it
+// loaded into v1 across pairs. Consecutive ADDx/MULx-style ops broadcasting
+// the same VF lane reuse v1 — the second emit becomes a no-op (saves 1 Dup
+// + 1 Ldr if cache miss). Reset hooks fire on BL invalidation, VF[ft] write,
+// and any v1-writing helper. Defined in iVU1Upper_arm64.cpp.
+void vu1BroadcastCacheReset();
+void vu1BroadcastCacheNoteVfWritten(int vfreg);

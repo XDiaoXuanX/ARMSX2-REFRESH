@@ -74,6 +74,49 @@ bool g_vu1NeedsUOFlags = true;
 bool g_vu1DeadVFWrite = false;
 
 // ============================================================================
+//  Broadcast operand cache (FMAC opt #16)
+//
+//  emitLoadBroadcast loads VF[ft][comp] broadcasted into v1. For consecutive
+//  pairs broadcasting the same (ft, comp) — common in lighting code where
+//  ADDx-then-MULx on the same scalar appears in chains — the second load
+//  is redundant. Track the last (ft, comp) emitted and skip the Dup (and
+//  upstream Ldr if the slot was already resident) on a hit.
+//
+//  Invalidated on:
+//    - Block start (vu1BroadcastCacheReset).
+//    - Any BL — wired into vfCacheFlushAndInvalidate; v1 is caller-saved
+//      per AAPCS64 so the BL clobbers it.
+//    - VF[cached_ft] is written by some op — wired into vfCacheStore via
+//      vu1BroadcastCacheNoteVfWritten; the broadcast value would be stale.
+//    - v1 is overwritten by another helper (vfCacheLoadInto with scratch=v1,
+//      emitLoadQI, emitVuAddSubHack, FTOI/ITOF, MR32). Each writer calls
+//      vu1BroadcastCacheReset directly.
+//
+//  ACC and clamp interactions: emitVuClampVec on v1 keeps the cached value
+//  semantically valid (clamp is idempotent for valid floats; +MAX/-MAX
+//  bit-patterns don't change under repeated clamps), so we DO NOT
+//  invalidate around clamp. emitFmacWriteback / emitFmacInlineWriteback
+//  use v2-v8 + v5; v1 is preserved across the whole writeback.
+// ============================================================================
+namespace
+{
+	bool s_broadcastCacheValid = false;
+	u32  s_broadcastCacheFt    = 0;
+	int  s_broadcastCacheComp  = -1;
+}
+
+void vu1BroadcastCacheReset()
+{
+	s_broadcastCacheValid = false;
+}
+
+void vu1BroadcastCacheNoteVfWritten(int vfreg)
+{
+	if (s_broadcastCacheValid && static_cast<int>(s_broadcastCacheFt) == vfreg)
+		s_broadcastCacheValid = false;
+}
+
+// ============================================================================
 //  Native NEON codegen helpers
 // ============================================================================
 
@@ -617,6 +660,14 @@ static void emitNoFlagWriteback(u32 fd, u32 xyzw)
 // the same vertex VF four times in a row.
 static void emitLoadBroadcast(u32 ft, int comp) // comp: 0=x,1=y,2=z,3=w
 {
+	// FMAC opt #16: broadcast operand cache. v1 already holds
+	// broadcast(VF[ft], comp) from the prior pair AND no invalidation
+	// has fired since — skip the Dup/Fmov entirely. Saves 1 Dup per
+	// reused pair, plus 1 Ldr in the rare case that VF[ft]'s cache slot
+	// had been evicted (vfCacheLoadResident's miss path).
+	if (s_broadcastCacheValid && s_broadcastCacheFt == ft && s_broadcastCacheComp == comp)
+		return;
+
 	if (ft == 0)
 	{
 		// VF[0] is the hardwired constant (0, 0, 0, 1). The broadcast value
@@ -627,15 +678,23 @@ static void emitLoadBroadcast(u32 ft, int comp) // comp: 0=x,1=y,2=z,3=w
 			armAsm->Fmov(v1.V4S(), 1.0f);
 		else
 			armAsm->Movi(v1.V4S(), 0);
-		return;
 	}
-	const auto resident = vfCacheLoadResident(static_cast<int>(ft));
-	armAsm->Dup(v1.V4S(), resident.V4S(), comp);
+	else
+	{
+		const auto resident = vfCacheLoadResident(static_cast<int>(ft));
+		armAsm->Dup(v1.V4S(), resident.V4S(), comp);
+	}
+
+	s_broadcastCacheValid = true;
+	s_broadcastCacheFt    = ft;
+	s_broadcastCacheComp  = comp;
 }
 
 // Load Q or I register broadcast into v1.4S.
 static void emitLoadQI(int64_t vi_off)
 {
+	// FMAC opt #16: Q/I broadcast overwrites v1 with a non-VF value.
+	vu1BroadcastCacheReset();
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vi_off));
 	armAsm->Dup(v1.V4S(), w0);
 }
@@ -684,6 +743,14 @@ static void emitVuClampVec(const VRegister& vn)
 // overwrite).
 static void emitVuAddSubHack(const VRegister& to, const VRegister& from)
 {
+	// FMAC opt #16: this conditionally zeroes lanes of `to`/`from`. When
+	// called with v1 as the `from` operand (the typical site in
+	// emitBinaryFmac), v1 is mutated to a non-broadcast value — even if
+	// the runtime mask doesn't fire, the cache state would no longer
+	// correspond to "v1 == broadcast(VF[ft], comp)" because the lane
+	// mask was applied. Conservatively invalidate.
+	if (to.GetCode() == v1.GetCode() || from.GetCode() == v1.GetCode())
+		vu1BroadcastCacheReset();
 	// Per-lane exponent extract: (raw >> 23) & 0xFF.
 	armAsm->Ushr(v6.V4S(), to.V4S(), 23);
 	armAsm->Ushr(v7.V4S(), from.V4S(), 23);
@@ -1161,6 +1228,8 @@ static void emitFTOI(int fbits)
 		emitVuClampSetup();
 		emitVuClampVec(v0.V4S());
 	}
+	// FMAC opt #16: FTOI overwrites v1 with the converted integer vector.
+	vu1BroadcastCacheReset();
 	if (fbits > 0)
 		armAsm->Fcvtzs(v1.V4S(), v0.V4S(), fbits);
 	else
@@ -1203,6 +1272,8 @@ static void emitITOF(int fbits)
 	const u32 xyzw = (VU1.code >> 21) & 0xF;
 	if (ft == 0) return;
 	vfCacheLoadInto(static_cast<int>(fs), v0);
+	// FMAC opt #16: ITOF overwrites v1 with the converted float vector.
+	vu1BroadcastCacheReset();
 	if (fbits > 0)
 		armAsm->Scvtf(v1.V4S(), v0.V4S(), fbits);
 	else

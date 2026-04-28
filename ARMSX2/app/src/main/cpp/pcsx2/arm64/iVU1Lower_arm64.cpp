@@ -2080,6 +2080,8 @@ void recVU1_MR32() {
 	{
 		armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(0)));
 		armAsm->Ext(v1.V16B(), v0.V16B(), v0.V16B(), 4);
+		// FMAC opt #16: Ext into v1 invalidates the broadcast cache.
+		vu1BroadcastCacheReset();
 		vfCacheStore(static_cast<int>(ft), v1, static_cast<u8>(xyzw));
 		return;
 	}

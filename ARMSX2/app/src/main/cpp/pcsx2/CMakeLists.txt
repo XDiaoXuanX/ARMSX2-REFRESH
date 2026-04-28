@@ -9,7 +9,7 @@ else()
 endif()
 target_link_libraries(PCSX2 PRIVATE PCSX2_FLAGS)
 
-target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_17)
+target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_20)
 target_compile_definitions(PCSX2_FLAGS INTERFACE "${PCSX2_DEFS}")
 target_compile_options(PCSX2_FLAGS INTERFACE "${PCSX2_WARNINGS}")
 
