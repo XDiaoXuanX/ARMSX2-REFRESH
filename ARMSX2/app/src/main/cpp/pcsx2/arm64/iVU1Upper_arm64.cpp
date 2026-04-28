@@ -255,6 +255,13 @@ static inline int vfIndexFromDstOff(int64_t dst_off)
 // Loaded once per emit call via armLoadConstant128 (1-insn literal pool).
 alignas(16) static const u32 kFmacShiftVec[4] = {3, 2, 1, 0};
 
+// FMAC opt #6 (NEON-vectorized compare): per-lane bit-pack mask for CLIP's
+// positive compare results. Lane 0 (fs.x) → bit 0, lane 1 (fs.y) → bit 2,
+// lane 2 (fs.z) → bit 4, lane 3 unused (W lane is the value, not compared).
+// The sign-flipped mask {2, 8, 32, 0} is derived at emit time as
+// (kClipMaskPos << 1) to save one constant pool entry.
+alignas(16) static const u32 kClipMaskPos[4] = {0x01u, 0x04u, 0x10u, 0x00u};
+
 // Mode for the inline writeback helper:
 //   GenericFmac : normal ADD/SUB/MUL/MADD/MSUB + accum variants.
 //                 Lanes not in xyzw get their flag bits cleared.
@@ -2263,51 +2270,69 @@ void recVU1_CLIP() {
 	armAsm->Cmp(w1, 0);
 	armAsm->Csel(w0, w0, w2, ne);
 
-	// Load fs.xyz (w=don't care)
-	if (fs_resident)
-	{
-		const auto fsSlot = vfCacheLoadResident(static_cast<int>(fs));
-		armAsm->Umov(w3, fsSlot.V4S(), 0);
-		armAsm->Umov(w4, fsSlot.V4S(), 1);
-		armAsm->Umov(w5, fsSlot.V4S(), 2);
-	}
-	else
-	{
-		armAsm->Ldr(w3, MemOperand(VU1_BASE_REG, vfOff(fs) + 0));
-		armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vfOff(fs) + 4));
-		armAsm->Ldr(w5, MemOperand(VU1_BASE_REG, vfOff(fs) + 8));
-	}
-
 	// w6 = VU->clipflag << 6 (read from pinned VU1_CLIPFLAG_REG, not memory).
 	armAsm->Lsl(w6, VU1_CLIPFLAG_REG, 6);
 
-	// bit 0: fs.x > value  (signed)
-	armAsm->Cmp(w3, w0);
-	armAsm->Cset(w7, gt);
-	armAsm->Orr(w6, w6, w7);
-	// bit 1: (fs.x ^ 0x80000000) > value
-	armAsm->Eor(w8, w3, 0x80000000u);
-	armAsm->Cmp(w8, w0);
-	armAsm->Cset(w7, gt);
-	armAsm->Orr(w6, w6, Operand(w7, LSL, 1));
-	// bit 2: fs.y > value
-	armAsm->Cmp(w4, w0);
-	armAsm->Cset(w7, gt);
-	armAsm->Orr(w6, w6, Operand(w7, LSL, 2));
-	// bit 3: (fs.y ^ 0x80000000) > value
-	armAsm->Eor(w8, w4, 0x80000000u);
-	armAsm->Cmp(w8, w0);
-	armAsm->Cset(w7, gt);
-	armAsm->Orr(w6, w6, Operand(w7, LSL, 3));
-	// bit 4: fs.z > value
-	armAsm->Cmp(w5, w0);
-	armAsm->Cset(w7, gt);
-	armAsm->Orr(w6, w6, Operand(w7, LSL, 4));
-	// bit 5: (fs.z ^ 0x80000000) > value
-	armAsm->Eor(w8, w5, 0x80000000u);
-	armAsm->Cmp(w8, w0);
-	armAsm->Cset(w7, gt);
-	armAsm->Orr(w6, w6, Operand(w7, LSL, 5));
+	// FMAC opt #6 (NEON-vectorized compare): pack the 6 signed-int compares
+	// (3 components × {raw, sign-flipped}) into one parallel NEON pipeline.
+	//
+	// Layout per lane (X/Y/Z; lane W unused):
+	//   vR1.lane[i] = (fs.lane[i] > value)             ? 0xFFFFFFFF : 0
+	//   vR2.lane[i] = (fs.lane[i] ^ 0x80000000) > value ? 0xFFFFFFFF : 0
+	//
+	// Bit-pack masks (kept disjoint so Addv folds == OR):
+	//   vM1 (positive) = {0x01, 0x04, 0x10, 0x00}  — bits 0/2/4
+	//   vM2 (negative) = vM1 << 1  = {0x02, 0x08, 0x20, 0x00}  — bits 1/3/5
+	//
+	// After AND + OR + Addv, lane 0 holds the 6-bit clipflag delta to OR
+	// into w6. Disjoint bits guarantee Addv (sum) == OR.
+	//
+	// Equivalent to the original 21-insn GPR compare chain (3 Ldr w + 6
+	// Cmp/Cset/Orr × 2-or-3 each); NEON path is 14 insns and matches the
+	// existing bit positions exactly. The chain ends with one Umov (NEON→
+	// GPR) plus one Orr; the rest is parallelizable on a wide NEON pipe.
+	{
+		// Source vector for fs.xyzw. Resident slot is read-only — Cmgt/Eor
+		// write their destinations (v6/v7), not the slot, so the cache
+		// stays coherent.
+		a64::VRegister vFs = v3;
+		if (fs_resident)
+		{
+			vFs = vfCacheLoadResident(static_cast<int>(fs));
+		}
+		else
+		{
+			armAsm->Ldr(v3.Q(), MemOperand(VU1_BASE_REG, vfOff(fs)));
+		}
+
+		// vV.4S = broadcast(value) for parallel compare against all lanes.
+		armAsm->Dup(v4.V4S(), w0);
+		// vS.4S = 0x80000000 broadcast (sign-flip mask).
+		armAsm->Movi(v5.V4S(), 0x80, LSL, 24);
+
+		// Positive compares: vR1.lane[i] = (fs.lane[i] > value)
+		armAsm->Cmgt(v6.V4S(), vFs.V4S(), v4.V4S());
+		// Sign-flipped fs into v7: v7 = fs ^ vS.
+		armAsm->Eor(v7.V16B(), vFs.V16B(), v5.V16B());
+		// Negative compares: v7.lane[i] = ((fs.lane[i] ^ sign) > value)
+		armAsm->Cmgt(v7.V4S(), v7.V4S(), v4.V4S());
+
+		// Per-lane bit-pack masks. vM2 = vM1 << 1 (saves one literal pool entry).
+		armLoadConstant128(v8.Q(), kClipMaskPos);
+		armAsm->Shl(v2.V4S(), v8.V4S(), 1);
+
+		// Mask compare results to their bit positions.
+		armAsm->And(v6.V16B(), v6.V16B(), v8.V16B());
+		armAsm->And(v7.V16B(), v7.V16B(), v2.V16B());
+		// Combine pos + sign-flipped (disjoint bits).
+		armAsm->Orr(v6.V16B(), v6.V16B(), v7.V16B());
+		// Horizontal sum across all 4 lanes (bit-disjoint, so sum == OR).
+		armAsm->Addv(s6, v6.V4S());
+		// Extract the 6-bit packed result into w7.
+		armAsm->Umov(w7, v6.V4S(), 0);
+		// OR into the clipflag accumulator (w6 already holds clipflag << 6).
+		armAsm->Orr(w6, w6, w7);
+	}
 
 	// Mask to 24 bits and write back to the pinned reg.
 	armAsm->And(VU1_CLIPFLAG_REG, w6, 0xFFFFFFu);

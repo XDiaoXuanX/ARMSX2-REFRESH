@@ -1010,23 +1010,30 @@ static void vu1HandleDelayBranch(VURegs* VU)
 
 // Mirrors _vuFMACTestStall in VUops.cpp:210, but takes (reg,xyzw) directly
 // in argument registers instead of via _VURegsNum*.
-static void vu1_TestFMACStallReg(VURegs* VU, u32 reg, u32 xyzw)
+// Calling convention: takes `cycle` and `fmaccount` as args (matches the
+// JIT-pinned VU1_CYCLE_REG / VU1_FMACCOUNT_REG), returns the post-check
+// cycle (may be bumped if a pending FMAC slot stalls this read). JIT site
+// passes x21 / w26 → x2 / w1, captures x0 → x21 — eliminates the per-BL
+// Str+Ldr round-trip through VU->cycle / VU->fmaccount memory.
+static u64 vu1_TestFMACStallReg(VURegs* VU, u32 fmaccount, u64 cycle, u32 reg, u32 xyzw)
 {
 	u32 i = 0;
-	for (int currentpipe = VU->fmacreadpos; i < VU->fmaccount;
+	for (int currentpipe = VU->fmacreadpos; i < fmaccount;
 	     currentpipe = (currentpipe + 1) & 3, i++)
 	{
-		if ((VU->cycle - VU->fmac[currentpipe].sCycle) >= VU->fmac[currentpipe].Cycle)
+		const fmacPipe& slot = VU->fmac[currentpipe];
+		if ((cycle - slot.sCycle) >= slot.Cycle)
 			continue;
 
-		if ((VU->fmac[currentpipe].regupper == reg && (VU->fmac[currentpipe].xyzwupper & xyzw))
-			|| (VU->fmac[currentpipe].reglower == reg && (VU->fmac[currentpipe].xyzwlower & xyzw)))
+		if ((slot.regupper == reg && (slot.xyzwupper & xyzw))
+			|| (slot.reglower == reg && (slot.xyzwlower & xyzw)))
 		{
-			u64 newCycle = VU->fmac[currentpipe].Cycle + VU->fmac[currentpipe].sCycle;
-			if (newCycle > VU->cycle)
-				VU->cycle = newCycle;
+			const u64 newCycle = (u64)slot.Cycle + slot.sCycle;
+			if (newCycle > cycle)
+				cycle = newCycle;
 		}
 	}
+	return cycle;
 }
 
 // Combined two-read FMAC stall check. Most FMAC ops have two VF reads
@@ -1041,16 +1048,18 @@ static void vu1_TestFMACStallReg(VURegs* VU, u32 reg, u32 xyzw)
 // Walks the FMAC ring once, checks both pairs per slot. Same semantics
 // as two back-to-back vu1_TestFMACStallReg calls — VU->cycle update
 // is monotonic so order of checks doesn't matter for the final cycle.
-static void vu1_TestFMACStallReg2(VURegs* VU, u32 reg0, u32 xyzw0, u32 reg1, u32 xyzw1)
+//
+// Same arg/return convention as vu1_TestFMACStallReg.
+static u64 vu1_TestFMACStallReg2(VURegs* VU, u32 fmaccount, u64 cycle, u32 reg0, u32 xyzw0, u32 reg1, u32 xyzw1)
 {
 	u32 i = 0;
-	for (int currentpipe = VU->fmacreadpos; i < VU->fmaccount;
+	for (int currentpipe = VU->fmacreadpos; i < fmaccount;
 	     currentpipe = (currentpipe + 1) & 3, i++)
 	{
-		if ((VU->cycle - VU->fmac[currentpipe].sCycle) >= VU->fmac[currentpipe].Cycle)
+		const fmacPipe& slot = VU->fmac[currentpipe];
+		if ((cycle - slot.sCycle) >= slot.Cycle)
 			continue;
 
-		const fmacPipe& slot = VU->fmac[currentpipe];
 		const bool hit0 = reg0 != 0 && (
 			(slot.regupper == reg0 && (slot.xyzwupper & xyzw0)) ||
 			(slot.reglower == reg0 && (slot.xyzwlower & xyzw0)));
@@ -1060,11 +1069,12 @@ static void vu1_TestFMACStallReg2(VURegs* VU, u32 reg0, u32 xyzw0, u32 reg1, u32
 
 		if (hit0 || hit1)
 		{
-			u64 newCycle = (u64)slot.Cycle + slot.sCycle;
-			if (newCycle > VU->cycle)
-				VU->cycle = newCycle;
+			const u64 newCycle = (u64)slot.Cycle + slot.sCycle;
+			if (newCycle > cycle)
+				cycle = newCycle;
 		}
 	}
+	return cycle;
 }
 
 // FDIV pipe wait portion of _vuTestFDIVStalls (the FMAC test is called
@@ -1131,34 +1141,48 @@ static void vu1_TestALUStallReg(VURegs* VU, u32 VIread)
 // Called once per pair (step 6 of CompileBlock), so keeping it tight matters.
 // Kept in sync with the originals — when any of the VUops.cpp flush bodies
 // change, this must be updated too.
-static void vu1_TestPipes_VU1(VURegs* VU)
+//
+// Calling convention: takes `fmaccount_in` and `cycle` as args (matches the
+// JIT-pinned VU1_FMACCOUNT_REG / VU1_CYCLE_REG = w26 / x21). Returns the
+// post-flush fmaccount in x0. The JIT site passes w26 → w1 and x21 → x2,
+// captures w0 → w26 — eliminating the per-BL Str+Ldr round-trip through
+// VU->fmaccount AND VU->cycle memory. Helper does NOT write VU->cycle, so
+// no cycle reload needed JIT-side. VU->fmaccount memory stays stale during
+// a block (prologue/epilogue still flush for cross-block coherence with
+// cold paths like _vuFlushAll/vu1Exec).
+static u32 vu1_TestPipes_VU1(VURegs* VU, u32 fmaccount_in, u64 cycle)
 {
+	u32 fmaccount = fmaccount_in;
+
 	// --- FMAC flush ---
-	for (int i = VU->fmacreadpos; VU->fmaccount > 0; i = (i + 1) & 3)
+	int fmacreadpos = VU->fmacreadpos;
+	while (fmaccount > 0)
 	{
-		if ((VU->cycle - VU->fmac[i].sCycle) < VU->fmac[i].Cycle)
+		const fmacPipe& slot = VU->fmac[fmacreadpos];
+		if ((cycle - slot.sCycle) < slot.Cycle)
 			break;
 
-		if (VU->fmac[i].flagreg & (1 << REG_CLIP_FLAG))
-			VU->VI[REG_CLIP_FLAG].UL = VU->fmac[i].clipflag;
+		if (slot.flagreg & (1 << REG_CLIP_FLAG))
+			VU->VI[REG_CLIP_FLAG].UL = slot.clipflag;
 
-		if (VU->fmac[i].flagreg & (1 << REG_STATUS_FLAG))
+		if (slot.flagreg & (1 << REG_STATUS_FLAG))
 			VU->VI[REG_STATUS_FLAG].UL = (VU->VI[REG_STATUS_FLAG].UL & 0x30)
-				| (VU->fmac[i].statusflag & 0xFC0)
-				| (VU->fmac[i].statusflag & 0xF);
+				| (slot.statusflag & 0xFC0)
+				| (slot.statusflag & 0xF);
 		else
 			VU->VI[REG_STATUS_FLAG].UL = (VU->VI[REG_STATUS_FLAG].UL & 0xFF0)
-				| (VU->fmac[i].statusflag & 0xF)
-				| ((VU->fmac[i].statusflag & 0xF) << 6);
-		VU->VI[REG_MAC_FLAG].UL = VU->fmac[i].macflag;
+				| (slot.statusflag & 0xF)
+				| ((slot.statusflag & 0xF) << 6);
+		VU->VI[REG_MAC_FLAG].UL = slot.macflag;
 
-		VU->fmacreadpos = (VU->fmacreadpos + 1) & 3;
-		VU->fmaccount--;
+		fmacreadpos = (fmacreadpos + 1) & 3;
+		fmaccount--;
 	}
+	VU->fmacreadpos = fmacreadpos;
 
 	// --- FDIV flush ---
 	if (VU->fdiv.enable != 0
-		&& (VU->cycle - VU->fdiv.sCycle) >= VU->fdiv.Cycle)
+		&& (cycle - VU->fdiv.sCycle) >= VU->fdiv.Cycle)
 	{
 		VU->fdiv.enable = 0;
 		VU->VI[REG_Q].UL = VU->fdiv.reg.UL;
@@ -1168,20 +1192,27 @@ static void vu1_TestPipes_VU1(VURegs* VU)
 
 	// --- EFU flush ---
 	if (VU->efu.enable != 0
-		&& (VU->cycle - VU->efu.sCycle) >= VU->efu.Cycle)
+		&& (cycle - VU->efu.sCycle) >= VU->efu.Cycle)
 	{
 		VU->efu.enable = 0;
 		VU->VI[REG_P].UL = VU->efu.reg.UL;
 	}
 
 	// --- IALU flush (pop only, no flag writes) ---
-	for (int i = VU->ialureadpos; VU->ialucount > 0; i = (i + 1) & 3)
+	int ialureadpos = VU->ialureadpos;
+	u32 ialucount = VU->ialucount;
+	while (ialucount > 0)
 	{
-		if ((VU->cycle - VU->ialu[i].sCycle) < VU->ialu[i].Cycle)
+		const ialuPipe& slot = VU->ialu[ialureadpos];
+		if ((cycle - slot.sCycle) < slot.Cycle)
 			break;
-		VU->ialureadpos = (VU->ialureadpos + 1) & 3;
-		VU->ialucount--;
+		ialureadpos = (ialureadpos + 1) & 3;
+		ialucount--;
 	}
+	VU->ialureadpos = ialureadpos;
+	VU->ialucount = ialucount;
+
+	return fmaccount;
 }
 
 // ============================================================================
@@ -1820,6 +1851,20 @@ static void emitFlushFmaccountReg(int64_t fmaccount_off)
 		s_vu1_deferred_fmaccount = 0;
 	}
 	armAsm->Str(VU1_FMACCOUNT_REG, MemOperand(VU1_BASE_REG, fmaccount_off));
+}
+
+// Drain any pending deferred fmaccount increment into the pinned reg, but
+// DO NOT emit the Str to memory. Use when the next BL receives fmaccount
+// as an argument (in w1) instead of via memory — saves the per-BL Str.
+// Helpers using this convention: vu1_TestPipes_VU1, vu1_TestFMACStallReg,
+// vu1_TestFMACStallReg2.
+static void emitDrainFmaccountReg()
+{
+	if (s_vu1_deferred_fmaccount > 0)
+	{
+		armAsm->Add(VU1_FMACCOUNT_REG, VU1_FMACCOUNT_REG, s_vu1_deferred_fmaccount);
+		s_vu1_deferred_fmaccount = 0;
+	}
 }
 
 static void emitReloadFmaccountReg(int64_t fmaccount_off)
@@ -2599,48 +2644,54 @@ void emitVU1InterpBL(const void* interp_fn)
 // before each BL. No reload — the BL doesn't mutate fmaccount.
 static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 {
-	const int64_t cycle_off     = (int64_t)offsetof(VURegs, cycle);
-	const int64_t fmaccount_off = (int64_t)offsetof(VURegs, fmaccount);
-
 	const bool active0 = !skip0 && regs.VFread0 != 0;
 	const bool active1 = !skip1 && regs.VFread1 != 0;
 
+	if (!active0 && !active1)
+		return;
+
+	// Refactored arg/return convention (cycle in/out via x0, fmaccount in via
+	// w1) eliminates the per-BL emitFlush/ReloadCycleReg + emitFlush
+	// FmaccountReg memory round-trip. Drain any deferred fmaccount Add
+	// into w26 first so the arg is correct.
+	emitDrainFmaccountReg();
+
 	if (active0 && active1)
 	{
-		// Combined path: one BL handles both reads. Cuts vfCacheFlushAndInvalidate
-		// + Mov scratch + emitFlush/Reload overhead in half for the typical
-		// 2-read FMAC pair (ADD/SUB/MUL/MADD/MSUB). Hot in FFXII vertex blocks.
-		emitFlushCycleReg(cycle_off);
-		emitFlushFmaccountReg(fmaccount_off);
+		// Combined: one BL handles both reads. Args: VU=x0, fmaccount=w1,
+		// cycle=x2, reg0=w3, xyzw0=w4, reg1=w5, xyzw1=w6. Returns new cycle.
+		armAsm->Mov(w1, VU1_FMACCOUNT_REG);
+		armAsm->Mov(x2, VU1_CYCLE_REG);
+		armAsm->Mov(w3, regs.VFread0);
+		armAsm->Mov(w4, regs.VFr0xyzw);
+		armAsm->Mov(w5, regs.VFread1);
+		armAsm->Mov(w6, regs.VFr1xyzw);
 		armAsm->Mov(x0, VU1_BASE_REG);
-		armAsm->Mov(w1, regs.VFread0);
-		armAsm->Mov(w2, regs.VFr0xyzw);
-		armAsm->Mov(w3, regs.VFread1);
-		armAsm->Mov(w4, regs.VFr1xyzw);
 		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg2));
-		emitReloadCycleReg(cycle_off);
+		armAsm->Mov(VU1_CYCLE_REG, x0);
 		return;
 	}
 
 	if (active0)
 	{
-		emitFlushCycleReg(cycle_off);
-		emitFlushFmaccountReg(fmaccount_off);
+		armAsm->Mov(w1, VU1_FMACCOUNT_REG);
+		armAsm->Mov(x2, VU1_CYCLE_REG);
+		armAsm->Mov(w3, regs.VFread0);
+		armAsm->Mov(w4, regs.VFr0xyzw);
 		armAsm->Mov(x0, VU1_BASE_REG);
-		armAsm->Mov(w1, regs.VFread0);
-		armAsm->Mov(w2, regs.VFr0xyzw);
 		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
-		emitReloadCycleReg(cycle_off);
+		armAsm->Mov(VU1_CYCLE_REG, x0);
 	}
 	if (active1)
 	{
-		emitFlushCycleReg(cycle_off);
-		emitFlushFmaccountReg(fmaccount_off);
+		emitDrainFmaccountReg(); // active0 path may have deferred again — defensive
+		armAsm->Mov(w1, VU1_FMACCOUNT_REG);
+		armAsm->Mov(x2, VU1_CYCLE_REG);
+		armAsm->Mov(w3, regs.VFread1);
+		armAsm->Mov(w4, regs.VFr1xyzw);
 		armAsm->Mov(x0, VU1_BASE_REG);
-		armAsm->Mov(w1, regs.VFread1);
-		armAsm->Mov(w2, regs.VFr1xyzw);
 		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
-		emitReloadCycleReg(cycle_off);
+		armAsm->Mov(VU1_CYCLE_REG, x0);
 	}
 }
 
@@ -4213,14 +4264,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		if (!skip_info[i].skipTestPipes)
 		{
 			VU1_PERF_BEGIN(_pp_s6);
-			emitFlushCycleReg(cycle_off);
-			// Phase-9b: vu1_TestPipes_VU1 reads fmaccount as the FMAC-flush
-			// loop bound and decrements it per flushed slot. Flush+reload
-			// the pin around the BL.
-			emitFlushFmaccountReg(fmaccount_off);
+			// Refactored: cycle (x21) AND fmaccount (w26) passed as args
+			// (x2 / w1) → no Str+Ldr round-trip through memory. Helper
+			// returns new fmaccount in w0; cycle is read-only so no reload.
+			emitDrainFmaccountReg();
+			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
+			armAsm->Mov(x2, VU1_CYCLE_REG);
 			armAsm->Mov(x0, VU1_BASE_REG);
 			emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
-			emitReloadFmaccountReg(fmaccount_off);
+			armAsm->Mov(VU1_FMACCOUNT_REG, w0);
 			VU1_PERF_END(_pp_s6, "VU1_TestPipes_0x%04x", pc);
 		}
 
