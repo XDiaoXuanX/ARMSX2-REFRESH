@@ -999,7 +999,14 @@ std::FILE* FileSystem::OpenCFile(const char* filename, const char* mode, Error* 
 
 	return fp;
 #else
-	std::FILE* fp = std::fopen(filename, mode);
+	std::FILE* fp;
+#if defined(__ANDROID__)
+	std::string _filename(filename);
+	if (_filename.rfind("content://", 0) == 0)
+		fp = fdopen(FileSystem::OpenFDFileContent(_filename.c_str()), "rb");
+	else
+#endif
+		fp = std::fopen(filename, mode);
 	if (!fp)
 		Error::SetErrno(error, errno);
 	return fp;
@@ -1011,7 +1018,14 @@ std::FILE* FileSystem::OpenCFileTryIgnoreCase(const char* filename, const char* 
 #if defined(_WIN32) || defined(__APPLE__)
 	return OpenCFile(filename, mode, error);
 #else
-	std::FILE* fp = std::fopen(filename, mode);
+	std::FILE* fp;
+#if defined(__ANDROID__)
+	std::string _filename(filename);
+	if (_filename.rfind("content://", 0) == 0)
+		fp = fdopen(FileSystem::OpenFDFileContent(_filename.c_str()), "rb");
+	else
+#endif
+		fp = std::fopen(filename, mode);
 	const auto cur_errno = errno;
 
 	if (!fp)
@@ -2370,6 +2384,20 @@ bool FileSystem::FileExists(const char* path)
 	// has a path
 	if (path[0] == '\0')
 		return false;
+
+#if defined(__ANDROID__)
+	// content:// URIs can't be stat'd — probe by opening the fd
+	if (std::string_view(path).substr(0, 10) == "content://")
+	{
+		int fd = FileSystem::OpenFDFileContent(path);
+		if (fd >= 0)
+		{
+			close(fd);
+			return true;
+		}
+		return false;
+	}
+#endif
 
 	// stat file
 	struct stat sysStatData;

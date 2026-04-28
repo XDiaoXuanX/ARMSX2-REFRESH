@@ -8,6 +8,10 @@
 #include "common/Pcsx2Defs.h"
 #include "common/FPControl.h"
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include "arm64/InterpFlags.h"
+#endif
+
 #include <array>
 #include <string>
 #include <optional>
@@ -714,7 +718,11 @@ struct Pcsx2Config
 		static constexpr float DEFAULT_FRAME_RATE_NTSC = 59.94f;
 		static constexpr float DEFAULT_FRAME_RATE_PAL = 50.00f;
 
+#if defined(__ANDROID__)
 		static constexpr GSRendererType DEFAULT_HW_RENDERER = GSRendererType::Auto;
+#else
+		static constexpr GSRendererType DEFAULT_HW_RENDERER = GSRendererType::Auto;
+#endif
 
 		static constexpr AspectRatioType DEFAULT_ASPECT_RATIO = AspectRatioType::RAuto4_3_3_2;
 		static constexpr GSInterlaceMode DEFAULT_INTERLACE_MODE = GSInterlaceMode::Automatic;
@@ -723,11 +731,11 @@ struct Pcsx2Config
 		static constexpr GSCASMode DEFAULT_CAS_MODE = GSCASMode::Disabled;
 
 		static constexpr float DEFAULT_UPSCALE_MULTIPLIER = 1.0f;
-		static constexpr AccBlendLevel DEFAULT_BLENDING_ACCURACY = AccBlendLevel::Basic;
+		static constexpr AccBlendLevel DEFAULT_BLENDING_ACCURACY = AccBlendLevel::Full;
 		static constexpr BiFiltering DEFAULT_TEXTURE_FILTERING_MODE = BiFiltering::PS2;
 		static constexpr TriFiltering DEFAULT_TRILINEAR_FILTERING_MODE = TriFiltering::Automatic;
 
-		static constexpr float DEFAULT_OSD_SCALE = 100.0f;
+		static constexpr float DEFAULT_OSD_SCALE = 60.0f;
 		static constexpr float DEFAULT_OSD_MARGIN = 10.0f;
 		static constexpr OsdOverlayPos DEFAULT_OSD_MESSAGE_POS = OsdOverlayPos::TopLeft;
 		static constexpr OsdOverlayPos DEFAULT_OSD_PERFORMANCE_POS = OsdOverlayPos::TopRight;
@@ -895,7 +903,16 @@ struct Pcsx2Config
 		u8 ShadeBoost_Gamma = DEFAULT_SHADEBOOST_GAMMA;
 		u8 PNGCompressionLevel = 1;
 
-		u16 SWExtraThreads = 2;
+		// SW worker threads. Empirical: 75-80% per-thread CPU is "fully
+		// saturated" for the job-batched SW rasterizer (it's not the same
+		// utilization curve as EE/VU which show 100% when busy). On 8-core
+		// ARM phones (SD8 Elite, etc.) 4 workers gives the highest GoW2
+		// title-screen throughput — going lower drops below 100% emulation
+		// speed. SetHardwareDependentDefaultSettings tunes this at fresh-
+		// install per core count; this Config.h value is the cold default.
+		u16 SWExtraThreads = 4;
+		// compute_best_thread_height comment: ideal = log2(64 / threads).
+		// For 4 SW threads → 4 (16-row tiles).
 		u16 SWExtraThreadsHeight = 4;
 
 		int SaveDrawStart = 0;
@@ -962,7 +979,11 @@ struct Pcsx2Config
 		};
 
 		static constexpr s32 MAX_VOLUME = 200;
+#ifdef __ANDROID__
+		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Oboe;
+#else
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Cubeb;
+#endif
 		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::TimeStretch;
 
 		static std::optional<SPU2SyncMode> ParseSyncMode(const char* str);
@@ -1483,9 +1504,17 @@ namespace EmuFolders
 
 // ------------ CPU / Recompiler Options ---------------
 
-#ifdef _M_X86 // TODO: Remove me once EE/VU/IOP recs are added.
+#if defined(_M_X86)
 #define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
 #define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifdef INTERP_VU1
+#define THREAD_VU1 false
+#define REC_VU1 false
+#else
+#define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
+#define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
+#endif
 #else
 #define THREAD_VU1 false
 #define REC_VU1 false
@@ -1512,9 +1541,9 @@ namespace EmuFolders
 #define CHECK_VUOVERFLOWHACK (EmuConfig.Gamefixes.VUOverflowHack) // Special Fix for Superman Returns, they check for overflows on PS2 floats which we can't do without soft floats.
 #define CHECK_FULLVU0SYNCHACK (EmuConfig.Gamefixes.FullVU0SyncHack)
 
-//------------ Advanced Options!!! ---------------
+//------------ Advanced Options! ---------------
 #define CHECK_VU_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0Overflow : EmuConfig.Cpu.Recompiler.vu1Overflow)
-#define CHECK_VU_EXTRA_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0ExtraOverflow : EmuConfig.Cpu.Recompiler.vu1ExtraOverflow) // If enabled, Operands are clamped before being used in the VU recs
+#define CHECK_VU_EXTRA_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0ExtraOverflow : EmuConfig.Cpu.Recompiler.vu1ExtraOverflow)
 #define CHECK_VU_SIGN_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SignOverflow : EmuConfig.Cpu.Recompiler.vu1SignOverflow)
 #define CHECK_VU_UNDERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0Underflow : EmuConfig.Cpu.Recompiler.vu1Underflow)
 

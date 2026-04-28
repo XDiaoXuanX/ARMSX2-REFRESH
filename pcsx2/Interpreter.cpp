@@ -11,6 +11,11 @@
 
 #include "common/FastJmp.h"
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include "arm64/intNativeOps.h"
+#include "arm64/TraceBlocks.h"
+#endif
+
 #include <float.h>
 
 using namespace R5900;		// for OPCODE and OpcodeImpl
@@ -169,6 +174,7 @@ static void execI()
 #endif
 
 	const u32 pc = cpuRegs.pc;
+
 	// We need to increase the pc before executing the memRead32. An exception could appears
 	// and it expects the PC counter to be pre-incremented
 	cpuRegs.pc += 4;
@@ -213,7 +219,10 @@ static void execI()
 
 	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 
-	opcode.interpret();
+#if defined(__aarch64__) || defined(_M_ARM64)
+	if (!arm64TryNativeExec())
+#endif
+		opcode.interpret();
 }
 
 static __fi void _doBranch_shared(u32 tar)
@@ -553,8 +562,13 @@ static void intReset()
 	branch2 = 0;
 }
 
+extern bool s_eeTestMode;
+
 void intEventTest()
 {
+	if (s_eeTestMode)
+		return;
+
 	// Perform counters, ints, and IOP updates:
 	_cpuEventTest_Shared();
 
@@ -605,6 +619,9 @@ static void intExecute()
 
 			while (true)
 			{
+#ifdef TRACE_BLOCKS
+				eeTraceBlock(cpuRegs.pc);
+#endif
 				execI();
 
 				if (cpuRegs.pc == EELOAD_START)
@@ -652,7 +669,12 @@ static void intExecute()
 		else
 		{
 			while (true)
+			{
+#ifdef TRACE_BLOCKS
+				eeTraceBlock(cpuRegs.pc);
+#endif
 				execI();
+			}
 		}
 	}
 }
@@ -683,3 +705,63 @@ R5900cpu intCpu =
 
 	intClear
 };
+
+//------------------------------------------------------------------
+// Test Harness API (used by tests/ee/)
+//------------------------------------------------------------------
+
+#include "Memory.h"
+#include "MemoryTypes.h"
+
+static constexpr u32 EE_TEST_PC = 0x00100000u;
+static bool s_eeTestOwnsMemory = false;
+bool s_eeTestMode = false;
+
+void EE_TestInit()
+{
+	if (!eeMem)
+	{
+		SysMemory::Allocate();
+		SysMemory::Reset();
+		s_eeTestOwnsMemory = true;
+	}
+	Cpu = &intCpu;
+	s_eeTestMode = true;
+}
+
+void EE_TestShutdown()
+{
+	s_eeTestMode = false;
+	if (s_eeTestOwnsMemory)
+	{
+		SysMemory::Release();
+		s_eeTestOwnsMemory = false;
+	}
+}
+
+void EE_TestWriteProg(const u32* words, u32 count)
+{
+	for (u32 i = 0; i < count; i++)
+		memWrite32(EE_TEST_PC + i * 4, words[i]);
+}
+
+void EE_TestExec(u32 maxInstrs)
+{
+	cpuRegs.pc = EE_TEST_PC;
+	cpuRegs.branch = 0;
+	cpuRegs.cycle = 0;
+	cpuRegs.nextEventCycle = UINT64_MAX; // prevent _cpuEventTest_Shared from running IOP/timers
+	cpuBlockCycles = 0;
+
+	for (u32 i = 0; i < maxInstrs; i++)
+	{
+		const u32 pc = cpuRegs.pc;
+		const u32 code = memRead32(pc);
+
+		// Halt: BEQ $0,$0,-1  (0x1000FFFF)
+		if (code == 0x1000FFFFu)
+			break;
+
+		execI();
+	}
+}

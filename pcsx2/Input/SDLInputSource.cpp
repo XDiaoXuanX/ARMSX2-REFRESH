@@ -671,7 +671,11 @@ void SDLInputSource::ShutdownSubsystem()
 
 	if (m_sdl_subsystem_initialized)
 	{
+#if !defined(__ANDROID__)
+		// On Android, SDL's JNI context is set up once at process start (nativeSetupJNI).
+		// Quitting the subsystem destroys that state, and re-init fails on the next VM boot.
 		SDL_QuitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD | SDL_INIT_HAPTIC);
+#endif
 		m_sdl_subsystem_initialized = false;
 	}
 }

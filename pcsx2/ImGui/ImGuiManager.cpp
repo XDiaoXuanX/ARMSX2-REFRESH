@@ -84,6 +84,7 @@ static ImFont* s_fixed_font;
 static ImFont* s_osd_font;
 
 static std::vector<ImGuiManager::FontInfo> s_font_info;
+static std::vector<u8> s_standard_font_data;
 static std::vector<u8> s_custom_font_data;
 static std::vector<u8> s_fixed_font_data;
 static std::vector<u8> s_icon_fa_font_data;
@@ -425,6 +426,24 @@ void ImGuiManager::SetKeyMap()
 
 bool ImGuiManager::LoadFontData()
 {
+	// Android: SetFonts() is never called, so populate s_font_info from resource fonts.
+	if (s_font_info.empty())
+	{
+		if (s_standard_font_data.empty())
+		{
+			std::optional<std::vector<u8>> font_data = FileSystem::ReadBinaryFile(
+				EmuFolders::GetOverridableResourcePath("fonts" FS_OSPATH_SEPARATOR_STR "Roboto-Regular.ttf").c_str());
+			if (!font_data.has_value())
+				return false;
+			s_standard_font_data = std::move(font_data.value());
+		}
+		FontInfo info;
+		info.data = std::span<const u8>(s_standard_font_data.data(), s_standard_font_data.size());
+		info.face_name = nullptr;
+		info.is_emoji_font = false;
+		s_font_info.push_back(info);
+	}
+
 	const std::string custom_font_path(StringUtil::StripWhitespace(GSConfig.OsdFontPath));
 	if (custom_font_path.empty())
 	{
@@ -480,6 +499,8 @@ bool ImGuiManager::LoadFontData()
 
 void ImGuiManager::UnloadFontData()
 {
+	s_font_info.clear();
+	std::vector<u8>().swap(s_standard_font_data);
 	std::vector<u8>().swap(s_custom_font_data);
 	std::vector<u8>().swap(s_fixed_font_data);
 	std::vector<u8>().swap(s_icon_fa_font_data);

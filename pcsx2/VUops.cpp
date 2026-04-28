@@ -446,7 +446,9 @@ static float vuDouble(u32 f)
 			return *(float*)&f;
 			break;
 		case 0x7f800000:
-			if (CHECK_VU_OVERFLOW(0))
+			// Operand clamp: controlled by SignOverflow (not Overflow).
+			// Result clamp is handled separately by VU_MAC_UPDATE.
+			if (CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1))
 			{
 				u32 d = (f & 0x80000000) | 0x7f7fffff;
 				return *(float*)&d;
@@ -1636,6 +1638,10 @@ static __ri void _vuJALR(VURegs* VU)
 
 static __ri void _vuMFP(VURegs* VU)
 {
+	// P register only exists on VU1; MFP is a NOP on VU0
+	if (VU == &VU0)
+		return;
+
 	if (_Ft_ == 0)
 		return;
 
@@ -1809,10 +1815,13 @@ static __ri void _vuXITOP(VURegs* VU)
 	if (_It_ == 0)
 		return;
 
+	// JIT masks: VU0 → 0xFF, VU1 → 0x3FF
+	const u16 mask = (VU == &VU0) ? 0xFF : 0x3FF;
+
 	if (VU == &VU1 && THREAD_VU1)
-		VU->VI[_It_].US[0] = vu1Thread.vifRegs.itop;
+		VU->VI[_It_].US[0] = vu1Thread.vifRegs.itop & mask;
 	else
-		VU->VI[_It_].US[0] = VU->GetVifRegs().itop;
+		VU->VI[_It_].US[0] = VU->GetVifRegs().itop & mask;
 }
 
 void _vuXGKICKTransfer(s32 cycles, bool flush)

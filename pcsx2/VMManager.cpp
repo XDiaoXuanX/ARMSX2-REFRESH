@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Achievements.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "BuildVersion.h"
 #include "CDVD/CDVD.h"
 #include "CDVD/IsoReader.h"
@@ -41,6 +44,11 @@
 #include "USB/USB.h"
 #include "Vif_Dynarec.h"
 #include "VMManager.h"
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include "arm64/arm64Emitter.h"
+#include "arm64/iVU0micro_arm64.h"
+#include "arm64/iVU1micro_arm64.h"
+#endif
 #include "ps2/BiosTools.h"
 
 #include "common/Console.h"
@@ -53,7 +61,6 @@
 #include "common/StringUtil.h"
 #include "common/Threading.h"
 #include "common/Timer.h"
-#include "common/emitter/x86emitter.h"
 
 #include "IconsFontAwesome.h"
 #include "IconsPromptFont.h"
@@ -302,8 +309,10 @@ void VMManager::SetState(VMState state)
 	}
 	else if (state == VMState::Stopping && old_state == VMState::Running)
 	{
-		// If stopping, break execution as soon as possible.
-		Cpu->ExitExecution();
+		// Don't call ExitExecution() here — SetState(Stopping) may be called from a non-CPU
+		// thread (e.g. Android JNI shutdown). ExitExecution does fastjmp_jmp, which is UB from
+		// the wrong thread. The CPU thread will detect IsExecutionInterrupted() at the next
+		// vsync (Counters.cpp) and call ExitExecution itself.
 	}
 }
 
@@ -1265,12 +1274,16 @@ bool VMManager::AutoDetectSource(const std::string& filename, Error* error)
 			s_elf_override = filename;
 			return true;
 		}
-		else
+		else if (IsDiscFileName(filename))
 		{
-			// TODO: Maybe we should check if it's a valid iso here...
 			CDVDsys_SetFile(CDVD_SourceType::Iso, filename);
 			CDVDsys_ChangeSource(CDVD_SourceType::Iso);
 			return true;
+		}
+		else
+		{
+			Error::SetStringFmt(error, TRANSLATE_FS("VMManager", "Unrecognized file type: '{}'"), Path::GetFileName(filename));
+			return false;
 		}
 	}
 	else
@@ -2649,16 +2662,30 @@ void VMManager::LogCPUCapabilities()
 
 void VMManager::InitializeCPUProviders()
 {
-#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+#ifdef _M_X86
 	recCpu.Reserve();
 	psxRec.Reserve();
 
 	CpuMicroVU0.Reserve();
 	CpuMicroVU1.Reserve();
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifndef INTERP_EE
+	recCpu.Reserve();
+#endif
+#ifndef INTERP_IOP
+	psxRec.Reserve();
+#endif
+#ifndef INTERP_VU0
+	CpuArmVU0.Reserve();
+#endif
+#ifndef INTERP_VU1
+	CpuArmVU1.Reserve();
+#endif
+	// Despite not having MTVU on ARM64, we still need the thread alive.
+	// Otherwise the read and write positions of the ring buffer wont match,
+	// and various systems in the emulator end up deadlocked.
+	vu1Thread.Open();
 #else
-	// Despite not having any VU recompilers on ARM64, therefore no MTVU,
-	// we still need the thread alive. Otherwise the read and write positions
-	// of the ring buffer wont match, and various systems in the emulator end up deadlocked.
 	vu1Thread.Open();
 #endif
 
@@ -2673,15 +2700,22 @@ void VMManager::ShutdownCPUProviders()
 		dVifRelease(0);
 	}
 
-#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+#ifdef _M_X86
 	CpuMicroVU1.Shutdown();
 	CpuMicroVU0.Shutdown();
 
 	psxRec.Shutdown();
 	recCpu.Shutdown();
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifndef INTERP_VU1
+	CpuArmVU1.Shutdown();
+#endif
+#ifndef INTERP_EE
+	recCpu.Shutdown();
+#endif
+	if (vu1Thread.IsOpen())
+		vu1Thread.WaitVU();
 #else
-	// See the comment in the InitializeCPUProviders for an explaination why we
-	// still need to manage the MTVU thread.
 	if (vu1Thread.IsOpen())
 		vu1Thread.WaitVU();
 #endif
@@ -2694,16 +2728,41 @@ void VMManager::UpdateCPUImplementations()
 		Cpu = &GSDumpReplayerCpu;
 		psxCpu = &psxInt;
 		CpuVU0 = &CpuIntVU0;
+#ifdef INTERP_VU1
 		CpuVU1 = &CpuIntVU1;
+#else
+		CpuVU1 = &CpuArmVU1;
+#endif
 		return;
 	}
 
-#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+#if defined(_M_X86)
 	Cpu = CHECK_EEREC ? &recCpu : &intCpu;
 	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
 
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifdef INTERP_EE
+	Cpu = &intCpu;
+#else
+	Cpu = CHECK_EEREC ? &recCpu : &intCpu;
+#endif
+#ifdef INTERP_VU0
+	CpuVU0 = static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+#else
+	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuArmVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+#endif
+#ifdef INTERP_VU1
+	CpuVU1 = static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#else
+	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuArmVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#endif
+#ifdef INTERP_IOP
+	psxCpu = &psxInt;
+#else
+	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+#endif
 #else
 	Cpu = &intCpu;
 	psxCpu = &psxInt;
@@ -2715,8 +2774,18 @@ void VMManager::UpdateCPUImplementations()
 
 void VMManager::Internal::ClearCPUExecutionCaches()
 {
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: Cpu=%p psxCpu=%p CpuVU0=%p CpuVU1=%p",
+		(void*)Cpu, (void*)psxCpu, (void*)CpuVU0, (void*)CpuVU1);
+#endif
 	Cpu->Reset();
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: Cpu->Reset() done");
+#endif
 	psxCpu->Reset();
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: psxCpu->Reset() done");
+#endif
 
 #ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	// mVU's VU0 needs to be properly initialized for macro mode even if it's not used for micro mode!
@@ -2725,7 +2794,13 @@ void VMManager::Internal::ClearCPUExecutionCaches()
 #endif
 
 	CpuVU0->Reset();
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: CpuVU0->Reset() done");
+#endif
 	CpuVU1->Reset();
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: all done");
+#endif
 
 	if constexpr (newVifDynaRec)
 	{
@@ -3518,6 +3593,38 @@ static u32 GetProcessorIdForProcessor(const cpuinfo_processor* proc)
 #endif
 }
 
+// Look up the cpuinfo processor struct for a given OS processor id.
+static const cpuinfo_processor* FindCpuinfoProcessorForOSId(u32 os_id)
+{
+	const u32 count = cpuinfo_get_processors_count();
+	for (u32 i = 0; i < count; i++)
+	{
+		const cpuinfo_processor* p = cpuinfo_get_processor(i);
+		if (p && GetProcessorIdForProcessor(p) == os_id)
+			return p;
+	}
+	return nullptr;
+}
+
+// Build an affinity bitmask covering every processor in the cluster that
+// contains `os_id`. Returns 0 if the cluster isn't resolvable (caller should
+// fall back to single-core pinning).
+static u64 ClusterAffinityMaskForOSId(u32 os_id)
+{
+	const cpuinfo_processor* proc = FindCpuinfoProcessorForOSId(os_id);
+	if (!proc || !proc->cluster)
+		return 0;
+	const cpuinfo_cluster* cluster = proc->cluster;
+	u64 mask = 0;
+	for (u32 j = 0; j < cluster->processor_count; j++)
+	{
+		const cpuinfo_processor* p = cpuinfo_get_processor(cluster->processor_start + j);
+		if (p)
+			mask |= static_cast<u64>(1) << GetProcessorIdForProcessor(p);
+	}
+	return mask;
+}
+
 static void InitializeProcessorList()
 {
 	if (!cpuinfo_initialize())
@@ -3557,6 +3664,58 @@ static void InitializeProcessorList()
 		s_processor_list.push_back(proc_id);
 	}
 	Console.WriteLn(str.view());
+
+	// Pre-populate the SW renderer pool here, independent of pin-state.
+	//
+	// Why: SetEmuThreadAffinities runs LATE in VM init (after GS renderer
+	// creation), so when GSRasterizerList::Create reads the SW pool it can
+	// see an empty list and emit "Not pinning SW threads, ... but only have 0".
+	// The list represents a hardware property — which OS procs share the GS
+	// thread's cluster — and doesn't depend on whether pinning is currently
+	// enabled. Compute it once here so callers always see a populated list.
+	//
+	// Mirrors the cluster-mask path in SetEmuThreadAffinities: if cpuinfo
+	// resolves cluster IDs, we union the clusters of the top 3 entries
+	// (EE/VU/GS targets); otherwise fall back to "GS cluster + remaining
+	// procs in same cluster". SetEmuThreadAffinities still re-runs this
+	// logic later when pinning is actually applied — that's idempotent.
+	if (!processors.empty())
+	{
+		const cpuinfo_processor* ee_proc = processors[0];
+		const cpuinfo_processor* vu_proc = processors[std::min<size_t>(1, processors.size() - 1)];
+		const cpuinfo_processor* gs_proc = processors[std::min<size_t>(2, processors.size() - 1)];
+
+		const u64 ee_cluster_mask = ClusterAffinityMaskForOSId(GetProcessorIdForProcessor(ee_proc));
+		const u64 vu_cluster_mask = ClusterAffinityMaskForOSId(GetProcessorIdForProcessor(vu_proc));
+		const u64 gs_cluster_mask = ClusterAffinityMaskForOSId(GetProcessorIdForProcessor(gs_proc));
+		const u64 perf_mask = ee_cluster_mask | vu_cluster_mask | gs_cluster_mask;
+
+		s_software_renderer_processor_list.clear();
+		if (perf_mask != 0)
+		{
+			for (u32 bit = 0; bit < 64; ++bit)
+			{
+				if (perf_mask & (static_cast<u64>(1) << bit))
+					s_software_renderer_processor_list.push_back(bit);
+			}
+		}
+		else
+		{
+			// No cluster info — use s_processor_list ordering (already sorted by perf).
+			// Skip the top 3 (EE/VU/GS) and take the rest in the GS cluster.
+			const u32 gs_cluster_id = (gs_proc && gs_proc->cluster) ? gs_proc->cluster->cluster_id : 0;
+			for (size_t i = 3; i < s_processor_list.size(); i++)
+			{
+				const u32 proc_index = s_processor_list[i];
+				const cpuinfo_processor* p = FindCpuinfoProcessorForOSId(proc_index);
+				const u32 proc_cluster_id = (p && p->cluster) ? p->cluster->cluster_id : 0;
+				if (proc_cluster_id != gs_cluster_id)
+					break;
+				s_software_renderer_processor_list.push_back(proc_index);
+			}
+		}
+		INFO_LOG("Pre-populated SW renderer pool: {} processors", s_software_renderer_processor_list.size());
+	}
 }
 
 void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
@@ -3583,7 +3742,14 @@ void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
 		si.SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
 	}
 
-	const int extra_threads = (core_count > 3) ? 3 : 2;
+	// SW worker count. Empirical on Oryon/SD8E-class SoCs: 4 workers gives
+	// the highest sustained throughput (75-80% per-thread CPU is "saturated"
+	// for the SW rasterizer's job-batched workload — going lower drops the
+	// emulation rate below 100%). On 8-core phones EE/MTVU/MTGS take 3
+	// cores, leaving 5 for SW workers; 4 fits comfortably with headroom.
+	// Pre-Oryon big.LITTLE devices typically have 4-6 big cores, so 3
+	// workers there.
+	const int extra_threads = (core_count >= 8) ? 4 : 3;
 	Console.WriteLn(fmt::format("  Setting Extra Software Rendering Threads to {}.", extra_threads));
 	si.SetIntValue("EmuCore/GS", "extrathreads", extra_threads);
 }
@@ -3651,7 +3817,16 @@ void VMManager::SetEmuThreadAffinities()
 	if (s_thread_affinities_set == new_pin_enable)
 		return;
 
-	s_thread_affinities_set = EmuConfig.EnableThreadPinning;
+	// Track whether pinning is *currently effective*, not just whether the
+	// user enabled it in config. Previously this stored EmuConfig.EnableThreadPinning
+	// regardless of new_pin_enable, which on a shutdown call (state=Shutdown,
+	// new_pin_enable=false but EnableThreadPinning=true) left this flag as
+	// `true` while the actual pinning + SW renderer proc list got cleared
+	// below. The next VM start then early-returned at the guard above (`true
+	// == true`), never re-populating s_software_renderer_processor_list. SW
+	// workers ended up unpinned with an empty proc pool — the symptom users
+	// see as "Not pinning SW threads, we need 3 processors, but only have 0".
+	s_thread_affinities_set = new_pin_enable;
 
 	EnsureCPUInfoInitialized();
 
@@ -3670,6 +3845,9 @@ void VMManager::SetEmuThreadAffinities()
 		MTGS::GetThreadHandle().SetAffinity(0);
 		vu1Thread.GetThreadHandle().SetAffinity(0);
 		s_vm_thread_handle.SetAffinity(0);
+		MTGS::GetThreadHandle().SetNicePriority(0);
+		vu1Thread.GetThreadHandle().SetNicePriority(0);
+		s_vm_thread_handle.SetNicePriority(0);
 		s_software_renderer_processor_list = {};
 		return;
 	}
@@ -3680,43 +3858,78 @@ void VMManager::SetEmuThreadAffinities()
 	const u32 gs_index = s_processor_list[mtvu ? 2 : 1];
 	INFO_LOG("Processor order assignment: EE={}, VU={}, GS={}", ee_index, vu_index, gs_index);
 
-	const u64 ee_affinity = static_cast<u64>(1) << ee_index;
-	INFO_LOG("  EE thread is on processor {} (0x{:x})", ee_index, ee_affinity);
+	// Build a "performance" affinity mask by unioning the clusters of the three
+	// intended critical processors. On big.LITTLE / heterogeneous SoCs (all
+	// Android phones, most modern laptops), this lets the OS freely migrate
+	// EE/VU/GS within the fast cluster(s) instead of getting stuck when the
+	// kernel parks a system thread on "our" specific core. Falls back to the
+	// legacy single-core masks if cpuinfo can't resolve cluster info.
+	const u64 ee_cluster_mask = ClusterAffinityMaskForOSId(ee_index);
+	const u64 vu_cluster_mask = ClusterAffinityMaskForOSId(vu_index);
+	const u64 gs_cluster_mask = ClusterAffinityMaskForOSId(gs_index);
+	const u64 perf_mask = ee_cluster_mask | vu_cluster_mask | gs_cluster_mask;
+
+	const bool use_cluster_mask = (perf_mask != 0);
+
+	const u64 ee_affinity = use_cluster_mask ? perf_mask : (static_cast<u64>(1) << ee_index);
+	INFO_LOG("  EE thread pinned to mask 0x{:x} (cluster mode: {})", ee_affinity, use_cluster_mask);
 	s_vm_thread_handle.SetAffinity(ee_affinity);
+	s_vm_thread_handle.SetNicePriority(-10);
 
 	if (EmuConfig.Speedhacks.vuThread)
 	{
-		const u64 vu_affinity = static_cast<u64>(1) << vu_index;
-		INFO_LOG("  VU thread is on processor {} (0x{:x})", vu_index, vu_affinity);
+		const u64 vu_affinity = use_cluster_mask ? perf_mask : (static_cast<u64>(1) << vu_index);
+		INFO_LOG("  VU thread pinned to mask 0x{:x} (cluster mode: {})", vu_affinity, use_cluster_mask);
 		vu1Thread.GetThreadHandle().SetAffinity(vu_affinity);
+		vu1Thread.GetThreadHandle().SetNicePriority(-10);
 	}
 	else
 	{
 		vu1Thread.GetThreadHandle().SetAffinity(0);
 	}
 
-	const u64 gs_affinity = static_cast<u64>(1) << gs_index;
-	INFO_LOG("  GS thread is on processor {} (0x{:x})", gs_index, gs_affinity);
+	const u64 gs_affinity = use_cluster_mask ? perf_mask : (static_cast<u64>(1) << gs_index);
+	INFO_LOG("  GS thread pinned to mask 0x{:x} (cluster mode: {})", gs_affinity, use_cluster_mask);
 	MTGS::GetThreadHandle().SetAffinity(gs_affinity);
+	MTGS::GetThreadHandle().SetNicePriority(-10);
 
-	// Try to find some threads for the software renderer.
-	// They should be in the same cluster as the main GS thread. If they're not, for example,
-	// we had 4 P cores and 6 E cores, let the OS schedule them instead.
-	s_software_renderer_processor_list.reserve(s_processor_list.size() - (mtvu ? 3 : 2));
-	const u32 gs_cluster_id = cpuinfo_get_processor(gs_index)->cluster->cluster_id;
-	for (size_t i = mtvu ? 3 : 2; i < s_processor_list.size(); i++)
+	// Build the SW-renderer worker pool.
+	//
+	// Cluster mode: EE/VU/GS already share the whole perf cluster, so let SW
+	// workers use the same pool. OS balances contention within the cluster.
+	//
+	// Legacy per-core mode: keep upstream's behaviour (remaining cores in GS's
+	// cluster only, skipping the top 3 that EE/VU/GS own).
+	s_software_renderer_processor_list.clear();
+	if (use_cluster_mask)
 	{
-		const u32 proc_index = s_processor_list[i];
-		const u32 proc_cluster_id = cpuinfo_get_processor(proc_index)->cluster->cluster_id;
-		if (proc_cluster_id != gs_cluster_id)
+		for (u32 bit = 0; bit < 64; ++bit)
 		{
-			WARNING_LOG("  Only using {} SW threads, processor {} is in cluster {}, but the GS thread is in cluster {}",
-				s_software_renderer_processor_list.size(), proc_index, proc_cluster_id, gs_cluster_id);
-			break;
+			if (perf_mask & (static_cast<u64>(1) << bit))
+				s_software_renderer_processor_list.push_back(bit);
 		}
-
-		s_software_renderer_processor_list.push_back(proc_index);
 	}
+	else
+	{
+		s_software_renderer_processor_list.reserve(s_processor_list.size() - (mtvu ? 3 : 2));
+		const cpuinfo_processor* gs_proc = FindCpuinfoProcessorForOSId(gs_index);
+		const u32 gs_cluster_id = (gs_proc && gs_proc->cluster) ? gs_proc->cluster->cluster_id : 0;
+		for (size_t i = mtvu ? 3 : 2; i < s_processor_list.size(); i++)
+		{
+			const u32 proc_index = s_processor_list[i];
+			const cpuinfo_processor* p = FindCpuinfoProcessorForOSId(proc_index);
+			const u32 proc_cluster_id = (p && p->cluster) ? p->cluster->cluster_id : 0;
+			if (proc_cluster_id != gs_cluster_id)
+			{
+				WARNING_LOG("  Only using {} SW threads, processor {} is in cluster {}, but the GS thread is in cluster {}",
+					s_software_renderer_processor_list.size(), proc_index, proc_cluster_id, gs_cluster_id);
+				break;
+			}
+
+			s_software_renderer_processor_list.push_back(proc_index);
+		}
+	}
+	INFO_LOG("  SW renderer pool has {} processors", s_software_renderer_processor_list.size());
 }
 
 const std::vector<u32>& VMManager::Internal::GetSoftwareRendererProcessorList()

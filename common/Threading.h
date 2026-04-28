@@ -75,6 +75,11 @@ namespace Threading
 		/// Obviously, only works up to 64 processors.
 		bool SetAffinity(u64 processor_mask) const;
 
+		/// Nudges the thread's scheduling priority (nice value on POSIX).
+		/// Negative = higher priority. Silently no-ops on platforms without
+		/// per-thread priority support. Returns true on success.
+		bool SetNicePriority(int nice) const;
+
 	protected:
 		void* m_native_handle = nullptr;
 
@@ -235,6 +240,28 @@ namespace Threading
 		{
 			if (m_counter.fetch_add(1, std::memory_order_release) < 0)
 				m_sema.Post();
+		}
+
+		/// Post `count` times atomically. Used to batch signals to a single
+		/// waiter — when `count > 1` and the counter was negative (waiters
+		/// blocked), wakes only as many waiters as were actually queued
+		/// (`min(count, -prev)`); the rest stay accumulated in the counter
+		/// for subsequent Wait() callers to drain without a syscall.
+		///
+		/// MTVU uses this to coalesce per-VU-execute Posts into one batch
+		/// per ring-buffer drain — reduces sem_post syscall storm during
+		/// heavy GIF traffic (FFXII intro-style cinematic VU bursts).
+		void Post(int count)
+		{
+			if (count <= 0)
+				return;
+			const int prev = m_counter.fetch_add(count, std::memory_order_release);
+			if (prev < 0)
+			{
+				const int to_wake = std::min(count, -prev);
+				for (int i = 0; i < to_wake; i++)
+					m_sema.Post();
+			}
 		}
 
 		void Wait()

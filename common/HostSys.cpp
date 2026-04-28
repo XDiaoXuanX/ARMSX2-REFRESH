@@ -9,6 +9,10 @@
 #include "cpuinfo.h"
 #endif
 
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
+
 static u32 PAUSE_TIME = 0;
 
 static void MultiPause()
@@ -146,6 +150,18 @@ static CPUInfo CalcCPUInfo()
 {
 	CPUInfo out;
 	out.name = cpuinfo_get_package(0)->name;
+#if defined(__ANDROID__)
+	if (out.name.empty() || out.name == "Unknown")
+	{
+		char value[PROP_VALUE_MAX] = {};
+		if (__system_property_get("ro.soc.model", value) > 0 && value[0] != '\0')
+			out.name = value;
+		else if (__system_property_get("ro.hardware", value) > 0 && value[0] != '\0')
+			out.name = value;
+		else if (__system_property_get("ro.board.platform", value) > 0 && value[0] != '\0')
+			out.name = value;
+	}
+#endif
 	out.num_threads = cpuinfo_get_processors_count();
 	out.num_clusters = cpuinfo_get_clusters_count();
 	out.num_big_cores = 0;

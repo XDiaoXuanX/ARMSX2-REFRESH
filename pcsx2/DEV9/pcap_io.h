@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
+#if !defined(__ANDROID__)
 #include "pcap.h"
+#endif
 #include "net.h"
 #include "PacketReader/MAC_Address.h"
 
@@ -14,7 +16,9 @@ void unload_pcap();
 class PCAPAdapter : public NetAdapter
 {
 private:
+#if !defined(__ANDROID__)
 	pcap_t* hpcap = nullptr;
+#endif
 
 	bool switched;
 	bool blocking;
