@@ -16,7 +16,9 @@
 #include "arm64/iVU0micro_arm64.h"
 #include "common/Perf.h"
 
+#include <algorithm>
 #include <cstring>
+#include <vector>
 
 using namespace vixl::aarch64;
 
@@ -54,17 +56,83 @@ static constexpr u32 VU0_MAX_BLOCK_PAIRS = 128;
 
 static constexpr u32 POOL_SIZE = 32 * 1024;
 
+// Block-linking patch slot. Mirrors VU1's LinkExit. Each compiled block has
+// up to 2 of these (single-exit fall-through / unconditional branch, or
+// 2-way conditional with split tails). `patch_site` is the address of an
+// unconditional B that gets rewritten between fallthrough (unlinked) and
+// successor's linkEntry (linked).
+struct LinkExit
+{
+	u32 target_pc;
+	u8* patch_site;
+	u8* fallthrough;
+	u8* current_target;
+};
+static constexpr u32 LINK_TARGET_NONE = ~0u;
+
 struct VU0BlockEntry
 {
-	u8*  codeEntry;
+	u8*  codeEntry;   // prologue entry — nullptr = not yet compiled / cleared
+	u8*  linkEntry;   // post-prologue entry; predecessors B here directly
+	u8*  returnExit;  // post-pair-loop label where the exit-selector lives
+
+	// Static link-exit set:
+	//   0 : not linkable (ebit, JR/JALR via runtime dispatch, MFLAGSET-only).
+	//   1 : single exit (B/BAL, or max-size fall-through).
+	//   2 : conditional IBxx — exits[0]=NOT-TAKEN, exits[1]=TAKEN.
+	u32      num_exits;
+	LinkExit exits[2];
+
 	u32  numPairs;
+
+	// Set by Clear() when this entry is invalidated. The next dispatch path
+	// recompiles from scratch; we keep the field for symmetry with VU1.
+	bool needsRelink;
 };
 
 static VU0BlockEntry s_blocks[VU0_NUM_SLOTS];
+
+// Reverse index: for each VU0 slot S, the list of currently-compiled blocks
+// that have at least one exit targeting S. patchWaitingPredecessors uses
+// this to find candidates after a fresh compile; Clear() uses it to find
+// predecessors that need their incoming exits unpatched.
+//
+// Each entry is the predecessor's startpc (slot index = pc / 8). Lazily
+// cleaned during walks (entries with `s_blocks[pred_slot].codeEntry == nullptr`
+// are skipped). Wiped by Reset/Shutdown.
+static std::vector<u32> s_vu0_waitingForSlot[VU0_NUM_SLOTS];
+
 static u8* s_code_base  = nullptr;
 static u8* s_code_write = nullptr;
 static u8* s_code_end   = nullptr;
 static ArmConstantPool s_pool;
+
+// ============================================================================
+//  Branch opcode classifiers (VU instruction encoding identical to VU1).
+// ============================================================================
+
+// B / BAL — single compile-time-known target, no runtime condition.
+static inline bool isUnconditionalBranchOpVU0(u32 lower)
+{
+	const u32 top7 = lower >> 25;
+	return top7 == 0x20u || top7 == 0x21u;
+}
+
+// IBEQ / IBNE / IBLTZ / IBGTZ / IBLEZ / IBGEZ — both targets known,
+// runtime condition picks.
+static inline bool isConditionalBranchOpVU0(u32 lower)
+{
+	const u32 top7 = lower >> 25;
+	return top7 == 0x28u || top7 == 0x29u
+	    || (top7 >= 0x2Cu && top7 <= 0x2Fu);
+}
+
+// JR / JALR — runtime VI register holds target.
+static inline bool isIndirectBranchOpVU0(u32 lower)
+{
+	const u32 top7 = lower >> 25;
+	return top7 == 0x24u || top7 == 0x25u;
+}
 
 // ============================================================================
 //  Runtime helpers
@@ -238,6 +306,188 @@ static u32 AnalyzeBlock(u32 startPC)
 }
 
 // ============================================================================
+//  Block linking — patch helpers / link-exit analysis
+// ============================================================================
+
+struct BlockLinkExits
+{
+	u32  num_exits;
+	u32  target_pcs[2];
+	bool indirect;
+};
+
+static BlockLinkExits computeBlockLinkExits(u32 startPC, u32 numPairs)
+{
+	BlockLinkExits out = {};
+	out.target_pcs[0] = LINK_TARGET_NONE;
+	out.target_pcs[1] = LINK_TARGET_NONE;
+
+	if (numPairs == 0)
+		return out;
+
+	// Max-size block: single fall-through.
+	if (numPairs >= VU0_MAX_BLOCK_PAIRS)
+	{
+		out.num_exits     = 1;
+		out.target_pcs[0] = (startPC + numPairs * 8u) & VU0_PROGMASK;
+		return out;
+	}
+
+	// Branch- or ebit-terminated. Terminator at pair numPairs-2 (pair before
+	// the delay slot).
+	const u32 term_pc = (startPC + (numPairs - 2u) * 8u) & VU0_PROGMASK;
+	const u32 upper   = *reinterpret_cast<const u32*>(VU0.Micro + term_pc + 4);
+
+	if ((upper >> 30) & 1)
+		return out; // ebit — no successor
+
+	if ((upper >> 31) & 1)
+		return out; // I-bit upper — analyze wouldn't have terminated here on a branch
+
+	const u32 lower = *reinterpret_cast<const u32*>(VU0.Micro + term_pc);
+
+	const s32 imm11 = (lower & 0x400u)
+		? static_cast<s32>(0xFFFFFC00u | (lower & 0x3FFu))
+		: static_cast<s32>(lower & 0x3FFu);
+	const u32 tpc_val    = (term_pc + 8u) & VU0_PROGMASK;
+	const u32 imm_target = (tpc_val + static_cast<u32>(imm11 * 8)) & VU0_PROGMASK;
+	const u32 fallthrough_pc = (startPC + numPairs * 8u) & VU0_PROGMASK;
+
+	if (isUnconditionalBranchOpVU0(lower))
+	{
+		out.num_exits     = 1;
+		out.target_pcs[0] = imm_target;
+		return out;
+	}
+
+	if (isConditionalBranchOpVU0(lower))
+	{
+		out.num_exits     = 2;
+		out.target_pcs[0] = fallthrough_pc;  // not taken
+		out.target_pcs[1] = imm_target;      // taken
+		return out;
+	}
+
+	if (isIndirectBranchOpVU0(lower))
+	{
+		out.indirect = true;
+		return out;
+	}
+
+	return out;
+}
+
+// Patch a single LinkExit's B-imm26 to jump to `target`. No-op when the
+// site already points there. Single-thread: always called on the EE
+// thread (recompile / Clear / dispatch all run there for VU0).
+static void patchVU0LinkSite(LinkExit& exit, u8* target)
+{
+	if (!exit.patch_site)
+		return;
+	if (exit.current_target == target)
+		return;
+	armEmitJmpPtr(exit.patch_site, target, true);
+	exit.current_target = target;
+}
+
+static void unpatchVU0LinkSite(LinkExit& exit)
+{
+	if (!exit.patch_site)
+		return;
+	patchVU0LinkSite(exit, exit.fallthrough);
+}
+
+// Add this block's startpc to the reverse index for each unique exit target.
+// Call after writing the entry into s_blocks[].
+static void indexVU0BlockExits(u32 my_pc, const VU0BlockEntry& blk)
+{
+	const u32 my_slot = my_pc / 8;
+	for (u32 e = 0; e < blk.num_exits; e++)
+	{
+		const u32 target_pc = blk.exits[e].target_pc;
+		if (target_pc == LINK_TARGET_NONE)
+			continue;
+		bool dup = false;
+		for (u32 j = 0; j < e; j++)
+		{
+			if (blk.exits[j].target_pc == target_pc)
+			{
+				dup = true;
+				break;
+			}
+		}
+		if (dup)
+			continue;
+		const u32 target_slot = target_pc / 8;
+		if (target_slot < VU0_NUM_SLOTS)
+			s_vu0_waitingForSlot[target_slot].push_back(my_slot);
+	}
+}
+
+// Right after a block compiles: for each live static exit, if its target
+// is already compiled, wire the exit up.
+static void tryForwardLinkVU0(VU0BlockEntry& block)
+{
+	for (u32 e = 0; e < block.num_exits; e++)
+	{
+		LinkExit& exit = block.exits[e];
+		if (exit.target_pc == LINK_TARGET_NONE)
+			continue;
+		const u32 target_slot = exit.target_pc / 8;
+		if (target_slot >= VU0_NUM_SLOTS)
+			continue;
+		VU0BlockEntry& target = s_blocks[target_slot];
+		if (target.linkEntry)
+			patchVU0LinkSite(exit, target.linkEntry);
+	}
+}
+
+// Walk the reverse index for `my_slot` and patch any predecessor exit whose
+// target is `my_pc` to jump directly to `my_linkEntry`. Called right after
+// a fresh compile so previously-compiled predecessors that fall through to
+// the dispatcher start B'ing into us instead.
+static void patchWaitingPredecessorsVU0(u32 my_pc, u8* my_linkEntry)
+{
+	if (!my_linkEntry)
+		return;
+	const u32 my_slot = my_pc / 8;
+	if (my_slot >= VU0_NUM_SLOTS)
+		return;
+	const auto& preds = s_vu0_waitingForSlot[my_slot];
+	for (u32 pred_slot : preds)
+	{
+		if (pred_slot >= VU0_NUM_SLOTS)
+			continue;
+		VU0BlockEntry& pred = s_blocks[pred_slot];
+		if (!pred.codeEntry)
+			continue; // stale entry — pred was invalidated, skip
+		for (u32 e = 0; e < pred.num_exits; e++)
+		{
+			LinkExit& exit = pred.exits[e];
+			if (exit.patch_site != nullptr
+			    && exit.target_pc == my_pc
+			    && exit.current_target != my_linkEntry)
+			{
+				patchVU0LinkSite(exit, my_linkEntry);
+			}
+		}
+	}
+}
+
+// JR/JALR runtime dispatcher. Given the runtime TPC (in x0 from JIT), look
+// up the target block's linkEntry; return nullptr if not yet compiled.
+// Caller (the JIT-emitted indirect tail) tail-Brs to the returned address
+// or falls through to flushes+Ret on null.
+static u8* vu0_indirect_dispatch(u32 tpc)
+{
+	const u32 pc = tpc & VU0_PROGMASK;
+	const u32 slot = pc / 8;
+	if (slot >= VU0_NUM_SLOTS)
+		return nullptr;
+	return s_blocks[slot].linkEntry;
+}
+
+// ============================================================================
 //  Block compilation
 // ============================================================================
 
@@ -261,7 +511,7 @@ static const auto VU0_BASE_REG = x23;
 	#define VU0_PERF_END(varname, fmt, ...) ((void)0)
 #endif
 
-static u8* CompileBlock(u32 startPC, u32 numPairs)
+static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 {
 	const size_t data_size    = numPairs * 2 * sizeof(_VURegsNum);
 	const size_t code_worst   = static_cast<size_t>(numPairs) * 512 + 64;
@@ -269,7 +519,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 
 	if (static_cast<size_t>(s_code_end - s_code_write) < total_needed)
 	{
+		// Wipe ALL block entries + reverse-index. Any predecessor's patched B
+		// would now point at the recycled buffer region; clearing the block
+		// table forces a fresh compile (which calls patchWaitingPredecessors
+		// to re-link). The reverse-index entries become stale (the predecessor
+		// blocks themselves are reset here) — patchWaitingPredecessors's
+		// `pred.codeEntry == nullptr` skip handles that.
 		std::memset(s_blocks, 0, sizeof(s_blocks));
+	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
+		s_vu0_waitingForSlot[i].clear();
+		for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
+			s_vu0_waitingForSlot[i].clear();
 		s_code_write = s_code_base;
 		s_pool.Reset();
 	}
@@ -303,6 +563,9 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 	u8* code_start = data_base + data_size;
 	code_start = reinterpret_cast<u8*>((reinterpret_cast<uintptr_t>(code_start) + 3) & ~3ULL);
 
+	// Static exit set for this block — drives the exit-selector emit below.
+	const BlockLinkExits link_info = computeBlockLinkExits(startPC, numPairs);
+
 	armSetAsmPtr(code_start, static_cast<size_t>(s_code_end - code_start), &s_pool);
 	u8* const entry = armStartBlock();
 
@@ -310,6 +573,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 	armAsm->Stp(x22, VU0_BASE_REG, MemOperand(sp, 16));
 	armAsm->Mov(x29, sp);
 	armMoveAddressToReg(VU0_BASE_REG, &VU0);
+
+	// Block-linking entry point. Linked predecessors B here directly,
+	// skipping the prologue (their callee-saves are already saved). The
+	// fall-through dispatch (codeEntry → linkEntry) handles the first
+	// entry from Execute. No entry-gate: the existing per-pair VPU_STAT /
+	// MFLAGSET check (after each non-last pair) handles intra-block
+	// termination; cycle budget is enforced by Execute's outer loop when
+	// the block returns.
+	out_block->linkEntry = armGetCurrentCodePointer();
 
 	const int64_t cycle_off    = (int64_t)offsetof(VURegs, cycle);
 	const int64_t code_off     = (int64_t)offsetof(VURegs, code);
@@ -626,6 +898,102 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 		}
 	}
 
+	// ----------------------------------------------------------------
+	// Exit selector + linkable patch slots (block linking).
+	//
+	// Layout when num_exits == 1 (B/BAL or max-size fall-through):
+	//   returnExit:
+	//     [patch_site] B flushes      (← rewritten to successor's linkEntry
+	//                                    by tryForwardLink / patchWaitingPredecessors)
+	//   flushes:
+	//     fall through to early_exit (Ret)
+	//
+	// Layout when num_exits == 2 (conditional IBxx — both targets known):
+	//   returnExit:
+	//     Ldr w4, [VU, tpc_off]
+	//     Mov w5, taken_target_pc
+	//     Cmp w4, w5
+	//     B.ne use_not_taken               (hardcoded — NOT a patch slot)
+	//     [patch_taken]    B flushes       (exits[1])
+	//   use_not_taken:
+	//     [patch_not_taken] B flushes      (exits[0])
+	//   flushes:
+	//     fall through to early_exit (Ret)
+	//
+	// Layout when indirect (JR/JALR):
+	//   returnExit:
+	//     Ldr w0, [VU, tpc_off]
+	//     Bl vu0_indirect_dispatch     (returns target linkEntry in x0, or null)
+	//     Cbz x0, &flushes
+	//     Br  x0                       (tail-jump into successor's linkEntry)
+	//   flushes:
+	//     fall through to early_exit (Ret)
+	//
+	// Layout when num_exits == 0 and !indirect (ebit-terminated etc.):
+	//   No selector — fall directly through to early_exit.
+	// ----------------------------------------------------------------
+	out_block->returnExit = armGetCurrentCodePointer();
+	out_block->num_exits  = link_info.num_exits;
+	for (u32 e = 0; e < 2; e++)
+	{
+		out_block->exits[e].target_pc      = link_info.target_pcs[e];
+		out_block->exits[e].patch_site     = nullptr;
+		out_block->exits[e].fallthrough    = nullptr;
+		out_block->exits[e].current_target = nullptr;
+	}
+
+	if (link_info.num_exits == 1)
+	{
+		u8* patch = armGetCurrentCodePointer();
+		Label flushes;
+		armAsm->B(&flushes);
+		armAsm->Bind(&flushes);
+		out_block->exits[0].patch_site     = patch;
+		out_block->exits[0].fallthrough    = patch + 4;
+		out_block->exits[0].current_target = patch + 4;
+	}
+	else if (link_info.num_exits == 2)
+	{
+		armAsm->Ldr(w4, MemOperand(VU0_BASE_REG, tpc_off));
+		armAsm->Mov(w5, link_info.target_pcs[1]);
+		armAsm->Cmp(w4, w5);
+
+		Label use_not_taken_path;
+		Label flushes;
+		armAsm->B(&use_not_taken_path, ne);
+
+		u8* patch_taken = armGetCurrentCodePointer();
+		armAsm->B(&flushes);                 // exits[1] (taken)
+
+		armAsm->Bind(&use_not_taken_path);
+		u8* patch_not_taken = armGetCurrentCodePointer();
+		armAsm->B(&flushes);                 // exits[0] (not-taken)
+
+		armAsm->Bind(&flushes);
+
+		out_block->exits[0].patch_site     = patch_not_taken;
+		out_block->exits[0].fallthrough    = patch_not_taken + 4;
+		out_block->exits[0].current_target = patch_not_taken + 4;
+
+		out_block->exits[1].patch_site     = patch_taken;
+		out_block->exits[1].fallthrough    = patch_taken + 8;
+		out_block->exits[1].current_target = patch_taken + 8;
+	}
+	else if (link_info.indirect)
+	{
+		// JR/JALR: compute target at runtime, dispatch via lookup. On
+		// hit, tail-Br to successor's linkEntry. On miss, fall through
+		// to flushes (Execute loop will re-dispatch, compile, and the
+		// next visit hits the populated cache).
+		Label flushes;
+		armAsm->Ldr(w0, MemOperand(VU0_BASE_REG, tpc_off));
+		armEmitCall(reinterpret_cast<const void*>(vu0_indirect_dispatch));
+		armAsm->Cbz(x0, &flushes);
+		armAsm->Br(x0);
+		armAsm->Bind(&flushes);
+	}
+	// num_exits == 0 + !indirect: ebit terminated — fall through to epilogue.
+
 	// Epilogue (also used as early-exit target when MFLAGSET or VPU_STAT fires)
 	armAsm->Bind(&early_exit);
 	armAsm->Ldp(x22, VU0_BASE_REG, MemOperand(sp, 16));
@@ -664,6 +1032,8 @@ void recArmVU0::Reserve()
 	s_code_end   = buf_end;
 
 	std::memset(s_blocks, 0, sizeof(s_blocks));
+	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
+		s_vu0_waitingForSlot[i].clear();
 }
 
 void recArmVU0::Shutdown()
@@ -673,6 +1043,8 @@ void recArmVU0::Shutdown()
 	s_code_write = nullptr;
 	s_code_end   = nullptr;
 	std::memset(s_blocks, 0, sizeof(s_blocks));
+	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
+		s_vu0_waitingForSlot[i].clear();
 }
 
 void recArmVU0::Reset()
@@ -685,6 +1057,8 @@ void recArmVU0::Reset()
 	VU0.ialucount    = 0;
 
 	std::memset(s_blocks, 0, sizeof(s_blocks));
+	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
+		s_vu0_waitingForSlot[i].clear();
 	if (s_code_base)
 		s_code_write = s_code_base;
 	s_pool.Reset();
@@ -732,7 +1106,19 @@ void recArmVU0::Execute(u32 cycles)
 		{
 			const u32 numPairs = AnalyzeBlock(pc);
 			blk.numPairs  = numPairs;
-			blk.codeEntry = CompileBlock(pc, numPairs);
+			blk.codeEntry = CompileBlock(pc, numPairs, &blk);
+
+			// Block-link wiring for the freshly-compiled block:
+			//   1. Index the new block's exits in the reverse map so future
+			//      compiles at any of its target_pcs find us as a waiter.
+			//   2. Forward-link our outgoing exits to any already-compiled
+			//      target's linkEntry.
+			//   3. Patch any predecessor that statically targets us (and
+			//      was sitting on the dispatcher fall-through) to B
+			//      directly into our linkEntry.
+			indexVU0BlockExits(pc, blk);
+			tryForwardLinkVU0(blk);
+			patchWaitingPredecessorsVU0(pc, blk.linkEntry);
 		}
 
 		using BlockFn = void (*)();
@@ -798,6 +1184,43 @@ void recArmVU0::Clear(u32 addr, u32 size)
 	if (first >= VU0_NUM_SLOTS)
 		return;
 
+	// Block-linking invalidation: any predecessor that has a B patched to a
+	// linkEntry inside the cleared range needs that exit reverted to its
+	// fallthrough. Otherwise the predecessor's next exec would jump into
+	// stale code that's about to be (or has been) overwritten by a fresh
+	// compile occupying the same buffer region.
+	//
+	// Walk the reverse index for each cleared slot, pull the predecessor
+	// out of s_blocks, and unpatch any of its exits whose target_pc lands
+	// in [first, clamped_last).
+	for (u32 ts = first; ts < clamped_last; ts++)
+	{
+		for (u32 pred_slot : s_vu0_waitingForSlot[ts])
+		{
+			if (pred_slot >= VU0_NUM_SLOTS)
+				continue;
+			VU0BlockEntry& pred = s_blocks[pred_slot];
+			if (!pred.codeEntry)
+				continue; // stale entry — pred itself was already cleared
+			for (u32 e = 0; e < pred.num_exits; e++)
+			{
+				LinkExit& exit = pred.exits[e];
+				if (!exit.patch_site || exit.target_pc == LINK_TARGET_NONE)
+					continue;
+				const u32 target_slot = exit.target_pc / 8;
+				if (target_slot >= first && target_slot < clamped_last)
+					unpatchVU0LinkSite(exit);
+			}
+		}
+	}
+
+	// Drop the cleared blocks themselves. codeEntry=nullptr makes the next
+	// dispatch recompile; linkEntry=nullptr is defensive (any stale read of
+	// it via vu0_indirect_dispatch is treated as a miss). The exits[] data
+	// is now stale and won't be read again until recompile rewrites it.
 	for (u32 i = first; i < clamped_last; i++)
+	{
 		s_blocks[i].codeEntry = nullptr;
+		s_blocks[i].linkEntry = nullptr;
+	}
 }
