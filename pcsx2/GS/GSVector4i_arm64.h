@@ -508,12 +508,12 @@ public:
 
 	__forceinline GSVector4i pkl32(const GSVector4i& a) const
 	{
-		return GSVector4i(vreinterpretq_s32_u32(vuzp1q_u32(vreinterpretq_u32_s32(v4s), vreinterpretq_u32_s32(a.v4s))));
+		return GSVector4i(vuzp1q_s32(v4s, a.v4s));
 	}
 
 	__forceinline GSVector4i pku32(const GSVector4i& a) const
 	{
-		return GSVector4i(vreinterpretq_s32_u32(vuzp2q_u32(vreinterpretq_u32_s32(v4s), vreinterpretq_u32_s32(a.v4s))));
+		return GSVector4i(vuzp2q_s32(v4s, a.v4s));
 	}
 
 	__forceinline GSVector4i upl8(const GSVector4i& a) const
@@ -701,7 +701,7 @@ public:
 
 	__forceinline GSVector4i srl16(s32 i) const
 	{
-		return GSVector4i(vreinterpretq_s32_u16(vshlq_u16(vreinterpretq_u16_s32(v4s), vdupq_n_s16((int16_t)-i))));
+		return GSVector4i(vreinterpretq_s32_u16(vshlq_u16(vreinterpretq_u16_s32(v4s), vdupq_n_s16(-i))));
 	}
 
 	__forceinline GSVector4i srlv16(const GSVector4i& v) const
@@ -888,7 +888,7 @@ public:
 
 	__forceinline GSVector4i hsub32(const GSVector4i& v) const
 	{
-		return GSVector4i(vreinterpretq_s32_u32(vsubq_u32(vuzp1q_u32(vreinterpretq_u32_s32(v4s), vreinterpretq_u32_s32(v.v4s)), vuzp2q_u32(vreinterpretq_u32_s32(v4s), vreinterpretq_u32_s32(v.v4s)))));
+		return GSVector4i(vsubq_s32(vuzp1q_s32(v4s, v.v4s), vuzp2q_s32(v4s, v.v4s)));
 	}
 
 	__forceinline GSVector4i subs8(const GSVector4i& v) const

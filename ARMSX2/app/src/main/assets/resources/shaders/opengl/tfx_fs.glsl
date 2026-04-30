@@ -39,6 +39,20 @@
 #define PS_ATST_NOTEQUAL 4
 #endif
 
+// Selector-refactor compatibility: PS_DEPTH_FEEDBACK / PS_COLOR_FEEDBACK / PS_ZWRITE
+// were dropped from PSSelector upstream. Derive safe defaults from existing macros.
+// Adreno's GLSL preprocessor errors on undefined identifiers in #if expressions, so
+// every macro referenced below MUST have a #define somewhere before its first #if use.
+#ifndef PS_DEPTH_FEEDBACK
+#define PS_DEPTH_FEEDBACK (DEPTH_FEEDBACK_SUPPORT == 1)
+#endif
+#ifndef PS_COLOR_FEEDBACK
+#define PS_COLOR_FEEDBACK 0
+#endif
+#ifndef PS_ZWRITE
+#define PS_ZWRITE (PS_ZCLAMP || PS_ZFLOOR || (PS_AFAIL == AFAIL_FB_ONLY) || (PS_AFAIL == AFAIL_RGB_ONLY) || (PS_ZTST == ZTST_GEQUAL) || (PS_ZTST == ZTST_GREATER))
+#endif
+
 // TEX_COORD_DEBUG output the uv coordinate as color. It is useful
 // to detect bad sampling due to upscaling
 //#define TEX_COORD_DEBUG

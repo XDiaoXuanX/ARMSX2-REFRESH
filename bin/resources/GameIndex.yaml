@@ -17558,7 +17558,7 @@ SLES-51257:
   name: "The Sims"
   name-sort: "Sims, The"
   region: "PAL-M8"
-  compat: 3
+  compat: 5
   speedHacks:
     mtvu: 0 # Fixes bad graphics due to bad T-Bit handling.
 SLES-51258:
@@ -17719,7 +17719,7 @@ SLES-51315:
   compat: 5
 SLES-51316:
   name: "Grand Theft Auto - Vice City"
-  region: "PAL-E"
+  region: "PAL-A"
 SLES-51317:
   name: "Minority Report - Le Futur vous Rattrape"
   region: "PAL-F"
@@ -20719,7 +20719,7 @@ SLES-52558:
   name: "Crimson Sea 2"
   region: "PAL-G"
 SLES-52559:
-  name: "FIFA 2005"
+  name: "FIFA Football 2005"
   region: "PAL-E"
   gameFixes:
     - GIFFIFOHack # Partially fixes graphical issues also needs EE cycle rate + 3.
@@ -20728,9 +20728,10 @@ SLES-52559:
   gsHWFixes:
     halfPixelOffset: 2 # Fixes misaligned bloom and edge garbage.
     nativeScaling: 1 # Fixes misaligned bloom.
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLES-52560:
-  name: "FIFA 2005"
+  name: "FIFA Football 2005"
   region: "PAL-G"
   gameFixes:
     - GIFFIFOHack # Partially fixes graphical issues also needs EE cycle rate + 3.
@@ -20739,9 +20740,10 @@ SLES-52560:
   gsHWFixes:
     halfPixelOffset: 2 # Fixes misaligned bloom and edge garbage.
     nativeScaling: 1 # Fixes misaligned bloom.
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLES-52561:
-  name: "FIFA 2005"
+  name: "FIFA Football 2005"
   region: "PAL-P-S"
   gameFixes:
     - GIFFIFOHack # Partially fixes graphical issues also needs EE cycle rate + 3.
@@ -20750,9 +20752,10 @@ SLES-52561:
   gsHWFixes:
     halfPixelOffset: 2 # Fixes misaligned bloom and edge garbage.
     nativeScaling: 1 # Fixes misaligned bloom.
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLES-52562:
-  name: "FIFA 2005"
+  name: "FIFA Football 2005"
   region: "PAL-I"
   gameFixes:
     - GIFFIFOHack # Partially fixes graphical issues also needs EE cycle rate + 3.
@@ -20761,7 +20764,8 @@ SLES-52562:
   gsHWFixes:
     halfPixelOffset: 2 # Fixes misaligned bloom and edge garbage.
     nativeScaling: 1 # Fixes misaligned bloom.
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLES-52563:
   name: "FIFA Football 2005"
   region: "PAL-M6"
@@ -20772,7 +20776,11 @@ SLES-52563:
   gsHWFixes:
     halfPixelOffset: 2 # Fixes misaligned bloom and edge garbage.
     nativeScaling: 1 # Fixes misaligned bloom.
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
+  memcardFilters: # Football Fusion with Total Club Manager 2005
+    - "SLES-52674"
+    - "SLES-52563"
 SLES-52567:
   name: "Catwoman"
   region: "PAL-M7"
@@ -21167,10 +21175,13 @@ SLES-52673:
   name: "NHL 2005"
   region: "PAL-M5"
 SLES-52674:
-  name: "Fussball Manager 2005"
+  name: "Total Club Manager 2005"
   region: "PAL-M5"
   clampModes:
     vu1ClampMode: 3 # Fixes 3D rendering.
+  memcardFilters: # Football Fusion with Total Club Manager 2005
+    - "SLES-52674"
+    - "SLES-52563"
 SLES-52675:
   name: "Hugo - Cannon Cruise"
   region: "PAL-Unk"
@@ -21839,28 +21850,32 @@ SLES-52909:
   gameFixes:
     - EETimingHack # Fixes graphical corruption.
   gsHWFixes:
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLES-52910:
-  name: "UEFA Champions League 2005"
+  name: "UEFA Champions League 2004-2005"
   region: "PAL-F-G"
   gameFixes:
     - EETimingHack # Fixes graphical corruption.
   gsHWFixes:
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLES-52911:
-  name: "UEFA Champions League 2005"
+  name: "UEFA Champions League 2004-2005"
   region: "PAL-I-S"
   gameFixes:
     - EETimingHack # Fixes graphical corruption.
   gsHWFixes:
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLES-52912:
-  name: "UEFA Champions League 2005"
+  name: "UEFA Champions League 2004-2005"
   region: "PAL-E-DU"
   gameFixes:
     - EETimingHack # Fixes graphical corruption.
   gsHWFixes:
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLES-52913:
   name: "Suikoden IV"
   region: "PAL-M5"
@@ -27045,6 +27060,9 @@ SLES-54522:
 SLES-54527:
   name: "DreamWorks & Aardman Flushed Away"
   region: "PAL-M5"
+  gsHWFixes:
+    halfPixelOffset: 5 # Fixes post alignment.
+    nativeScaling: 2 # Fixes post effects.
 SLES-54532:
   name: "Home Alone"
   region: "PAL-PL-P"
@@ -28404,7 +28422,7 @@ SLES-54960:
   name: "Godzilla - Unleashed"
   region: "PAL-M5"
 SLES-54961:
-  name: "World series of poker 2008"
+  name: "World Series of Poker 2008 - Battle for the Bracelets"
   region: "PAL-E"
 SLES-54962:
   name: "Guitar Hero III - Legends of Rock"
@@ -30283,8 +30301,11 @@ SLES-55569:
   name: "Silent Hill - Shattered Memories"
   region: "PAL-M5"
   gsHWFixes:
+    minimumBlendingLevel: 2 # Fixes pause menu transition.
     disablePartialInvalidation: 1 # Fixes missing graphics.
-    halfPixelOffset: 2 # Fixes ghosting.
+    textureInsideRT: 1 # Fixes pause menu transition.
+    halfPixelOffset: 5 # Fixes post-processing and bloom misaligment.
+    nativeScaling: 2 # Fixes post-processing smoothness and position.
 SLES-55572:
   name: "Marvel Super Hero Squad"
   region: "PAL-M6"
@@ -32122,7 +32143,8 @@ SLKA-25209:
   gsHWFixes:
     halfPixelOffset: 2 # Fixes misaligned bloom and edge garbage.
     nativeScaling: 1 # Fixes misaligned bloom.
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLKA-25210:
   name: "서머 히트 비치 발리볼" # Undumped on ReDump as of 2025-08-28
   name-en: "Summer Heat Beach Volleyball"
@@ -33551,6 +33573,12 @@ SLKA-25465:
   name: "사일런트 힐: 섀터드 메모리즈" # Undumped on ReDump as of 2025-08-28
   name-en: "Silent Hill - Shattered Memories"
   region: "NTSC-K"
+  gsHWFixes:
+    minimumBlendingLevel: 2 # Fixes pause menu transition.
+    disablePartialInvalidation: 1 # Fixes missing graphics.
+    textureInsideRT: 1 # Fixes pause menu transition.
+    halfPixelOffset: 5 # Fixes post-processing and bloom misaligment.
+    nativeScaling: 2 # Fixes post-processing smoothness and position.
 SLKA-25466:
   name: "비트매니아 IIDX 16 엠프레스 + 프리미엄 베스트 [Disc 1 of 2 - Empress Disc]" # Undumped and unconfirmed on ReDump as of 2025-08-28
   name-en: "Beatmania IIDX 16 - Empress + Premium Best [Disc 1 of 2 - Empress Disc]"
@@ -34923,6 +34951,12 @@ SLPM-55231:
   name-sort: "さいれんとひる しゃったーどめもりーず"
   name-en: "Silent Hill - Shattered Memories"
   region: "NTSC-J"
+  gsHWFixes:
+    minimumBlendingLevel: 2 # Fixes pause menu transition.
+    disablePartialInvalidation: 1 # Fixes missing graphics.
+    textureInsideRT: 1 # Fixes pause menu transition.
+    halfPixelOffset: 5 # Fixes post-processing and bloom misaligment.
+    nativeScaling: 2 # Fixes post-processing smoothness and position.
 SLPM-55233:
   name: "金色のコルダ [KOEI The Best]"
   name-sort: "きんいろのこるだ [KOEI The Best]"
@@ -69637,7 +69671,7 @@ SLUS-21050:
     getSkipCount: "GSC_BurnoutGames"
     beforeDraw: "OI_BurnoutGames"
 SLUS-21051:
-  name: "FIFA 2005"
+  name: "FIFA Soccer 2005"
   region: "NTSC-U"
   compat: 5
   gameFixes:
@@ -69647,7 +69681,8 @@ SLUS-21051:
   gsHWFixes:
     halfPixelOffset: 2 # Fixes misaligned bloom and edge garbage.
     nativeScaling: 1 # Fixes misaligned bloom.
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLUS-21052:
   name: "Disney/Pixar Monsters, Inc."
   region: "NTSC-U"
@@ -72484,6 +72519,9 @@ SLUS-21484:
   name: "DreamWorks & Aardman Flushed Away"
   region: "NTSC-U"
   compat: 5
+  gsHWFixes:
+    halfPixelOffset: 5 # Fixes post alignment.
+    nativeScaling: 2 # Fixes post effects.
 SLUS-21485:
   name: "Backyard Sports - Basketball 2007"
   region: "NTSC-U"
@@ -74640,8 +74678,11 @@ SLUS-21899:
   region: "NTSC-U"
   compat: 5
   gsHWFixes:
+    minimumBlendingLevel: 2 # Fixes pause menu transition.
     disablePartialInvalidation: 1 # Fixes missing graphics.
-    halfPixelOffset: 2 # Fixes ghosting.
+    textureInsideRT: 1 # Fixes pause menu transition.
+    halfPixelOffset: 5 # Fixes post-processing and bloom misaligment.
+    nativeScaling: 2 # Fixes post-processing smoothness and position.
 SLUS-21900:
   name: "Scooby-Doo! First Frights"
   region: "NTSC-U"
@@ -75551,7 +75592,8 @@ SLUS-29127:
   gsHWFixes:
     halfPixelOffset: 2 # Fixes misaligned bloom and edge garbage.
     nativeScaling: 1 # Fixes misaligned bloom.
-    mipmap: 0 # Currently totally breaks player uniform rendering if mipmapping is enabled.
+    cpuSpriteRenderBW: 2 # Fixes player outfit rendering.
+    cpuSpriteRenderLevel: 2 # Needed for above.
 SLUS-29129:
   name: "25 to Life [Public Beta Vol.1.0]"
   region: "NTSC-U"
@@ -75912,6 +75954,9 @@ SLUS-29196:
 SLUS-29197:
   name: "DreamWorks & Aardman Flushed Away [Demo]"
   region: "NTSC-U"
+  gsHWFixes:
+    halfPixelOffset: 5 # Fixes post alignment.
+    nativeScaling: 2 # Fixes post effects.
 SLUS-29198:
   name: "Guitar Hero II [Demo]"
   region: "NTSC-U"

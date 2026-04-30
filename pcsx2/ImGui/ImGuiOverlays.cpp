@@ -835,6 +835,9 @@ __ri void ImGuiManager::DrawSettingsOverlay(float scale, float margin, float spa
 
 		if (GSConfig.HWAccurateAlphaTest)
 			APPEND("AAT ");
+		
+		if (GSConfig.HWAA1)
+			APPEND("AA1 ");
 
 		// deliberately test global and print local here for auto values
 		if (EmuConfig.GS.TextureFiltering != BiFiltering::PS2)
@@ -893,6 +896,8 @@ __ri void ImGuiManager::DrawSettingsOverlay(float scale, float margin, float spa
 			APPEND("PLFD ");
 		if (GSConfig.UserHacks_EstimateTextureRegion)
 			APPEND("ETR ");
+		if (GSConfig.UserHacks_DrawBuffering)
+			APPEND("DRWB");
 		if (GSConfig.HWSpinGPUForReadbacks)
 			APPEND("RBSG ");
 		if (GSConfig.HWSpinCPUForReadbacks)

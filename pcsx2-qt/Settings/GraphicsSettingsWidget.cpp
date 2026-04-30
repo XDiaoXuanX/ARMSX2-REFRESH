@@ -112,6 +112,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_hw.dithering, "EmuCore/GS", "dithering_ps2", 2);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_hw.mipmapping, "EmuCore/GS", "hw_mipmap", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_hw.accurateAlphaTest, "EmuCore/GS", "HWAccurateAlphaTest", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_hw.hwAA1, "EmuCore/GS", "HWAA1", false);
 	SettingWidgetBinder::BindWidgetToIntSetting(
 		sif, m_hw.blending, "EmuCore/GS", "accurate_blending_unit", static_cast<int>(AccBlendLevel::Basic));
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_hw.enableHWFixes, "EmuCore/GS", "UserHacks", false);
@@ -152,6 +153,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 		sif, m_fixes.limit24BitDepth, "EmuCore/GS", "UserHacks_Limit24BitDepth", static_cast<int>(GSLimit24BitDepth::Disabled));
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.readTCOnClose, "EmuCore/GS", "UserHacks_ReadTCOnClose", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.estimateTextureRegion, "EmuCore/GS", "UserHacks_EstimateTextureRegion", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.drawBuffering, "EmuCore/GS", "UserHacks_DrawBuffering", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.gpuPaletteConversion, "EmuCore/GS", "paltex", false);
 	connect(m_fixes.cpuSpriteRenderBW, &QComboBox::currentIndexChanged, this,
 		&GraphicsSettingsWidget::onCPUSpriteRenderBWChanged);
@@ -492,6 +494,9 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 			m_hw.accurateAlphaTest, tr("Accurate Alpha Test"), tr("Unchecked"), tr("Enables accurate alpha testing, which some games require to render correctly. This may require more draw calls and result in a speed penalty."));
 
 		dialog()->registerWidgetHelp(
+			m_hw.hwAA1, tr("AA1"), tr("Unchecked"), tr("Enables AA1 (PS2 antialiasing), which some games require to render correctly. This may result in a heavy performance penalty."));
+
+		dialog()->registerWidgetHelp(
 			m_hw.textureFiltering, tr("Texture Filtering"), tr("Bilinear (PS2)"),
 			tr("Changes what filtering algorithm is used to map textures to surfaces.<br> "
 			   "Nearest: Makes no attempt to blend colors.<br> "
@@ -610,6 +615,9 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 
 		dialog()->registerWidgetHelp(m_fixes.estimateTextureRegion, tr("Estimate Texture Region"), tr("Unchecked"),
 			tr("Attempts to reduce the texture size when games do not set it themselves (e.g. Snowblind games)."));
+
+		dialog()->registerWidgetHelp(m_fixes.drawBuffering, tr("Draw Buffering"), tr("Unchecked"),
+			tr("Attempts to reduce draw calls in games which do heavy context switching for blending purposes."));
 	}
 
 	// Upscaling Fixes tab

@@ -22,8 +22,10 @@ static const auto& _vscratch = v31;
 
 static constexpr const GSScanlineConstantData128B& g_const = g_const_128b;
 
-#define _local(field) MemOperand(_locals, offsetof(GSScanlineLocalData, field))
-#define _local_di(i, field) MemOperand(_locals, offsetof(GSScanlineLocalData, d[0].field) + sizeof(GSScanlineLocalData::skip) * (i))
+// Yay, you can't offsetof with non-constant array indices in GCC
+#define OFFSETOF(base, field) (reinterpret_cast<uptr>(&reinterpret_cast<base*>(0)->field))
+#define _local(field) MemOperand(_locals, OFFSETOF(GSScanlineLocalData, field))
+#define _local_di(i, field) MemOperand(_locals, OFFSETOF(GSScanlineLocalData, d[0].field) + sizeof(GSScanlineLocalData::skip) * (i))
 #define armAsm (&m_emitter)
 
 GSSetupPrimCodeGenerator::GSSetupPrimCodeGenerator(u64 key, void* code, size_t maxsize)
