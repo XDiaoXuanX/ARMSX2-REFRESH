@@ -1077,7 +1077,6 @@ set(pcsx2arm64Sources
 	arm64/iR5900LoadStore_arm64.cpp
 	arm64/iR5900Trap_arm64.cpp
 	arm64/iR5900Misc_arm64.cpp
-	arm64/intNativeOps.cpp
 	arm64/iVU0micro_arm64.cpp
 	arm64/iVU0Upper_arm64.cpp
 	arm64/iVU0Lower_arm64.cpp
@@ -1094,7 +1093,6 @@ set(pcsx2arm64Sources
 set(pcsx2arm64Headers
 	arm64/AsmHelpers.h
 	arm64/arm64Emitter.h
-	arm64/intNativeOps.h
 	arm64/iVU0micro_arm64.h
 	arm64/iVU1micro_arm64.h
 	arm64/iVU1IR_arm64.h
