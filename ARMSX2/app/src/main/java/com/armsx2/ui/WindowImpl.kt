@@ -57,7 +57,7 @@ object WindowImpl {
                 }
                 // Suppress the side toolbar while the overlay is up — the
                 // overlay's "Show Toolbar" item is the way to reach it.
-                if ((Main.eState.value != EmuState.RUNNING || toolbarVisible.value) && !overlayVisible.value)
+                if ((Main.eState.value == EmuState.STOPPED) && !overlayVisible.value)
                     ToolbarImpl.Toolbar()
             }
         }
