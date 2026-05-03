@@ -410,11 +410,11 @@ object InGameOverlay {
         Column(modifier = Modifier.fillMaxWidth()) {
             MenuRow("Resume Game") { closeAndResume() }
             MenuDivider()
-            MenuRow("Show Toolbar") {
+/*            MenuRow("Show Toolbar") {
                 WindowImpl.toolbarVisible.value = true
                 closeKeepingState()
             }
-            MenuDivider()
+            MenuDivider()*/
             MenuRow("Save State") { state.value = State.SaveStateSlots }
             MenuDivider()
             MenuRow("Load State") { state.value = State.LoadStateSlots }

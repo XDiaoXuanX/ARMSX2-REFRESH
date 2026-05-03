@@ -13,9 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.armsx2.ui.toolbar.ToggleLibraryButton
 import com.armsx2.ui.toolbar.PauseButton
-import com.armsx2.ui.toolbar.RenderModeButton
 import com.armsx2.ui.toolbar.RestartButton
 import com.armsx2.ui.toolbar.SettingsButton
 import com.armsx2.ui.toolbar.StopButton
@@ -31,7 +29,7 @@ object ToolbarImpl {
     val drawerContext = mutableStateOf<ToolbarButton?>(null)
 
     init {
-        upperButtons.addAll(arrayOf(ToggleLibraryButton(), RenderModeButton()))
+        upperButtons.addAll(arrayOf())
         // Settings (cog) and Tests (bug) sit at the bottom of the lower
         // stack so they don't shift the run-control buttons when added.
         // TestsButton uses the drawer pattern (the only button that does),
