@@ -82,6 +82,12 @@ public class NativeApp {
 	public static native String getGameSerial();
 	public static native float getFPS();
 
+	/** Build version string from BuildVersion::GitRev — formatted as
+	 *  "GitTagHi.GitTagMid.GitTagLo.ARMSX2Build-SNAPSHOT". Used by the
+	 *  setup wizard + in-game overlay branding so the displayed version
+	 *  tracks the C++ constants without a Kotlin-side hardcoded copy. */
+	public static native String getBuildVersion();
+
 	public static native String getPauseGameTitle();
 	public static native String getPauseGameSerial();
 
@@ -100,6 +106,7 @@ public class NativeApp {
 	public static native void renderSoftware();
 	public static native void renderOpenGL();
 	public static native void renderVulkan();
+	public static native void renderAuto();
 	public static native void renderPreloading(int value);
 
 	public static native void onNativeSurfaceCreated();

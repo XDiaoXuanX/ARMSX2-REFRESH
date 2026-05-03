@@ -34,6 +34,7 @@
 #include "MTGS.h"
 #include "SDL3/SDL.h"
 #include "ps2/BiosTools.h"
+#include "BuildVersion.h"
 #include "native-lib.h"
 #include "libchdr/chd.h"
 #include <algorithm>
@@ -222,6 +223,16 @@ JNIEXPORT jstring JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_getGameSerial(JNIEnv *env, jclass clazz) {
     std::string ret = VMManager::GetDiscSerial();
     return env->NewStringUTF(ret.c_str());
+}
+
+// Build version string sourced from BuildVersion::GitRev. Format:
+//   "GitTagHi.GitTagMid.GitTagLo.ARMSX2Build-SNAPSHOT"
+// Used by the setup wizard + in-game overlay to show the build label
+// without hardcoding the values on the Kotlin side.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getBuildVersion(JNIEnv *env, jclass clazz) {
+    return env->NewStringUTF(BuildVersion::GitRev);
 }
 
 extern "C"
@@ -458,6 +469,22 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderSoftware(JNIEnv *env, jclass clazz) {
     }
 }
 
+// Auto = let GSUtil::GetPreferredRenderer pick at runtime based on what
+// the device supports (Vulkan when available, OpenGL otherwise, SW as
+// last resort). Matches Pcsx2Config::DEFAULT_HW_RENDERER and is the
+// fresh-install default — the in-game overlay's renderer cycle still
+// allows explicit OPENGL/SW override on top.
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_renderAuto(JNIEnv *env, jclass clazz) {
+    Host::SetBaseIntSettingValue("EmuCore/GS", "Renderer",
+        static_cast<int>(GSRendererType::Auto));
+    EmuConfig.GS.Renderer = GSRendererType::Auto;
+    if(MTGS::IsOpen()) {
+        MTGS::ApplySettings();
+    }
+}
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderOpenGL(JNIEnv *env, jclass clazz) {
@@ -643,7 +670,7 @@ JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
                                                  jstring p_szpath) {
     std::string _szPath = GetJavaString(env, p_szpath);
-    Console.WriteLn("PASX2-START");
+    Console.WriteLn("ARMSX2-START");
     /////////////////////////////
 
     s_execute_exit = false;

@@ -3867,11 +3867,21 @@ void RunVuJitTests()
     s_pass = s_fail = 0;
     LOGI("=== microVU JIT tests start ===");
 
+    // Track whether THIS function allocated SysMemory so the matching
+    // Release at the bottom only fires on the path that owns the memory.
+    // Without this, the leaked mappings from VU JIT tests collide with
+    // the next CPUThreadInitialize → SysMemory::Allocate → unique_ptr
+    // assignment of s_memory_mapping_area, which destructs an area that
+    // still has m_num_mappings != 0 and trips
+    // `LnxHostSys.cpp:166: No mappings left`. Game launch immediately
+    // after app start would crash before the VM even booted.
+    bool owns_memory = false;
     if (VU0.Micro == nullptr) {
         if (!SysMemory::Allocate()) {
             LOGE("SysMemory::Allocate() failed — aborting VU JIT tests");
             return;
         }
+        owns_memory = true;
     }
 
     mVU0_TestInit();
@@ -4029,4 +4039,10 @@ void RunVuJitTests()
     ReportTestResults("VuJitTests", s_pass, s_pass + s_fail);
 
     mVU0_TestShutdown();
+
+    // Match the entry-time Allocate. Without this, s_memory_mapping_area
+    // stays populated with VU0/EE/IOP mappings, and the next CPUThreadInit
+    // (when the user launches a game) hits the "No mappings left" assert.
+    if (owns_memory)
+        SysMemory::Release();
 }

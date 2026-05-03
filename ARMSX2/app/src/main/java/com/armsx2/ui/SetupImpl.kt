@@ -13,7 +13,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -23,20 +22,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -57,6 +54,20 @@ object SetupImpl {
     val setupState = mutableStateOf(0)
     val allowPrev = mutableStateOf(false)
     val allowNext = mutableStateOf(false)
+
+    /** Build version string read at first use from BuildVersion::GitRev
+     *  via NativeApp.getBuildVersion(). Format
+     *  "GitTagHi.GitTagMid.GitTagLo.ARMSX2Build-SNAPSHOT". The wizard
+     *  shows this under the "ARMSX2" wordmark in the title row so it
+     *  matches the pause overlay's brand header without a Kotlin-side
+     *  hardcoded copy. */
+    private val buildVersionString: String by lazy {
+        runCatching { NativeApp.getBuildVersion() }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { "v$it" }
+            ?: ""
+    }
 
     // -------- BIOS setup state --------
     data class ScannedBios(val uri: Uri, val displayName: String, val info: BiosInfo)
@@ -87,6 +98,14 @@ object SetupImpl {
     // -------- System dir setup state --------
     private val systemDirUri = mutableStateOf<Uri?>(null)
     private val systemDirDisplay = mutableStateOf<String?>(null)
+    /** Sentinel: user explicitly picked the app-private fallback instead
+     *  of a SAF folder. Treated as a valid "done" state for advancing
+     *  past the system-dir step on first-run. */
+    private val systemDirUseDefault = mutableStateOf(false)
+    /** Surface message shown on the system-dir page when validation fails
+     *  (typically scoped-storage write rejection on a non-app-private
+     *  folder without MANAGE_EXTERNAL_STORAGE). null = no error. */
+    private val systemDirError = mutableStateOf<String?>(null)
 
     // -------- ROMs dir setup state --------
     private val romsDirUri = mutableStateOf<Uri?>(null)
@@ -150,17 +169,58 @@ object SetupImpl {
     }
 
     private fun finishSystemDirStep(context: Context): String? {
+        // App-private fallback path. Wipe any prior systemDir pref so
+        // NativeApp.initializeOnce → Main.systemDirPosix returns null and
+        // emucore writes under getExternalFilesDir.
+        if (systemDirUseDefault.value) {
+            Main.systemDir.value = null
+            Main.prefs.edit().remove("systemDir").apply()
+            systemDirError.value = null
+            return context.getExternalFilesDir(null)?.absolutePath
+                ?: context.dataDir.absolutePath
+        }
+
         val uri = systemDirUri.value
         // Re-entry path: keep existing pref if user didn't repick. The
         // persistable grant from a prior session survives across process
         // restarts so we don't need to re-take it.
         if (uri == null) return Main.systemDir.value
+
+        // Validate POSIX writability BEFORE persisting. The SAF
+        // tree-URI grant lets us read, but emucore's FileSystem APIs
+        // hit raw fopen/mkdir which scoped storage rejects on
+        // Android 11+ unless MANAGE_EXTERNAL_STORAGE is granted.
+        // Without this gate, the wizard finishes happily, the user
+        // boots a game, and emucore SIGSEGVs trying to gen memcards
+        // / savestates / configs in a non-writable dir.
+        val posix = Main.resolveTreeUriToPosix(uri.toString())
+        if (posix != null && !Main.validateSystemDirWritable(posix)) {
+            // Auto-open the grant screen on Android 11+ so the user can
+            // toggle the permission with one tap. Activity.onResume will
+            // refresh allFilesAccessGranted; user re-clicks Next.
+            if (Main.needsAllFilesAccess()) {
+                Main.requestAllFilesAccess(context)
+                systemDirError.value = "Can't write to that folder. Grant " +
+                    "All Files Access (just opened in Settings), then tap Next again. " +
+                    "Or use the App-Private Folder option below."
+            } else {
+                // Permission already granted (or pre-Android-11) but the
+                // path still rejected writes — likely a removable / SD-
+                // card path the device doesn't surface as POSIX. Push
+                // the user to the fallback.
+                systemDirError.value = "That folder isn't writable from native code. " +
+                    "Pick a different folder or use the App-Private Folder option below."
+            }
+            return null
+        }
+
         try {
             context.contentResolver.takePersistableUriPermission(
                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         } catch (_: SecurityException) { /* already persisted, or revoked */ }
         Main.systemDir.value = uri.toString()
         Main.prefs.edit().putString("systemDir", uri.toString()).apply()
+        systemDirError.value = null
         return uri.toString()
     }
 
@@ -183,9 +243,12 @@ object SetupImpl {
     private fun refreshAllowNext() {
         allowNext.value = when (setupState.value) {
             0 -> true
-            // System dir page — Next when the user has a fresh URI selected
-            // OR an existing pref to keep (re-entry path).
-            1 -> systemDirUri.value != null || Main.systemDir.value != null
+            // System dir page — Next when the user has a fresh URI selected,
+            // an existing pref to keep (re-entry), or has explicitly opted
+            // into the app-private fallback.
+            1 -> systemDirUri.value != null ||
+                 systemDirUseDefault.value ||
+                 Main.systemDir.value != null
             // BIOS page — Next when a row is picked, or (fallback for revoked
             // / missing biosDir) an already-configured BIOS we're keeping.
             2 -> selectedBiosIdx.value != null ||
@@ -245,6 +308,8 @@ object SetupImpl {
             systemDirUri.value = null
             systemDirDisplay.value = null
         }
+        systemDirUseDefault.value = false
+        systemDirError.value = null
 
         val existingRoms = Main.romsDir.value
         if (existingRoms != null) {
@@ -308,6 +373,11 @@ object SetupImpl {
             } catch (_: SecurityException) { /* already persisted */ }
             systemDirUri.value = treeUri
             systemDirDisplay.value = treeUri.lastPathSegment ?: treeUri.toString()
+            // Picking a fresh folder cancels the app-private opt-in and
+            // clears any prior validation error so the user gets a fresh
+            // shot at the writability probe on Next.
+            systemDirUseDefault.value = false
+            systemDirError.value = null
             refreshAllowNext()
         }
         val biosLauncher = rememberLauncherForActivityResult(
@@ -340,7 +410,12 @@ object SetupImpl {
         Box(Modifier.fillMaxSize().background(Colors.surface.value)) {
             Column(Modifier.fillMaxSize()) {
 
-                // Title row — page heading on the left, ARMSX2 logo on the right.
+                // Title row — page heading on the left, ARMSX2 + version
+                // stacked above the logo on the right. Mirrors the
+                // InGameOverlay BrandHeader so wizard / pause overlay
+                // share the same wordmark layout. Version comes from
+                // BuildVersion::GitRev via NativeApp.getBuildVersion()
+                // so it tracks the C++ constants automatically.
                 Row(
                     Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -352,7 +427,19 @@ object SetupImpl {
                         fontWeight = FontWeight.Bold,
                     )
                     Spacer(Modifier.weight(1f))
-                    Text("ARMSX2", color = Color.White, fontSize = 16.sp)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            "ARMSX2",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            buildVersionString,
+                            color = Color(0xFF888888),
+                            fontSize = 10.sp,
+                        )
+                    }
                     Image(
                         painter = painterResource(id = R.drawable.savetowerforeground),
                         contentDescription = null,
@@ -474,6 +561,10 @@ object SetupImpl {
         }
     }
 
+    /** First-run welcome page. Renderer backend defaults to Auto and
+     *  upscale defaults to 1x; both are now exposed in the in-game
+     *  overlay's Renderer tab for runtime override, so the wizard
+     *  doesn't ask up front. */
     @Composable
     fun Welcome() {
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
@@ -482,119 +573,7 @@ object SetupImpl {
             Spacer(Modifier.height(8.dp))
             Text("Hit Next to get started", Modifier.align(Alignment.CenterHorizontally),
                 fontSize = 14.sp, color = Color.LightGray)
-
-            Spacer(Modifier.height(28.dp))
-
-            // Renderer selector — segmented OpenGL / Vulkan toggle.
-            Text(
-                "Renderer backend",
-                Modifier.align(Alignment.CenterHorizontally),
-                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(6.dp))
-            Row(
-                Modifier.align(Alignment.CenterHorizontally),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                RendererOption("OpenGL", "opengl")
-                RendererOption("Vulkan", "vulkan")
-            }
-
-            Spacer(Modifier.height(20.dp))
-
-            // Upscale dropdown — 1x..5x. Each option shows the resulting
-            // internal resolution so the user can gauge the perf cost.
-            Text(
-                "Upscale multiplier",
-                Modifier.align(Alignment.CenterHorizontally),
-                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(6.dp))
-            UpscaleDropdown()
         }
-    }
-
-    /** PS2-blue squared-rounded option for the renderer choice. */
-    @Composable
-    private fun RendererOption(label: String, value: String) {
-        val selected = Main.renderer.value == value
-        Button(
-            onClick = {
-                Main.renderer.value = value
-                Main.prefs.edit().putString("renderer", value).apply()
-            },
-            shape = RoundedCornerShape(8.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (selected) Colors.pasx2_blue else Color(0xFF333333),
-                contentColor = Color.White,
-            ),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-        ) {
-            Text(label)
-        }
-    }
-
-    /** Anchor button + DropdownMenu listing 1x..5x upscale options with
-     *  their resulting internal resolution. PS2 native is 640×448 NTSC.
-     *  The button + menu are wrapped in a content-sized Box so the menu
-     *  anchors directly under the button instead of the parent's far-left
-     *  edge. */
-    @Composable
-    private fun UpscaleDropdown() {
-        val expanded = remember { mutableStateOf(false) }
-        val options = listOf(1, 2, 3, 4, 5)
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-        ) {
-            // Inner content-sized box anchors the DropdownMenu under the
-            // button itself, not the outer fillMaxWidth row.
-            Box {
-                Button(
-                    onClick = { expanded.value = true },
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Colors.pasx2_blue,
-                        contentColor = Color.White,
-                    ),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                ) {
-                    Text(upscaleLabel(Main.upscale.value))
-                }
-                DropdownMenu(
-                    expanded = expanded.value,
-                    onDismissRequest = { expanded.value = false },
-                    // Dark surface to match the rest of the wizard. The
-                    // default Material surface is near-white and clashes
-                    // with the dark wizard background.
-                    modifier = Modifier.background(Color(0xFF1F1F1F)),
-                ) {
-                    for (m in options) {
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    upscaleLabel(m),
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                )
-                            },
-                            onClick = {
-                                Main.upscale.value = m
-                                Main.prefs.edit().putInt("upscale", m).apply()
-                                expanded.value = false
-                            },
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    private fun upscaleLabel(mult: Int): String {
-        // PS2 NTSC native = 640×448. Multiplier scales both axes.
-        val w = 640 * mult
-        val h = 448 * mult
-        return "${mult}x  ${w}×${h}"
     }
 
     /** BIOS page content — single scrollable list. The pick button lives in
@@ -655,7 +634,14 @@ object SetupImpl {
                     Text(biosScanError.value!!, color = Color(0xFFFF6B6B))
                 }
                 scannedBioses.isNotEmpty() -> {
-                    LazyColumn(Modifier.fillMaxSize()) {
+                    // 2-column grid — landscape layout has plenty of room and
+                    // a single column wastes most of the screen.
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         itemsIndexed(scannedBioses) { idx, bios ->
                             val selected = selectedBiosIdx.value == idx
                             BiosRow(
@@ -671,10 +657,16 @@ object SetupImpl {
                     }
                 }
                 // Fallback: no folder URI to scan AND no scan running. If a
-                // BIOS is already configured, render it as a single read-
-                // only row so the user knows it's preserved.
+                // BIOS is already configured, render it as a single tile in
+                // the same 2-column grid so it visually matches the picker
+                // layout for users re-entering setup.
                 configuredPath != null && configuredBiosInfo.value != null -> {
-                    LazyColumn(Modifier.fillMaxSize()) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         item {
                             BiosRow(
                                 info = configuredBiosInfo.value!!,
@@ -748,8 +740,31 @@ object SetupImpl {
                 modifier = Modifier.padding(bottom = 12.dp),
             )
 
+            // Validation error banner — surfaces the scoped-storage write
+            // rejection so the user knows why Next refused. The grant
+            // intent has already been launched at this point on
+            // Android 11+; the user just needs to flip the toggle and
+            // re-tap Next.
+            val err = systemDirError.value
+            if (err != null) {
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF5A1A1A))
+                        .padding(12.dp)
+                        .padding(bottom = 0.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("⚠", fontSize = 22.sp, color = Color(0xFFFF6B6B))
+                    Spacer(Modifier.width(8.dp))
+                    Text(err, color = Color.White, fontSize = 13.sp,
+                        modifier = Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+
             val display = systemDirDisplay.value
-            if (display != null) {
+            if (display != null && !systemDirUseDefault.value) {
                 Row(
                     Modifier.fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
@@ -764,9 +779,51 @@ object SetupImpl {
                         Text(display, color = Color.White, fontSize = 14.sp)
                     }
                 }
+            } else if (systemDirUseDefault.value) {
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF1F3A1F))
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("✅", fontSize = 22.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Using App-Private Folder", color = Color.White, fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold)
+                        Text("Android/data/com.armsx2/files",
+                            color = Color.LightGray, fontSize = 11.sp)
+                    }
+                }
             } else {
                 Text("No system folder selected yet — use the Pick System Folder button below.",
                     color = Color.LightGray)
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // Escape hatch — guaranteed-writable app-private fallback.
+            // Clicking this clears any picked SAF URI + sets the
+            // use-default sentinel so refreshAllowNext + finishSystemDirStep
+            // know to skip the SAF write probe on Next.
+            Button(
+                onClick = {
+                    systemDirUseDefault.value = true
+                    systemDirUri.value = null
+                    systemDirDisplay.value = null
+                    systemDirError.value = null
+                    refreshAllowNext()
+                },
+                colors = ps2Colors(),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Text(
+                    if (systemDirUseDefault.value)
+                        "✓ Using App-Private Folder"
+                    else
+                        "Use App-Private Folder (default, always writable)",
+                )
             }
         }
     }

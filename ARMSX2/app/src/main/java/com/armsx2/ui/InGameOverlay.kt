@@ -5,6 +5,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,6 +23,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.vector.ImageVector
+import compose.icons.LineAwesomeIcons
+import compose.icons.lineawesomeicons.CompactDiscSolid
+import compose.icons.lineawesomeicons.CubeSolid
+import compose.icons.lineawesomeicons.FolderOpenSolid
+import compose.icons.lineawesomeicons.PlaySolid
+import compose.icons.lineawesomeicons.PowerOffSolid
+import compose.icons.lineawesomeicons.RedoAltSolid
+import compose.icons.lineawesomeicons.SaveSolid
+import compose.icons.lineawesomeicons.TachometerAltSolid
+import compose.icons.lineawesomeicons.ThLargeSolid
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -112,13 +127,18 @@ object InGameOverlay {
     // the overlay, closing the overlay shouldn't auto-resume.
     private var pausedByOverlay = false
 
-    /**
-     * Build version string sourced from `BuildVersion.cpp`:
-     *   GitTagHi.GitTagMid.GitTagLo-ARMSX2Build
-     * Hardcoded here because there's no JNI accessor today; bump in
-     * lockstep with the C++ side when those constants change.
-     */
-    private const val VERSION_STRING = "v2.7.304-3"
+    /** Build version string read at runtime from BuildVersion::GitRev
+     *  via NativeApp.getBuildVersion(). Format
+     *  "GitTagHi.GitTagMid.GitTagLo.ARMSX2Build-SNAPSHOT". Lazy so the
+     *  JNI call defers to first use; cached for subsequent reads.
+     *  Mirrored by SetupImpl so the wizard's title row stays in sync. */
+    private val versionString: String by lazy {
+        runCatching { NativeApp.getBuildVersion() }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { "v$it" }
+            ?: ""
+    }
 
     /** Open the overlay. Pauses the VM. Safe to call when already open. */
     fun open() {
@@ -157,7 +177,10 @@ object InGameOverlay {
 
         // Backdrop swallows taps so the running surface beneath doesn't
         // pick up the press as a button event. Tap-outside on Root acts
-        // as Resume Game.
+        // as Resume Game. The dim layer fills the whole screen (cutout
+        // included) so the partial-alpha aesthetic is uniform; only the
+        // INNER content box gets displayCutoutPadding so headers / menu
+        // rows aren't obscured by punch-hole or notch hardware.
         val backdropInteraction = remember { MutableInteractionSource() }
         Box(
             Modifier
@@ -169,12 +192,37 @@ object InGameOverlay {
                     onClick = { if (state.value is State.Root) closeAndResume() }
                 ),
         ) {
-            // Top-left: game info (title, serial, compatibility stars).
-            GameInfoHeader(
+            // Inner safe-area container — content laid out against this
+            // box's edges automatically gets cutout-aware insets. Tap on
+            // the dim band outside still falls through to the backdrop's
+            // close-on-tap handler because this inner Box is non-clickable.
+            Box(Modifier.fillMaxSize().displayCutoutPadding()) {
+            // Top-left: game info, then (on Root) the tab strip and the
+            // active tab's body stacked directly beneath it. Keeping the
+            // strip and its content in the same column means tabs always
+            // own their entries — no detached "strip up here, rows down
+            // there" split. Submenu / confirm states fall through to the
+            // bottom-left panel below.
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(20.dp),
-            )
+                    .fillMaxHeight()
+                    .padding(20.dp)
+                    .width(360.dp),
+            ) {
+                GameInfoHeader()
+                if (state.value is State.Root) {
+                    Spacer(Modifier.height(12.dp))
+                    TabStrip()
+                    Spacer(Modifier.height(6.dp))
+                    // weight(1f) gives RootTabs the remaining vertical
+                    // space, bounding Performance/Renderer's verticalScroll
+                    // so it actually scrolls instead of expanding off-screen.
+                    Box(modifier = Modifier.weight(1f)) {
+                        RootTabs()
+                    }
+                }
+            }
 
             // Top-right: ARMSX2 branding + version. Mirrors the SetupImpl
             // title row's right-aligned "ARMSX2 [logo]".
@@ -184,32 +232,38 @@ object InGameOverlay {
                     .padding(20.dp),
             )
 
-            // Bottom-left: menu items (Root) or submenu content. Sized to
-            // fit without scrolling — see comment on RootMenu.
-            Box(
-                Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxHeight(0.75f)
-                    .width(360.dp)
-                    .padding(start = 20.dp, bottom = 20.dp, top = 20.dp),
-                contentAlignment = Alignment.BottomStart,
-            ) {
-                when (state.value) {
-                    is State.Root -> RootTabs()
-                    is State.SaveStateSlots -> SaveStatePicker.Render(
-                        mode = SaveStatePicker.Mode.Save,
-                        onDone = { closeAndResume() },
-                        onBack = { state.value = State.Root },
-                    )
-                    is State.LoadStateSlots -> SaveStatePicker.Render(
-                        mode = SaveStatePicker.Mode.Load,
-                        onDone = { closeAndResume() },
-                        onBack = { state.value = State.Root },
-                    )
-                    is State.ExitConfirm -> ExitConfirm()
-                    is State.ResetConfirm -> ResetConfirm()
+            // Bottom-left: confirm dialogs and slot pickers only. Root
+            // content lives in the top-left column above with its tab
+            // strip; this panel just hosts modal-ish flows that should
+            // sit at the bottom of the screen (Exit / Reset confirms,
+            // save-state slot grid).
+            if (state.value !is State.Root) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxHeight(0.75f)
+                        .width(360.dp)
+                        .padding(start = 20.dp, bottom = 20.dp, top = 20.dp),
+                    contentAlignment = Alignment.BottomStart,
+                ) {
+                    when (state.value) {
+                        is State.SaveStateSlots -> SaveStatePicker.Render(
+                            mode = SaveStatePicker.Mode.Save,
+                            onDone = { closeAndResume() },
+                            onBack = { state.value = State.Root },
+                        )
+                        is State.LoadStateSlots -> SaveStatePicker.Render(
+                            mode = SaveStatePicker.Mode.Load,
+                            onDone = { closeAndResume() },
+                            onBack = { state.value = State.Root },
+                        )
+                        is State.ExitConfirm -> ExitConfirm()
+                        is State.ResetConfirm -> ResetConfirm()
+                        is State.Root -> Unit
+                    }
                 }
             }
+            } // displayCutoutPadding inner box
         }
     }
 
@@ -331,7 +385,7 @@ object InGameOverlay {
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("ARMSX2", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Text(VERSION_STRING, color = Color(0xFF888888), fontSize = 11.sp)
+                Text(versionString, color = Color(0xFF888888), fontSize = 11.sp)
             }
             Spacer(Modifier.width(8.dp))
             Image(
@@ -342,25 +396,15 @@ object InGameOverlay {
         }
     }
 
-    /** Root content — tab strip + active tab body. Tabs are config groups:
-     *  Playing Now hosts the pause-menu actions (Resume / Save State /
-     *  Change Disc / Reset / Close), Performance + Renderer host the
-     *  ConfigStore-backed settings widgets.
-     *
-     *  fillMaxSize so the verticalScroll inside Performance/Renderer tabs
-     *  has a bounded parent and can actually scroll on overflow. The parent
-     *  Box's contentAlignment is moot once we fill — content flows top-down
-     *  from the box's top edge (which is already at ~25% of screen height). */
+    /** Active tab body. Rendered in the top-left column directly under
+     *  TabStrip, so the strip and its entries stay visually attached.
+     *  Width and horizontal padding come from the parent column. */
     @Composable
     private fun RootTabs() {
-        Column(modifier = Modifier.fillMaxSize()) {
-            TabStrip()
-            Spacer(Modifier.height(6.dp))
-            when (currentTab.value) {
-                Tab.PlayingNow -> PlayingNowTab()
-                Tab.Performance -> PerformanceTab(settingsState)
-                Tab.Renderer -> RendererTab(settingsState)
-            }
+        when (currentTab.value) {
+            Tab.PlayingNow -> PlayingNowTab()
+            Tab.Performance -> PerformanceTab(settingsState)
+            Tab.Renderer -> RendererTab(settingsState)
         }
     }
 
@@ -404,22 +448,27 @@ object InGameOverlay {
 
     /** Playing Now — the original pause-menu actions, rendered as a
      *  fixed Column of compact rows + fading dividers. No scroll needed
-     *  for these 10 items. */
+     *  for these 10 items. Icons mirror PCSX2 ImGui FullscreenUI's
+     *  Font Awesome glyphs for each pause-menu action. */
     @Composable
     private fun PlayingNowTab() {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            MenuRow("Resume Game") { closeAndResume() }
+        val scroll = rememberScrollState()
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(scroll),
+        ) {
+            MenuRow("Resume Game", icon = LineAwesomeIcons.PlaySolid) { closeAndResume() }
             MenuDivider()
-/*            MenuRow("Show Toolbar") {
-                WindowImpl.toolbarVisible.value = true
-                closeKeepingState()
+            MenuRow("Save State", icon = LineAwesomeIcons.SaveSolid) {
+                state.value = State.SaveStateSlots
             }
-            MenuDivider()*/
-            MenuRow("Save State") { state.value = State.SaveStateSlots }
             MenuDivider()
-            MenuRow("Load State") { state.value = State.LoadStateSlots }
+            MenuRow("Load State", icon = LineAwesomeIcons.FolderOpenSolid) {
+                state.value = State.LoadStateSlots
+            }
             MenuDivider()
-            MenuRow("Change Disc") {
+            MenuRow("Change Disc", icon = LineAwesomeIcons.CompactDiscSolid) {
                 val intent = Intent(Intent.ACTION_GET_CONTENT)
                 intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
@@ -428,7 +477,7 @@ object InGameOverlay {
                 closeKeepingState()
             }
             MenuDivider()
-            MenuRow("Open Game Library") {
+            MenuRow("Open Game Library", icon = LineAwesomeIcons.ThLargeSolid) {
                 if (Main.eState.value == EmuState.PAUSED) Main.resume()
                 WindowImpl.showLibrary.value = true
                 closeKeepingState()
@@ -438,7 +487,7 @@ object InGameOverlay {
                 RenderMode.OPENGL -> "Renderer: OpenGL HW"
                 RenderMode.VULKAN_SW -> "Renderer: Software"
             }
-            MenuRow(rendererLabel) {
+            MenuRow(rendererLabel, icon = LineAwesomeIcons.CubeSolid) {
                 when (currentRenderer.value) {
                     RenderMode.OPENGL -> {
                         currentRenderer.value = RenderMode.VULKAN_SW
@@ -451,14 +500,21 @@ object InGameOverlay {
                 }
             }
             MenuDivider()
-            MenuRow(if (frameLimitOn.value) "Frame Limit: On" else "Frame Limit: Off") {
+            MenuRow(
+                if (frameLimitOn.value) "Frame Limit: On" else "Frame Limit: Off",
+                icon = LineAwesomeIcons.TachometerAltSolid,
+            ) {
                 frameLimitOn.value = !frameLimitOn.value
                 NativeApp.speedhackLimitermode(if (frameLimitOn.value) 0 else 3)
             }
             MenuDivider()
-            MenuRow("Reset System") { state.value = State.ResetConfirm }
+            MenuRow("Reset System", icon = LineAwesomeIcons.RedoAltSolid) {
+                state.value = State.ResetConfirm
+            }
             MenuDivider()
-            MenuRow("Close Game", danger = true) { state.value = State.ExitConfirm }
+            MenuRow("Close Game", icon = LineAwesomeIcons.PowerOffSolid, danger = true) {
+                state.value = State.ExitConfirm
+            }
         }
     }
 
@@ -529,10 +585,14 @@ object InGameOverlay {
      *  scrolling on phone landscape. Background is a left-anchored
      *  alpha gradient that "auras" the text and matches the divider
      *  fade direction. Danger variant tints text red for destructive
-     *  actions (Close Game / Exit Without Saving). */
+     *  actions (Close Game / Exit Without Saving). Optional icon
+     *  rendered on the left, tinted with the same color as the label
+     *  text — mirrors PCSX2 ImGui FullscreenUI's leading-icon menu
+     *  rows in DrawPauseMenu. */
     @Composable
     private fun MenuRow(
         label: String,
+        icon: ImageVector? = null,
         danger: Boolean = false,
         onClick: () -> Unit,
     ) {
@@ -557,7 +617,22 @@ object InGameOverlay {
                 .padding(horizontal = 6.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
-            Text(label, color = textColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (icon != null) {
+                    Image(
+                        imageVector = icon,
+                        contentDescription = null,
+                        colorFilter = ColorFilter.tint(textColor),
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                } else {
+                    // Reserve same space so labels align across rows w/
+                    // and w/o icons (Confirm-screen Back rows skip icons).
+                    Spacer(Modifier.width(22.dp))
+                }
+                Text(label, color = textColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
         }
     }
 }

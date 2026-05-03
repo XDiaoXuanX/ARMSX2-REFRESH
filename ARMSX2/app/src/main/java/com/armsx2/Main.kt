@@ -15,6 +15,7 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.ComponentActivity
+import androidx.activity.addCallback
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult
@@ -71,8 +72,20 @@ import kotlin.math.min
 class SurfaceCallbacks(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
     init {
         holder.addCallback(this)
+        // Make the SurfaceView itself focusable so gamepad key events
+        // route here directly without requiring a tap-to-focus or A-press
+        // to grant focus first. The Compose AndroidView wrapper also has
+        // .focusable() + a focusRequester pinned to it; both layers
+        // converge on this view as the focus target.
+        isFocusable = true
+        isFocusableInTouchMode = true
     }
-    override fun surfaceCreated(holder: SurfaceHolder) {}
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        // Pull focus the moment the surface is ready. Without this the
+        // AndroidView starts un-focused and gamepad input falls on the
+        // floor until the user touches the screen / presses A.
+        requestFocus()
+    }
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         NativeApp.onNativeSurfaceChanged(holder.surface, width, height)
     }
@@ -178,11 +191,13 @@ class Main: ComponentActivity() {
         val biosDir = mutableStateOf<String?>(null)
         val romsDir = mutableStateOf<String?>(null)
 
-        // Renderer + upscale picked in the setup wizard. Persisted as
-        // `renderer` ("opengl" / "vulkan") and `upscale` (Int 1..5). Applied
-        // via NativeApp before each VM launch so the setup choices stick
-        // across BIOS / game boots.
-        val renderer = mutableStateOf("opengl")
+        // Default backend is "auto" — emucore's GSUtil::GetPreferredRenderer
+        // picks at runtime per device. The setup wizard no longer asks; the
+        // in-game overlay's Renderer tab is where users override (OpenGL /
+        // Software cycle, plus Mali/Adreno-specific paths once those land).
+        // `upscale` (1..5) still persists; it's exposed in the in-game
+        // overlay's Renderer tab.
+        val renderer = mutableStateOf("auto")
         val upscale = mutableStateOf(1)
 
         /**
@@ -264,8 +279,14 @@ class Main: ComponentActivity() {
          * may translate fine but fail on write — that's a SAF-vs-POSIX
          * gap, not a translation bug.
          */
-        fun systemDirPosix(): String? {
-            val raw = systemDir.value ?: return null
+        fun systemDirPosix(): String? = resolveTreeUriToPosix(systemDir.value)
+
+        /** URI-string-independent POSIX resolver. Pulled out of
+         *  systemDirPosix so the setup wizard can probe a freshly-picked
+         *  URI for writability before persisting it. Returns null if the
+         *  URI is malformed or its volume ID isn't translatable. */
+        fun resolveTreeUriToPosix(uriString: String?): String? {
+            val raw = uriString ?: return null
             val uri = try { android.net.Uri.parse(raw) } catch (_: Exception) { return null }
             val docId = try {
                 android.provider.DocumentsContract.getTreeDocumentId(uri)
@@ -276,6 +297,34 @@ class Main: ComponentActivity() {
             return when (volumeId) {
                 "primary" -> "/storage/emulated/0/$relPath"
                 else -> "/storage/$volumeId/$relPath"
+            }
+        }
+
+        /**
+         * Probe the resolved POSIX path for emucore-compatible write
+         * access. Creates a `.armsx2-write-probe` file, deletes it,
+         * returns true on success.
+         *
+         * Catches the scoped-storage trap that bit users picking a
+         * non-app-private folder without the MANAGE_EXTERNAL_STORAGE
+         * grant: Android lets the SAF tree-URI permission survive the
+         * picker, so reads work, but raw `fopen`/`mkdir` from emucore
+         * fails with EACCES — which then crashes the VM during memcard
+         * / savestate / config generation. We probe up-front so the
+         * wizard can refuse to advance until either the grant lands or
+         * the user picks the app-private fallback.
+         */
+        fun validateSystemDirWritable(posixPath: String): Boolean {
+            return try {
+                val dir = File(posixPath)
+                if (!dir.exists() && !dir.mkdirs()) return false
+                if (!dir.isDirectory) return false
+                val probe = File(dir, ".armsx2-write-probe")
+                val ok = probe.createNewFile()
+                if (ok) probe.delete()
+                ok
+            } catch (_: Exception) {
+                false
             }
         }
 
@@ -342,7 +391,8 @@ class Main: ComponentActivity() {
             NativeApp.renderUpscalemultiplier(upscale.value.toFloat())
             when (renderer.value) {
                 "vulkan" -> NativeApp.renderVulkan()
-                else -> NativeApp.renderOpenGL()
+                "opengl" -> NativeApp.renderOpenGL()
+                else -> NativeApp.renderAuto()
             }
             com.armsx2.config.ConfigStore
                 .resolveForGame(currentGame.value?.serial)
@@ -416,19 +466,37 @@ class Main: ComponentActivity() {
             NativeApp.renderSoftware()
         }
 
+        /** Resolved root that bundled APK assets (resources/, bios/) are
+         *  copied to. If the user picked a non-app-private systemDir, we
+         *  copy there so emucore — which reads via POSIX from the same
+         *  EmuFolders root — finds them at the expected paths
+         *  (e.g. <systemDir>/resources/shaders/opengl/convert.glsl).
+         *  Otherwise falls back to getExternalFilesDir(null). Requires
+         *  MANAGE_EXTERNAL_STORAGE for the non-app-private case; the
+         *  AllFilesAccessScreen gate ensures that's granted before the
+         *  emulator UI is reachable. */
+        fun assetCopyRoot(context: Context): String {
+            return systemDirPosix()
+                ?: context.getExternalFilesDir(null)?.absolutePath
+                ?: context.dataDir.absolutePath
+        }
+
         fun copyAssetAll(p_context: Context, srcPath: String) {
+            copyAssetAll(p_context, srcPath, assetCopyRoot(p_context))
+        }
+
+        private fun copyAssetAll(p_context: Context, srcPath: String, rootDir: String) {
             val assetMgr = p_context.assets
             try {
-                val destPath =
-                    p_context.getExternalFilesDir(null).toString() + File.separator + srcPath
+                val destPath = rootDir + File.separator + srcPath
                 assetMgr.list(srcPath)?.let {
                     if (it.isEmpty()) {
                         MainActivity.copyFile(p_context, srcPath, destPath)
                     } else {
                         val dir = File(destPath)
-                        if (!dir.exists()) dir.mkdir()
+                        if (!dir.exists()) dir.mkdirs()
                         for (element in it) {
-                            copyAssetAll(p_context, srcPath + File.separator + element)
+                            copyAssetAll(p_context, srcPath + File.separator + element, rootDir)
                         }
                     }
                 }
@@ -490,13 +558,24 @@ class Main: ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Swallow back presses unconditionally. Compose BackHandlers (the
+        // in-game overlay's submenu drill-down, the library's eventual
+        // back-to-game escape, etc.) register at higher priority and
+        // consume the event when they're appropriate; this low-priority
+        // no-op catches anything they don't, so the system never falls
+        // through to finish() on the activity. Same callback also stops
+        // controller "B"/"Circle" buttons that the OS maps to KEYCODE_BACK
+        // (Xbox/DualShock default) from killing the app.
+        onBackPressedDispatcher.addCallback(this) {
+            // intentionally empty — pure stay-alive sentinel
+        }
         prefs = applicationContext.getSharedPreferences("ARMSX2", MODE_PRIVATE)
         setupComplete.value = prefs.getBoolean("setupComplete", false)
         systemDir.value = prefs.getString("systemDir", null)
         bios.value = prefs.getString("bios", null)
         biosDir.value = prefs.getString("biosDir", null)
         romsDir.value = prefs.getString("roms", null)
-        renderer.value = prefs.getString("renderer", "opengl") ?: "opengl"
+        renderer.value = prefs.getString("renderer", "auto") ?: "auto"
         upscale.value = prefs.getInt("upscale", 1)
         allFilesAccessGranted.value = !needsAllFilesAccess()
         surface.value = SurfaceCallbacks(this)
@@ -576,6 +655,16 @@ class Main: ComponentActivity() {
                         tested = true
                     }
                     if (surface.value != null) {
+                        // Pull Compose focus onto the surface as soon as it's
+                        // composed. Without this the AndroidView starts
+                        // un-focused, so onKeyEvent silently drops gamepad
+                        // input until the user taps the screen / presses A
+                        // to grant focus by hand. Also re-runs whenever
+                        // surface.value changes (e.g. after orientation
+                        // change rebuilds the SurfaceView).
+                        androidx.compose.runtime.LaunchedEffect(surface.value) {
+                            focusRequester.requestFocus()
+                        }
                         AndroidView(factory = { surface.value!! }, modifier = Modifier
                             .focusable()
                             .focusRequester(focusRequester)
