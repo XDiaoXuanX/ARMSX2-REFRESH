@@ -1311,7 +1311,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 		// fallback path → physics OK), once without (forces native →
 		// physics broken). Diff the PRE+POST dumps from each run; first
 		// field that differs is the JIT's hidden side-effect.
-		const bool probe_this_pair = (pc == 0x04D8u);
+		const bool probe_this_pair = false;
 		if (probe_this_pair)
 		{
 			armAsm->Mov(x0, VU0_BASE_REG);
