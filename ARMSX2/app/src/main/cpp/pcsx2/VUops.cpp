@@ -1681,16 +1681,26 @@ static __ri void _vuWAITP(VURegs* VU)
 {
 }
 
+// EFU dot-product helpers. The `x*x + y*y + z*z` shape fuses to two
+// FMADDs under `-ffp-contract=fast` (PCSX2_FLAGS in pcsx2/CMakeLists.txt:30).
+// PS2 EFU does separate mul+add per term — explicit `volatile` per-product
+// matches the file-scope `#pragma STDC FP_CONTRACT OFF` (which empirically
+// doesn't survive Clang's optimizer; see the VU MADD fix). Sibling pattern
+// to `_vuOpMADD`'s `volatile float prod` workaround.
 static __ri void _vuESADD(VURegs* VU)
 {
-	float p = vuDouble(VU->VF[_Fs_].i.x) * vuDouble(VU->VF[_Fs_].i.x) + vuDouble(VU->VF[_Fs_].i.y) * vuDouble(VU->VF[_Fs_].i.y) + vuDouble(VU->VF[_Fs_].i.z) * vuDouble(VU->VF[_Fs_].i.z);
-
-	VU->p.F = p;
+	const volatile float xx = vuDouble(VU->VF[_Fs_].i.x) * vuDouble(VU->VF[_Fs_].i.x);
+	const volatile float yy = vuDouble(VU->VF[_Fs_].i.y) * vuDouble(VU->VF[_Fs_].i.y);
+	const volatile float zz = vuDouble(VU->VF[_Fs_].i.z) * vuDouble(VU->VF[_Fs_].i.z);
+	VU->p.F = xx + yy + zz;
 }
 
 static __ri void _vuERSADD(VURegs* VU)
 {
-	float p = (vuDouble(VU->VF[_Fs_].i.x) * vuDouble(VU->VF[_Fs_].i.x)) + (vuDouble(VU->VF[_Fs_].i.y) * vuDouble(VU->VF[_Fs_].i.y)) + (vuDouble(VU->VF[_Fs_].i.z) * vuDouble(VU->VF[_Fs_].i.z));
+	const volatile float xx = vuDouble(VU->VF[_Fs_].i.x) * vuDouble(VU->VF[_Fs_].i.x);
+	const volatile float yy = vuDouble(VU->VF[_Fs_].i.y) * vuDouble(VU->VF[_Fs_].i.y);
+	const volatile float zz = vuDouble(VU->VF[_Fs_].i.z) * vuDouble(VU->VF[_Fs_].i.z);
+	float p = xx + yy + zz;
 
 	if (p != 0.0)
 		p = 1.0f / p;
@@ -1700,7 +1710,10 @@ static __ri void _vuERSADD(VURegs* VU)
 
 static __ri void _vuELENG(VURegs* VU)
 {
-	float p = vuDouble(VU->VF[_Fs_].i.x) * vuDouble(VU->VF[_Fs_].i.x) + vuDouble(VU->VF[_Fs_].i.y) * vuDouble(VU->VF[_Fs_].i.y) + vuDouble(VU->VF[_Fs_].i.z) * vuDouble(VU->VF[_Fs_].i.z);
+	const volatile float xx = vuDouble(VU->VF[_Fs_].i.x) * vuDouble(VU->VF[_Fs_].i.x);
+	const volatile float yy = vuDouble(VU->VF[_Fs_].i.y) * vuDouble(VU->VF[_Fs_].i.y);
+	const volatile float zz = vuDouble(VU->VF[_Fs_].i.z) * vuDouble(VU->VF[_Fs_].i.z);
+	float p = xx + yy + zz;
 
 	if (p >= 0)
 	{
@@ -1711,7 +1724,10 @@ static __ri void _vuELENG(VURegs* VU)
 
 static __ri void _vuERLENG(VURegs* VU)
 {
-	float p = vuDouble(VU->VF[_Fs_].i.x) * vuDouble(VU->VF[_Fs_].i.x) + vuDouble(VU->VF[_Fs_].i.y) * vuDouble(VU->VF[_Fs_].i.y) + vuDouble(VU->VF[_Fs_].i.z) * vuDouble(VU->VF[_Fs_].i.z);
+	const volatile float xx = vuDouble(VU->VF[_Fs_].i.x) * vuDouble(VU->VF[_Fs_].i.x);
+	const volatile float yy = vuDouble(VU->VF[_Fs_].i.y) * vuDouble(VU->VF[_Fs_].i.y);
+	const volatile float zz = vuDouble(VU->VF[_Fs_].i.z) * vuDouble(VU->VF[_Fs_].i.z);
+	float p = xx + yy + zz;
 
 	if (p >= 0)
 	{
@@ -1818,7 +1834,16 @@ static __ri void _vuESIN(VURegs* VU)
 	float sinconsts[5] = {1.0f, -0.166666567325592f, 0.008333025500178f, -0.000198074136279f, 0.000002601886990f};
 	float p = vuDouble(VU->VF[_Fs_].UL[_Fsf_]);
 
-	p = (sinconsts[0] * p) + (sinconsts[1] * pow(p, 3)) + (sinconsts[2] * pow(p, 5)) + (sinconsts[3] * pow(p, 7)) + (sinconsts[4] * pow(p, 9));
+	// Taylor series for sin(p) — each `c[k] * pow(p, n)` term followed
+	// by `+` is FMA-fusable. Force two-rounding per term to match the
+	// JITs and bit-stable interp output. Keeps EFU output reproducible
+	// across builds + matches PS2 EFU semantics (per-term mul, then add).
+	const volatile float t0 = sinconsts[0] * p;
+	const volatile float t1 = sinconsts[1] * pow(p, 3);
+	const volatile float t2 = sinconsts[2] * pow(p, 5);
+	const volatile float t3 = sinconsts[3] * pow(p, 7);
+	const volatile float t4 = sinconsts[4] * pow(p, 9);
+	p = t0 + t1 + t2 + t3 + t4;
 	VU->p.F = vuDouble(*(u32*)&p);
 }
 
@@ -1828,7 +1853,14 @@ static __ri void _vuEEXP(VURegs* VU)
 						0.000171562001924f, 0.000005430199963f, 0.000000690600018f};
 	float p = vuDouble(VU->VF[_Fs_].UL[_Fsf_]);
 
-	p = 1.0f + (consts[0] * p) + (consts[1] * pow(p, 2)) + (consts[2] * pow(p, 3)) + (consts[3] * pow(p, 4)) + (consts[4] * pow(p, 5)) + (consts[5] * pow(p, 6));
+	// See _vuESIN comment — same FMA-fusion shape on per-term polynomials.
+	const volatile float t0 = consts[0] * p;
+	const volatile float t1 = consts[1] * pow(p, 2);
+	const volatile float t2 = consts[2] * pow(p, 3);
+	const volatile float t3 = consts[3] * pow(p, 4);
+	const volatile float t4 = consts[4] * pow(p, 5);
+	const volatile float t5 = consts[5] * pow(p, 6);
+	p = 1.0f + t0 + t1 + t2 + t3 + t4 + t5;
 	p = pow(p, 4);
 	p = vuDouble(*(u32*)&p);
 	p = 1 / p;

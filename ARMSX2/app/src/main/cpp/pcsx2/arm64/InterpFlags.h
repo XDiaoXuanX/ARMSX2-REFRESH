@@ -100,13 +100,29 @@
 // The bug is in a pair the harness can't observe — likely a hazard pair
 // fallback (the harness skips fallback pairs entirely) or external state
 // the per-pair compare doesn't capture (vif0Regs, EE memory, etc.).
-// Bisect result: BUGGY PAIR ISOLATED at pc=0x4D8.
-// pc=0x4D0 was native-buggy → bug is in the second pair of 0x4D0-0x4DF.
-// Confirming by routing only that one pair through interp.
-//   physics OK → confirmed. Read upper at Micro[0x4DC], lower at
-//                Micro[0x4D8] and inspect JIT emit vs x86 microVU.
-#define INTERP_VU0_PC_LOW  0x04D8u
-#define INTERP_VU0_PC_HIGH 0x04DFu
+// Symptom #1 (MGS2 ledge teleport + back-facing invisible walls): pinned
+// to pc=0x4D8 — keep this range stable across symptom #2 bisect rounds.
+//#define INTERP_VU0_PC_LOW  0x04D8u
+//#define INTERP_VU0_PC_HIGH 0x04DFu
+
+// Symptom #2 (MGS2 bullets hit invisible walls, cannot descend stairs):
+// INTERACTING-PAIR bug at pc=0x168 + pc=0x170. Routing either pair alone
+// is NOT enough — both must take the vu0Exec fallback simultaneously.
+// Bisect cascade summary:
+//   0x140-0x17F OK; 0x140-0x15F BROKEN; 0x160-0x17F OK
+//   0x160-0x16F BROKEN; 0x170-0x17F BROKEN; 0x168-0x17F OK
+//   0x168-0x177 OK (covers both 0x168 + 0x170 pairs, drops 0x178)
+// → both 0x168 and 0x170 pairs are critical and interact. Likely one
+//   writes a VF/VI/ACC value the other reads, with a JIT-emit bug at the
+//   data handoff. To investigate: disassemble VU0 micro at:
+//     pc=0x168: lower at Micro[0x168], upper at Micro[0x16C]
+//     pc=0x170: lower at Micro[0x170], upper at Micro[0x174]
+//   and audit the JIT emit vs x86 microVU.
+//
+// Range 2 below pins both pairs through interp until the JIT bug is fixed.
+// Range1 (above) pins symptom #1 at 0x4D8.
+//#define INTERP_VU0_PC_LOW2  0x0168u
+//#define INTERP_VU0_PC_HIGH2 0x0177u
 
 // Diagnostic: per-op JIT symbol registration with simpleperf. When defined,
 // each emitted op is registered as a separate symbol (e.g. `EE_OP_lui_0x123`,
