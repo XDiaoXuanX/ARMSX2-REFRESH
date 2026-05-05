@@ -135,6 +135,8 @@ object SetupImpl {
         // copy. The pref already points at outFile and emucore is happy.
         if (outFile.absolutePath == Main.bios.value && outFile.exists()) {
             configuredBiosInfo.value = bios.info
+            // Still push the filename — see comment below for why.
+            NativeApp.setSetting("Filenames", "BIOS", "string", outFile.name)
             return outFile.absolutePath
         }
 
@@ -145,6 +147,17 @@ object SetupImpl {
             Main.bios.value = outFile.absolutePath
             Main.prefs.edit().putString("bios", outFile.absolutePath).apply()
             configuredBiosInfo.value = bios.info
+
+            // emucore's LoadBIOS calls FullpathToBios() = EmuFolders::Bios +
+            // BaseFilenames.Bios. When BaseFilenames.Bios is empty (no setting
+            // pushed) it falls back to FindBiosImage(), which alphabetically
+            // scans the bios folder and returns the FIRST valid match — so
+            // re-entering setup and picking a different BIOS would copy it
+            // but emucore would keep using whatever sorted first. Pushing
+            // "Filenames/BIOS" makes FullpathToBios() pin to this exact file.
+            // Section/key matches PCSX2's FilenameOptions::LoadSave (Pcsx2Config.cpp:1694)
+            // and the ImGui FullscreenUI BIOS picker (FullscreenUI_Settings.cpp:2481).
+            NativeApp.setSetting("Filenames", "BIOS", "string", outFile.name)
             outFile.absolutePath
         } catch (_: Exception) {
             null
