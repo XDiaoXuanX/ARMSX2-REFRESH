@@ -158,6 +158,23 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
         // RenderModeButton (cycles VULKAN_SW ↔ OPENGL). VK HW is intentionally
         // not in the cycle while its blending bugs remain unresolved.
 
+        // OpenGL HW: force texture barriers via glMemoryBarrier on mobile.
+        // Default `OverrideTextureBarriers = -1` (auto) leaves barrier behavior
+        // up to extension detection — and on Adreno/Mali, neither
+        // `GL_ARB_texture_barrier` nor `GL_NV_texture_barrier` is present, so
+        // PCSX2 silently installs a no-op `ReplaceGL::TextureBarrier`
+        // (GSDeviceOGL.cpp:55-58) and switches to the multidraw_fb_copy
+        // fallback. That fallback has a suspected coherence bug for SH2
+        // model rendering — geometry pops in/out across feedback-loop draws.
+        //
+        // Override to `1` (Force Enabled) to switch the fallback to
+        // `MemoryBarrierAsTextureBarrier` (GSDeviceOGL.cpp:50-53), which
+        // emits `glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)` between
+        // the read+write halves of feedback draws. GLES 3.1+ supports this
+        // unambiguously. Diagnostic experiment for SH2 pop-in (Test 1 from
+        // the OpenGL HW mobile audit, 2026-05-06).
+        si.SetIntValue("EmuCore/GS", "OverrideTextureBarriers", 1);
+
         // none of the bindings are going to resolve to anything
         Pad::ClearPortBindings(si, 0);
         si.ClearSection("Hotkeys");

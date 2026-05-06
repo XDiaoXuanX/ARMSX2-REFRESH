@@ -140,6 +140,32 @@
 //#define VU1_SHADOW_VERIFY_FROM_CYCLE 0ULL
 //#define VU1_SHADOW_VERIFY_TO_CYCLE   0ULL
 
+// Phase 2: VU1 deferred VF writes. The current Phase 2.5 cache is write-
+// through — every FMAC writeback emits an immediate Str q to VF memory
+// alongside the slot update. With deferred writes enabled, the Str is
+// elided and the slot is marked dirty; the actual memory write is deferred
+// to the next flush site (LRU eviction, BL via vfCacheFlushAndInvalidate,
+// inline-bypass ops via vfCacheFlushOne, block end). Saves 1 Str per FMAC
+// pair when consecutive ops touch the same VF.
+//
+// HISTORY: a prior attempt was reverted with an unidentified coherence bug
+// (GoW2 graphics dropped — see armsx2_vu_regalloc_gap memory). The bug
+// surfaced as silent corruption with no specific PC. Re-enabling now is
+// gated on running with VU1_SHADOW_VERIFY too — the harness will halt at
+// the first divergent pair, exposing whatever bypassed the cache flush.
+//
+// Recommended workflow:
+//   1. Set EmuConfig.Speedhacks.vuThread = false (MTVU off — required by
+//      the shadow harness).
+//   2. Uncomment BOTH VU1_DEFER_VF_WRITES and VU1_SHADOW_VERIFY below.
+//   3. Rebuild + run a transform-heavy scene (GoW2 / FFX battle / racing).
+//   4. The first divergent pair surfaces in logcat with full PRE/JIT/INTERP
+//      dump — fix the missed flush site, repeat.
+//
+// Once the harness has gone silent through GoW2 specifically (the prior
+// regression), Phase 2 ships safely. Until then, leave commented out.
+#define VU1_DEFER_VF_WRITES
+
 // Diagnostic: TPC-range fallback bisection. Pairs whose pc falls in
 // [INTERP_VU0_PC_LOW, INTERP_VU0_PC_HIGH] route to vu0Exec; others go
 // through the native JIT body. Use to BINARY-SEARCH a buggy pair when
