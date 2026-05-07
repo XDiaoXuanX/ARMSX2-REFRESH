@@ -25,12 +25,12 @@
         <item>Bob BFF</item>
         <item>Blend TFF</item>
         <item>Blend BFF</item>
-        <item>Adaptive TFF</item>
-        <item>Adaptive BFF</item>
+        <item>Adaptív TFF</item>
+        <item>Adaptív BFF</item>
     </string-array>
     <string-array name="cas_modes">
         <item>Ki (alapértelmezés)</item>
-        <item>Sharpen Only (Internal)</item>
+        <item>Csak élesítés (Belső)</item>
         <item>Élesítés és újraméretezés (Kijelző)</item>
     </string-array>
     <string-array name="texture_preloading">
@@ -78,9 +78,9 @@
         <item>10:7</item>
     </string-array>
     <string-array name="resolution_scales">
-        <item>0.25x</item>
-        <item>0.5x</item>
-        <item>0.75x</item>
+        <item>0,25x</item>
+        <item>0,5x</item>
+        <item>0,75x</item>
         <item>1x</item>
         <item>2x</item>
         <item>3x</item>
@@ -92,7 +92,7 @@
     </string-array>
     <string-array name="auto_flush_hw">
         <item>Kikapcsolva</item>
-        <item>Sprites Only</item>
+        <item>Csak Spriteok</item>
         <item>Engedélyezve</item>
     </string-array>
     <string-array name="cpu_cores_basic">
@@ -101,8 +101,8 @@
     </string-array>
     <string-array name="network_ethapi">
         <item>Nincs beállítva</item>
-        <item>PCAP Bridged</item>
-        <item>PCAP Switched</item>
-        <item>Sockets</item>
+        <item>PCAP Áthidalt</item>
+        <item>PCAP Átváltott</item>
+        <item>Foglalatok</item>
     </string-array>
 </resources>
