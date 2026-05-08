@@ -3,84 +3,84 @@
     <string-array name="renderers">
         <item>Auto</item>
         <item>OpenGL</item>
-        <item>Software</item>
+        <item>Programvara</item>
         <item>Vulkan</item>
     </string-array>
     <string-array name="gpu_profile_override">
-        <item>Auto (Recommended)</item>
-        <item>Force Mali</item>
-        <item>Force Adreno</item>
+        <item>Auto (Rekommenderat)</item>
+        <item>Tvinga Mali</item>
+        <item>Tvinga Adreno</item>
     </string-array>
     <string-array name="texture_filtering">
-        <item>PS2 (default)</item>
-        <item>Forced</item>
-        <item>Nearest</item>
+        <item>PS2 (standard)</item>
+        <item>Tvingad</item>
+        <item>Närmaste</item>
     </string-array>
     <string-array name="interlace_modes">
-        <item>Automatic</item>
-        <item>Off</item>
-        <item>Weave TFF</item>
-        <item>Weave BFF</item>
+        <item>Automatisk</item>
+        <item>Av</item>
+        <item>Väva TFF</item>
+        <item>Väva BFF</item>
         <item>Bob TFF</item>
         <item>Bob BFF</item>
-        <item>Blend TFF</item>
-        <item>Blend BFF</item>
-        <item>Adaptive TFF</item>
-        <item>Adaptive BFF</item>
+        <item>Blanda TFF</item>
+        <item>Blanda BFF</item>
+        <item>Adaptiv TFF</item>
+        <item>Adaptiv BFF</item>
     </string-array>
     <string-array name="cas_modes">
-        <item>None (Default)</item>
-        <item>Sharpen Only (Internal)</item>
-        <item>Sharpen and Resize (Display)</item>
+        <item>Ingen (standard)</item>
+        <item>Enbart skärpa (internt)</item>
+        <item>Skärpa och ändra storlek (Visa)</item>
     </string-array>
     <string-array name="texture_preloading">
-        <item>Off</item>
-        <item>Partial</item>
+        <item>Av</item>
+        <item>Partiell</item>
         <item>Full</item>
     </string-array>
     <string-array name="bilinear_present">
-        <item>Off</item>
-        <item>Bilinear (Smooth)</item>
-        <item>Bilinear (Sharp)</item>
+        <item>Av</item>
+        <item>Bilinjär (mjuk)</item>
+        <item>Bilinjär (Skarp)</item>
     </string-array>
     <string-array name="trilinear_filtering">
-        <item>Automatic</item>
-        <item>Off</item>
+        <item>Automatisk</item>
+        <item>Av</item>
         <item>PS2</item>
-        <item>Forced</item>
+        <item>Tvingad</item>
     </string-array>
     <string-array name="dithering_modes">
-        <item>Off</item>
-        <item>Scaled</item>
-        <item>Unscaled (Default)</item>
-        <item>Force 32-bit</item>
+        <item>Av</item>
+        <item>Skalad</item>
+        <item>Oskalad (standard)</item>
+        <item>Tvinga 32-bitars</item>
     </string-array>
     <string-array name="acc_blending">
         <item>Minimum</item>
-        <item>Basic</item>
-        <item>Medium</item>
-        <item>High</item>
+        <item>Grundläggande</item>
+        <item>Medelhög</item>
+        <item>Hög</item>
         <item>Full</item>
-        <item>Maximum</item>
+        <item>Maximalt</item>
     </string-array>
     <string-array name="anisotropic">
-        <item>Off</item>
+        <item>Av</item>
         <item>2x</item>
         <item>4x</item>
         <item>8x</item>
         <item>16x</item>
     </string-array>
     <string-array name="aspect_ratios">
-        <item>Stretch</item>
-        <item>Auto 4:3/3:2</item>
+        <item>Sträcka</item>
+        <item>Automatisk 4:3/3:2</item>
         <item>4:3</item>
         <item>16:9</item>
         <item>10:7</item>
     </string-array>
     <string-array name="resolution_scales">
-        <item>0.25x</item>
-        <item>0.5x</item>
-        <item>0.75x</item>
+        <item>0,25x</item>
+        <item>0,5x</item>
+        <item>0,75x</item>
         <item>1x</item>
         <item>2x</item>
         <item>3x</item>
@@ -91,18 +91,18 @@
         <item>8x</item>
     </string-array>
     <string-array name="auto_flush_hw">
-        <item>Disabled</item>
-        <item>Sprites Only</item>
-        <item>Enabled</item>
+        <item>Inaktiverad</item>
+        <item>Endast Sprites</item>
+        <item>Aktiverad</item>
     </string-array>
     <string-array name="cpu_cores_basic">
-        <item>Translator (default)</item>
-        <item>Interpreter</item>
+        <item>Översättare (standard)</item>
+        <item>Tolk</item>
     </string-array>
     <string-array name="network_ethapi">
-        <item>Unset</item>
-        <item>PCAP Bridged</item>
-        <item>PCAP Switched</item>
-        <item>Sockets</item>
+        <item>Obestämt</item>
+        <item>PCAP-bryggat läge</item>
+        <item>PCAP bytt</item>
+        <item>Uttag</item>
     </string-array>
 </resources>
