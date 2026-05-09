@@ -189,7 +189,25 @@ class Main: ComponentActivity() {
         // re-entering setup can re-scan the original folder without
         // forcing the user to re-pick.
         val biosDir = mutableStateOf<String?>(null)
-        val romsDir = mutableStateOf<String?>(null)
+
+        /** Persisted list of ROM-folder tree URIs. Replaces the legacy
+         *  single-folder `romsDir` pref (kept readable as a one-element
+         *  list at load time). The setup wizard's ROMs page lets the user
+         *  add/remove entries; GamesList scans every entry and merges
+         *  results de-duplicated by URI. Empty list = no library. */
+        val romsDirs = mutableStateOf<List<String>>(emptyList())
+
+        /** Update [romsDirs] state and persist as JSON. Drops the legacy
+         *  single-string pref so we don't keep two views in sync forever. */
+        fun setRomsDirs(dirs: List<String>) {
+            romsDirs.value = dirs
+            val arr = org.json.JSONArray()
+            for (d in dirs) arr.put(d)
+            prefs.edit()
+                .putString("romsDirs", arr.toString())
+                .remove("roms")
+                .apply()
+        }
 
         // Default backend is "auto" — emucore's GSUtil::GetPreferredRenderer
         // picks at runtime per device. The setup wizard no longer asks; the
@@ -574,6 +592,26 @@ class Main: ComponentActivity() {
         invoke {
             NativeApp.initializeOnce(applicationContext)
 
+            // Pin Filenames/BIOS to the file the setup wizard copied —
+            // deferred to here because Host::SetBaseStringSettingValue
+            // null-derefs when called before initializeOnce installs the
+            // base settings layer. finishBiosStep (in SetupImpl) only
+            // persists to Main.bios + Java prefs; the actual setSetting
+            // happens here, AFTER the layer is installed AND
+            // SetDefaultSettings has run (so default-empty doesn't
+            // overwrite our pin).
+            //
+            // Without this pin emucore's LoadBIOS falls back to
+            // FindBiosImage()'s alphabetical scan, ignoring the wizard's
+            // selection — see armsx2_bios_filename_pin memo.
+            bios.value?.let { biosPath ->
+                val name = File(biosPath).name
+                if (name.isNotEmpty()) {
+                    NativeApp.setSetting("Filenames", "BIOS", "string", name)
+                    NativeApp.commitSettings()
+                }
+            }
+
             // Set up JNI
             SDLControllerManager.nativeSetupJNI()
             SDLControllerManager.initialize()
@@ -620,7 +658,23 @@ class Main: ComponentActivity() {
         systemDir.value = prefs.getString("systemDir", null)
         bios.value = prefs.getString("bios", null)
         biosDir.value = prefs.getString("biosDir", null)
-        romsDir.value = prefs.getString("roms", null)
+        // Load roms folders. New format: JSON array under "romsDirs" pref.
+        // Legacy format: single string under "roms" pref (pre-multi-dir).
+        // Migration path: read legacy if present, hoist into the list, keep
+        // both keys in sync until the user re-confirms in setup. Once the
+        // user adds/removes via the new picker the legacy key is dropped.
+        romsDirs.value = run {
+            val newJson = prefs.getString("romsDirs", null)
+            if (newJson != null) {
+                runCatching {
+                    val arr = org.json.JSONArray(newJson)
+                    List(arr.length()) { arr.getString(it) }
+                }.getOrDefault(emptyList())
+            } else {
+                val legacy = prefs.getString("roms", null)
+                if (legacy != null) listOf(legacy) else emptyList()
+            }
+        }
         renderer.value = prefs.getString("renderer", "auto") ?: "auto"
         upscale.value = prefs.getInt("upscale", 1)
         allFilesAccessGranted.value = !needsAllFilesAccess()

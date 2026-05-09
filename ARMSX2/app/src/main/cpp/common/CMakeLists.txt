@@ -202,6 +202,16 @@ if(NOT WIN32 AND NOT ANDROID)
 	)
 endif()
 
+if(ANDROID)
+	# JNI-bridged HTTPDownloader (uses java.net.HttpURLConnection via the
+	# kr.co.iefriends.pcsx2.HttpClient helper). Avoids bundling libcurl +
+	# OpenSSL/mbedTLS for Android — the platform ships its own TLS stack.
+	target_sources(common PRIVATE
+		HTTPDownloaderAndroid.cpp
+		HTTPDownloaderAndroid.h
+	)
+endif()
+
 target_link_libraries(common PRIVATE
 	${LIBC_LIBRARIES}
 	cpuinfo

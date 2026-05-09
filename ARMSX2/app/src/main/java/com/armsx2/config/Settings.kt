@@ -42,6 +42,20 @@ data class Settings(
     /** EmuCore/GS/FrameLimitEnable. */
     val frameLimitEnable: Boolean = true,
 
+    // ---- EmuCore/CPU/Recompiler — recompiler enables ----
+    /** EmuCore/CPU/Recompiler/EnableEE — EE (R5900) recompiler. */
+    val recEE: Boolean = true,
+    /** EmuCore/CPU/Recompiler/EnableIOP — IOP (R3000) recompiler. */
+    val recIOP: Boolean = true,
+    /** EmuCore/CPU/Recompiler/EnableVU0 — VU0 recompiler. */
+    val recVU0: Boolean = true,
+    /** EmuCore/CPU/Recompiler/EnableVU1 — VU1 recompiler. */
+    val recVU1: Boolean = true,
+    /** EmuCore/CPU/Recompiler/EnableFastmem — fastmem (page-fault backpatch
+     *  signal handler). Disabling falls back to the slow VTLB read/write
+     *  path on every memory op. */
+    val enableFastmem: Boolean = true,
+
     // ---- EmuCore/GS — renderer accuracy / quality ----
     /** EmuCore/GS/hw_mipmap. */
     val hwMipmap: Boolean = true,
@@ -76,8 +90,22 @@ data class Settings(
         NativeApp.setSetting("EmuCore/Speedhacks", "fastCDVD", "bool", fastCDVD.toString())
         NativeApp.setSetting("EmuCore/Speedhacks", "IntcStat", "bool", intcStat.toString())
         NativeApp.setSetting("EmuCore/Speedhacks", "WaitLoop", "bool", waitLoop.toString())
-        // GS frame limit
+        // GS frame limit. The setting key is persisted (read by runVMThread
+        // after Initialize so cold starts honor the preference) AND the live
+        // limiter mode is poked via speedhackLimitermode so toggling in-game
+        // takes effect immediately. 0 = Nominal (capped at native rate),
+        // 3 = Unlimited.
         NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", frameLimitEnable.toString())
+        NativeApp.speedhackLimitermode(if (frameLimitEnable) 0 else 3)
+        // Recompiler enables. Picked up by VMManager::ApplySettings →
+        // SysCpuProviderPack rebind. Toggling these on a running VM swaps
+        // the dispatch pointer; existing JIT block caches are flushed by
+        // ApplySettings's CpusChanged path.
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableEE", "bool", recEE.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableIOP", "bool", recIOP.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableVU0", "bool", recVU0.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableVU1", "bool", recVU1.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableFastmem", "bool", enableFastmem.toString())
         // GS renderer
         NativeApp.setSetting("EmuCore/GS", "hw_mipmap", "bool", hwMipmap.toString())
         NativeApp.setSetting("EmuCore/GS", "accurate_blending_unit", "int", accurateBlendingUnit.toString())
@@ -100,6 +128,11 @@ data class Settings(
         put("intcStat", intcStat)
         put("waitLoop", waitLoop)
         put("frameLimitEnable", frameLimitEnable)
+        put("recEE", recEE)
+        put("recIOP", recIOP)
+        put("recVU0", recVU0)
+        put("recVU1", recVU1)
+        put("enableFastmem", enableFastmem)
         put("hwMipmap", hwMipmap)
         put("accurateBlendingUnit", accurateBlendingUnit)
         put("textureFiltering", textureFiltering)
@@ -125,6 +158,11 @@ data class Settings(
                 intcStat = json.optBoolean("intcStat", def.intcStat),
                 waitLoop = json.optBoolean("waitLoop", def.waitLoop),
                 frameLimitEnable = json.optBoolean("frameLimitEnable", def.frameLimitEnable),
+                recEE = json.optBoolean("recEE", def.recEE),
+                recIOP = json.optBoolean("recIOP", def.recIOP),
+                recVU0 = json.optBoolean("recVU0", def.recVU0),
+                recVU1 = json.optBoolean("recVU1", def.recVU1),
+                enableFastmem = json.optBoolean("enableFastmem", def.enableFastmem),
                 hwMipmap = json.optBoolean("hwMipmap", def.hwMipmap),
                 accurateBlendingUnit = json.optInt("accurateBlendingUnit", def.accurateBlendingUnit),
                 textureFiltering = json.optInt("textureFiltering", def.textureFiltering),
@@ -147,6 +185,11 @@ data class Settings(
             intcStat = if (overrides.has("intcStat")) overrides.getBoolean("intcStat") else base.intcStat,
             waitLoop = if (overrides.has("waitLoop")) overrides.getBoolean("waitLoop") else base.waitLoop,
             frameLimitEnable = if (overrides.has("frameLimitEnable")) overrides.getBoolean("frameLimitEnable") else base.frameLimitEnable,
+            recEE = if (overrides.has("recEE")) overrides.getBoolean("recEE") else base.recEE,
+            recIOP = if (overrides.has("recIOP")) overrides.getBoolean("recIOP") else base.recIOP,
+            recVU0 = if (overrides.has("recVU0")) overrides.getBoolean("recVU0") else base.recVU0,
+            recVU1 = if (overrides.has("recVU1")) overrides.getBoolean("recVU1") else base.recVU1,
+            enableFastmem = if (overrides.has("enableFastmem")) overrides.getBoolean("enableFastmem") else base.enableFastmem,
             hwMipmap = if (overrides.has("hwMipmap")) overrides.getBoolean("hwMipmap") else base.hwMipmap,
             accurateBlendingUnit = if (overrides.has("accurateBlendingUnit")) overrides.getInt("accurateBlendingUnit") else base.accurateBlendingUnit,
             textureFiltering = if (overrides.has("textureFiltering")) overrides.getInt("textureFiltering") else base.textureFiltering,

@@ -157,6 +157,65 @@ static inline bool isVU1LowerNOP(u32 lower)
 }
 
 // ============================================================================
+//  Runtime probe for the SH2 / VI[16] divergence at pc=0x0648 (2026-05-06).
+//  Shadow-verify caught: at this pair, INTERP drains the FMAC pipe slot
+//  (writing VI[REG_STATUS_FLAG] = 0xc0) but JIT does not (leaves it at 0x40).
+//  Hypothesis: skip_info[i].skipTestPipes is true here when it shouldn't be.
+//  This helper logs the runtime FMAC pipe state right before the JIT's
+//  step-6 TestPipes gate, so we can compare against the compile-time
+//  skipTestPipes decision (logged at compile time, separately).
+// ============================================================================
+[[maybe_unused]] static void vu1_probe_pc0x648()
+{
+	// Fire only on entries where the pipe has work AND we've never seen
+	// THIS slot configuration before (keyed on fmaccount + fmacreadpos +
+	// the slot's sCycle to dedupe). The shadow-verify halt at this PC
+	// happens with fmaccount=1, fmacreadpos=1, so we want that case logged.
+	// Skip the fmaccount==0 first-entry case (already logged once and not
+	// the divergent state).
+	if (VU1.fmaccount == 0)
+		return;
+	const fmacPipe& s = VU1.fmac[VU1.fmacreadpos & 3];
+	// Dedupe by VI[16] PRE-drain — that's the field the harness flags as
+	// divergent. We want to see entries with VI[16]=0x40 specifically (the
+	// divergent PRE state). Earlier dedupes by sCycle missed this because
+	// the same slot recurs across many block invocations with VI[16]
+	// already drained to 0xc0. Bumping the dedupe to also include VI[16]
+	// + slot.statusflag + slot.flagreg surfaces the divergent shape.
+	// Cap the log to first 32 unique states so we don't drown the tombstone.
+	const u32 vi16    = VU1.VI[REG_STATUS_FLAG].UL;
+	const u32 macflag = VU1.macflag;
+	struct ProbeKey { u32 vi16; u32 statusflag; u32 flagreg; u32 macflag; };
+	static ProbeKey s_seen[32] = {};
+	static int      s_seen_count = 0;
+	const ProbeKey k{vi16, s.statusflag, (u32)s.flagreg, macflag};
+	for (int i = 0; i < s_seen_count; i++)
+	{
+		if (s_seen[i].vi16 == k.vi16 && s_seen[i].statusflag == k.statusflag
+		 && s_seen[i].flagreg == k.flagreg && s_seen[i].macflag == k.macflag)
+			return;
+	}
+	if (s_seen_count < 32)
+		s_seen[s_seen_count++] = k;
+	// Use Error (not WriteLn) so the line survives the std::abort in
+	// vu1_shadow_halt — WriteLn output goes through a buffered stdio path
+	// that may not flush on abort.
+	Console.Error("VU1 PROBE pc=0x0648 RUNTIME fmaccount=%u fmacreadpos=%u "
+	                "fmacwritepos=%u cycle=%llu  slot[%u]: sCycle=%llu Cycle=%u "
+	                "regupper=%u reglower=%u flagreg=0x%x xyzwupper=0x%x xyzwlower=0x%x "
+	                "macflag=0x%08x statusflag=0x%08x clipflag=0x%08x  "
+	                "VI[16]=0x%08x  matures? (cycle - sCycle = %lld) >= Cycle (%u) -> %d",
+		VU1.fmaccount, VU1.fmacreadpos, VU1.fmacwritepos,
+		(unsigned long long)VU1.cycle, VU1.fmacreadpos & 3,
+		(unsigned long long)s.sCycle, s.Cycle,
+		s.regupper, s.reglower, (u32)s.flagreg, s.xyzwupper, s.xyzwlower,
+		s.macflag, s.statusflag, s.clipflag,
+		VU1.VI[REG_STATUS_FLAG].UL,
+		(long long)((s64)VU1.cycle - (s64)s.sCycle), s.Cycle,
+		(int)((s64)(VU1.cycle - s.sCycle) >= (s64)s.Cycle));
+}
+
+// ============================================================================
 //  Shadow-compare debug harness (VU1_SHADOW_VERIFY).
 //
 //  Mirrors the VU0 harness in iVU0micro_arm64.cpp. Hooks into the native
@@ -626,6 +685,164 @@ static void vu1_shadow_verify(u32 pc)
 			std::memcpy(VU1.Mem, s_v1_shadow_post_mem, VU1_MEMSIZE);
 	}
 }
+
+// ============================================================================
+//  Block-level shadow harness
+//
+//  Per-pair shadow flushes the VF (NEON) cache before every snapshot/verify
+//  BL — that's correct for finding per-pair semantic bugs, but it MASKS
+//  cross-pair coherence bugs. Specifically: under VU1_DEFER_VF_WRITES, pair
+//  K's FMAC writeback stays in a NEON cache slot until a flush site fires.
+//  If pair K+M reads VF[X] memory directly (e.g. via inline Ldr in MTIR /
+//  MFP / MFIR / LQ family) without a paired vfCacheFlushOne(X), it sees
+//  stale memory. Per-pair shadow's pre-snapshot flush forces memory coherent
+//  at every pair boundary, so K+M's emitted code reads correct memory under
+//  shadow but stale memory in real execution. Bug invisible to per-pair.
+//
+//  Block-level shadow runs the WHOLE block end-to-end with the cache living
+//  across pairs (matching real execution), then compares end-of-block state.
+//  Block epilogue's vfCacheFlushAndInvalidate commits all deferred writes
+//  before snapshot-post. A coherence bug shows up as a divergent VF/VI/Mem
+//  in the end state.
+//
+//  Gated separately on VU1_BLOCK_SHADOW_VERIFY so per-pair (`VU1_SHADOW_VERIFY`)
+//  can run independently for finding per-pair bugs. Enable both for full
+//  coverage; expect per-pair to fire first if the bug surfaces per-pair.
+// ============================================================================
+
+#ifdef VU1_BLOCK_SHADOW_VERIFY
+alignas(16) static u8 s_v1_block_shadow_pre [sizeof(VURegs)];
+alignas(16) static u8 s_v1_block_shadow_post[sizeof(VURegs)];
+alignas(16) static u8 s_v1_block_shadow_pre_mem [VU1_MEMSIZE];
+alignas(16) static u8 s_v1_block_shadow_post_mem[VU1_MEMSIZE];
+static bool s_v1_block_shadow_skip = false;
+
+static void vu1_block_shadow_snapshot()
+{
+	if (s_v1_shadow_diverged.load(std::memory_order_relaxed)) { s_v1_block_shadow_skip = true; return; }
+	if (THREAD_VU1) { s_v1_block_shadow_skip = true; return; }
+	s_v1_block_shadow_skip = false;
+	std::memcpy(s_v1_block_shadow_pre, &VU1, sizeof(VURegs));
+	if (VU1.Mem)
+		std::memcpy(s_v1_block_shadow_pre_mem, VU1.Mem, VU1_MEMSIZE);
+}
+
+// startPC: JIT's compile-time block start (byte units within the program).
+// numPairs: max number of pairs the JIT compiled. Interp may stop sooner if
+// VPU_STAT clears (ebit) — the loop checks the same condition each iter.
+static void vu1_block_shadow_verify(u32 startPC, u32 numPairs)
+{
+	if (s_v1_block_shadow_skip) return;
+	if (s_v1_shadow_diverged.load(std::memory_order_relaxed)) return;
+
+	// Capture post-JIT block state. By this point the JIT's epilogue has
+	// run vfCacheFlushAndInvalidate, so all deferred writes are in memory.
+	std::memcpy(s_v1_block_shadow_post, &VU1, sizeof(VURegs));
+	if (VU1.Mem)
+		std::memcpy(s_v1_block_shadow_post_mem, VU1.Mem, VU1_MEMSIZE);
+
+	// Restore pre-block state for interp re-run.
+	std::memcpy(&VU1, s_v1_block_shadow_pre, sizeof(VURegs));
+	if (VU1.Mem)
+		std::memcpy(VU1.Mem, s_v1_block_shadow_pre_mem, VU1_MEMSIZE);
+	VU1.VI[REG_TPC].UL = startPC;
+
+	// Replay interp pair-by-pair. VU1's program-end signal is VPU_STAT
+	// bit 0x100 cleared by vu1EbitDone. The numPairs cap prevents runaway
+	// if a JIT bug produces a post-state where VPU_STAT stays set.
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		if (!(VU0.VI[REG_VPU_STAT].UL & 0x100))
+		{
+			if (VU1.branch)
+			{
+				VU1.VI[REG_TPC].UL = VU1.branchpc;
+				VU1.branch = 0;
+			}
+			break;
+		}
+		vu1Exec(&VU1);
+	}
+
+	// Compare end-of-block JIT state (in s_v1_block_shadow_post*) vs interp
+	// end-state (now in live VU1 / VU1.Mem after the replay).
+	const VURegs* jit  = reinterpret_cast<const VURegs*>(s_v1_block_shadow_post);
+	const VURegs* iref = &VU1;
+	bool diverged = false;
+
+	auto blk_check_u32 = [&](const char* name, u32 j, u32 i) -> bool {
+		if (j != i) {
+			vu1_shadow_log(startPC, name, "BLOCK jit=0x%08x interp=0x%08x", j, i);
+			return true;
+		}
+		return false;
+	};
+
+	// VFs — strict bit-exact compare at block scope (no ULP tolerance:
+	// block-end state is settled, intermediate rounding has converged).
+	// Real coherence bugs produce stale-read garbage, not 1-ULP drift.
+	for (u32 v = 0; v < 32 && !diverged; v++)
+	{
+		if (std::memcmp(&jit->VF[v], &iref->VF[v], sizeof(VECTOR)) != 0)
+		{
+			char fname[16];
+			std::snprintf(fname, sizeof(fname), "VF[%u]", v);
+			vu1_shadow_log(startPC, fname,
+				"BLOCK jit={%08x,%08x,%08x,%08x} interp={%08x,%08x,%08x,%08x}",
+				jit->VF[v].UL[0], jit->VF[v].UL[1], jit->VF[v].UL[2], jit->VF[v].UL[3],
+				iref->VF[v].UL[0], iref->VF[v].UL[1], iref->VF[v].UL[2], iref->VF[v].UL[3]);
+			diverged = true;
+		}
+	}
+
+	if (!diverged && std::memcmp(&jit->ACC, &iref->ACC, sizeof(VECTOR)) != 0)
+	{
+		vu1_shadow_log(startPC, "ACC",
+			"BLOCK jit={%08x,%08x,%08x,%08x} interp={%08x,%08x,%08x,%08x}",
+			jit->ACC.UL[0], jit->ACC.UL[1], jit->ACC.UL[2], jit->ACC.UL[3],
+			iref->ACC.UL[0], iref->ACC.UL[1], iref->ACC.UL[2], iref->ACC.UL[3]);
+		diverged = true;
+	}
+
+	for (u32 v = 0; v < 32 && !diverged; v++)
+	{
+		if (v == REG_VPU_STAT) continue;
+		if (v == REG_Q || v == REG_P) continue;
+		if (jit->VI[v].UL != iref->VI[v].UL)
+		{
+			char fname[16];
+			std::snprintf(fname, sizeof(fname), "VI[%u]", v);
+			diverged = blk_check_u32(fname, jit->VI[v].UL, iref->VI[v].UL);
+		}
+	}
+
+	if (!diverged && std::memcmp(VU1.Mem, s_v1_block_shadow_post_mem, VU1_MEMSIZE) != 0)
+	{
+		u32 first_diff = 0;
+		for (u32 b = 0; b < VU1_MEMSIZE; b++)
+		{
+			if (VU1.Mem[b] != s_v1_block_shadow_post_mem[b])
+			{
+				first_diff = b;
+				break;
+			}
+		}
+		vu1_shadow_log(startPC, "Mem",
+			"BLOCK first byte mismatch at offset 0x%04x  jit=0x%02x interp=0x%02x",
+			first_diff, s_v1_block_shadow_post_mem[first_diff], VU1.Mem[first_diff]);
+		diverged = true;
+	}
+
+	// Restore JIT post-state (we want the VM to keep running with whatever
+	// the JIT produced — finding the bug, not fixing it).
+	if (!diverged)
+	{
+		std::memcpy(&VU1, s_v1_block_shadow_post, sizeof(VURegs));
+		if (VU1.Mem)
+			std::memcpy(VU1.Mem, s_v1_block_shadow_post_mem, VU1_MEMSIZE);
+	}
+}
+#endif // VU1_BLOCK_SHADOW_VERIFY
 #endif // VU1_SHADOW_VERIFY
 
 // ============================================================================
@@ -1634,12 +1851,27 @@ static u32 vu1_TestPipes_VU1(VURegs* VU, u32 fmaccount_in, u64 cycle)
 	// The fdiv/efu/ialucount loads here CSE with the loads in the slow
 	// path below (same VURegs* base), so the fast-path adds 3 cmp+branch
 	// insns to the slow path — cheap.
-	if (fmaccount_in == 0
-		&& VU->fdiv.enable == 0
-		&& VU->efu.enable == 0
-		&& VU->ialucount == 0)
-	{
+	const u32 fdiv_enable_in = VU->fdiv.enable;
+	const u32 efu_enable_in  = VU->efu.enable;
+	const u32 ialucount_in   = VU->ialucount;
+	if (fmaccount_in == 0 && fdiv_enable_in == 0 && efu_enable_in == 0 && ialucount_in == 0)
 		return 0;
+
+	// Second fast-path (S26 simpleperf 2026-05-06: vu1_TestPipes_VU1 was
+	// 17.1% of total CPU). Most BLs on the slow path have fmaccount > 0
+	// while the other three rings are empty — i.e., back-to-back FMAC pairs
+	// where the front slot hasn't matured yet (Cycle=4, only 1-2 cycles
+	// have elapsed since enqueue). For that case the helper does no work:
+	// FMAC drain breaks on the first iteration, FDIV/EFU/IALU all skip via
+	// their zero gates. Returning fmaccount_in unchanged matches the slow
+	// path exactly. Costs 1 load (fmacreadpos) + 2 loads (sCycle, Cycle) +
+	// 1 sub + 1 cmp + 1 branch — ~6 cycles vs ~20+ for entering the slow
+	// path's drain loops.
+	if (fdiv_enable_in == 0 && efu_enable_in == 0 && ialucount_in == 0)
+	{
+		const fmacPipe& slot = VU->fmac[VU->fmacreadpos];
+		if ((cycle - slot.sCycle) < slot.Cycle)
+			return fmaccount_in;
 	}
 
 	u32 fmaccount = fmaccount_in;
@@ -1693,8 +1925,7 @@ static u32 vu1_TestPipes_VU1(VURegs* VU, u32 fmaccount_in, u64 cycle)
 
 	// --- IALU flush (pop only, no flag writes) ---
 	int ialureadpos = VU->ialureadpos;
-	u32 ialucount = VU->ialucount;
-	const u32 ialucount_in = ialucount;
+	u32 ialucount = ialucount_in; // initial value already loaded above for the gate
 	while (ialucount > 0)
 	{
 		const ialuPipe& slot = VU->ialu[ialureadpos];
@@ -4644,6 +4875,37 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// as the VU0 C-5 fix.
 	bool prev_was_ebit = false;
 
+#if defined(VU1_BLOCK_SHADOW_VERIFY) && defined(VU1_SHADOW_VERIFY)
+	// Block-level shadow snapshot. Emitted after the linkEntry gate (so
+	// budget-aborted entries don't snapshot) and before the per-pair body.
+	// Captures the pre-block state. Companion verify call lands right
+	// before the epilogue Ldp/Ret — by then vfCacheFlushAndInvalidate has
+	// committed all deferred VF writes to memory, so the snapshot-post is
+	// JIT's authoritative end-of-block state.
+	//
+	// Skip if any pair in the block is an XGKICK — the interp re-run would
+	// duplicate GS packet writes (same constraint as per-pair). Detected
+	// at compile time via ir.info[].isKick.
+	bool block_has_xgkick = false;
+	for (u32 ki = 0; ki < numPairs; ki++)
+	{
+		if (ir.info[ki].isKick) { block_has_xgkick = true; break; }
+	}
+	if (!block_has_xgkick)
+	{
+		// Flush pinned VU1 state + caches so the snapshot reads coherent
+		// memory. Mirrors the per-pair shadow snapshot site (line ~4970).
+		emitFlushCycleReg(cycle_off);
+		emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
+		emitFlushFmaccountReg(fmaccount_off);
+		emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
+		emitFlushAccReg(acc_off);
+		vfCacheFlushAndInvalidate();
+		viCacheInvalidateAll();
+		armEmitCall(reinterpret_cast<const void*>(vu1_block_shadow_snapshot));
+	}
+#endif
+
 	u32 pc = startPC;
 	for (u32 i = 0; i < numPairs; i++)
 	{
@@ -4895,6 +5157,62 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				skip_info[i].skipLowerALUStall);
 		VU1_PERF_END(_pp_s5b, "VU1_TestLower_0x%04x", pc);
 
+		// === SH2 / VI[16] divergence probe at pc=0x0648 (2026-05-06) ===
+		// Compile-time: log the pre-walk's skipTestPipes decision + the
+		// stall-skip flags + lregs/uregs pipe classifications.
+		// Runtime: BL into vu1_probe_pc0x648 to dump fmac[fmacreadpos] state
+		// at the moment the JIT would otherwise gate TestPipes. If the
+		// runtime slot has matured but skipTestPipes is true, we have the
+		// smoking gun for the skipTestPipes-unsoundness class.
+		// Disabled. Leave the helper in place for quick re-enable when
+		// chasing a similar pipe-state divergence — flip to `if 1` to fire.
+#if 0
+		if (pc == 0x0648u)
+		{
+			static bool s_logged_compile = false;
+			if (!s_logged_compile)
+			{
+				s_logged_compile = true;
+				Console.WriteLn("VU1 PROBE pc=0x0648 COMPILE-TIME: "
+					"skipTestPipes=%d skipLowerFMACStall0=%d skipLowerFMACStall1=%d "
+					"skipLowerFDIVWait=%d skipLowerEFUWait=%d skipLowerALUStall=%d "
+					"skipUpperFMACStall0=%d skipUpperFMACStall1=%d "
+					"uregs.pipe=%u lregs.pipe=%u "
+					"upper=0x%08x lower=0x%08x "
+					"ir.has_branch=%d ir.has_ebit=%d ir_op.iBit=%d ir_op.isKick=%d "
+					"numPairs=%u i=%u startPC=0x%04x",
+					(int)skip_info[i].skipTestPipes,
+					(int)skip_info[i].skipLowerFMACStall0,
+					(int)skip_info[i].skipLowerFMACStall1,
+					(int)skip_info[i].skipLowerFDIVWait,
+					(int)skip_info[i].skipLowerEFUWait,
+					(int)skip_info[i].skipLowerALUStall,
+					(int)skip_info[i].skipUpperFMACStall0,
+					(int)skip_info[i].skipUpperFMACStall1,
+					(u32)uregs.pipe, (u32)lregs.pipe,
+					upper, lower,
+					(int)ir.has_branch, (int)ir.has_ebit,
+					(int)ir_op.iBit, (int)ir_op.isKick,
+					numPairs, i, startPC);
+			}
+			// Runtime probe — full pinned-reg flush/reload around the BL.
+			// q16 (ACC) and the flag regs are caller-saved per AAPCS64; even
+			// though our helper is read-only, the C++ vfprintf path in
+			// Console.WriteLn may clobber them via varargs handling.
+			emitFlushCycleReg(cycle_off);
+			emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
+			emitFlushFmaccountReg(fmaccount_off);
+			emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
+			emitFlushAccReg(acc_off);
+			armEmitCall(reinterpret_cast<const void*>(vu1_probe_pc0x648));
+			emitReloadCycleReg(cycle_off);
+			emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
+			emitReloadFmaccountReg(fmaccount_off);
+			emitReloadFlagRegs(macflag_off, statusflag_off, clipflag_off);
+			emitReloadAccReg(acc_off);
+		}
+#endif
+
 		// 6. Test pipes (after lower stalls for non-I-bit). Uses the VU1-
 		//    specialized helper that skips the XGKICK block and the do-while
 		//    retry loop — see vu1_TestPipes_VU1 definition above. Stage B
@@ -4911,37 +5229,71 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// returns new fmaccount in w0; cycle is read-only so no reload.
 			emitDrainFmaccountReg();
 
-			// Runtime fast-path gate. perfape (Ape Escape 3 main menu)
-			// showed `vu1_TestPipes_VU1` accounting for ~15% of MTVU
-			// thread time, much of it the BL machinery — emitVu1Call
-			// emits `vfCacheFlushAndInvalidate + viCacheInvalidateAll +
-			// BL` even when at runtime the helper would immediately
-			// return because all rings are empty / FDIV+EFU disabled.
+			// Runtime fast-path gate. simpleperf (Futurama main menu,
+			// 2026-05-07) showed `vu1_TestPipes_VU1` at 31.94% of total
+			// CPU on MTVU — the existing all-empty gate (fmaccount==0
+			// AND others==0) almost never fires on FMAC-busy code, so
+			// every pair was paying the BL + helper-prologue cost.
 			//
-			// Skip the entire emitVu1Call when at runtime we can prove
-			// the helper would no-op:
-			//   fmaccount (w26) == 0 AND fdiv.enable == 0 AND
-			//   efu.enable == 0 AND ialucount == 0
+			// Two-tier gate:
+			//   1. All four counters zero → skip BL.
+			//   2. fmaccount > 0 AND fdiv/efu/ialu all zero → check FMAC
+			//      front slot maturity inline. If (cycle - sCycle) <
+			//      Cycle the slot hasn't matured yet, helper would no-op
+			//      → skip BL. This is the dominant case in transform/
+			//      skinning loops where FMAC ops fire every pair and the
+			//      pipe is full of in-flight slots that haven't had the
+			//      4-cycle latency yet.
+			//   3. Anything else → BL (helper has actual drain work).
 			//
-			// Net win in the empty case: no BL, no cache flushes, no
-			// helper-internal loads. The 4 ldrs + 4 cbzs of the gate
-			// cost ~4 cycles in the empty path; the slow path picks up
-			// the same loads via L1 (already-warm cache lines). VF/VI
-			// caches stay resident across the gated path, eliminating
-			// post-BL reload pressure when nothing actually retires.
+			// Maturity check uses the runtime cycle (VU1_CYCLE_REG = x21,
+			// already kept up-to-date with stall bumps), so it doesn't
+			// suffer the static-analysis "stall bumps make slots mature
+			// ahead of our model" pitfall that vetoes compile-time
+			// maturity-based elision (see skipTestPipes pre-walk note).
 			Label call_helper, skip_helper;
 			const int64_t fdiv_enable_off = (int64_t)offsetof(VURegs, fdiv)
 				+ (int64_t)offsetof(fdivPipe, enable);
 			const int64_t efu_enable_off  = (int64_t)offsetof(VURegs, efu)
 				+ (int64_t)offsetof(efuPipe, enable);
 			const int64_t ialucount_off   = (int64_t)offsetof(VURegs, ialucount);
-			armAsm->Cbnz(VU1_FMACCOUNT_REG, &call_helper);
+
+			// Load all three non-FMAC counters once; OR them to test
+			// "any non-FMAC pipe active." Loads are CSE'd with whatever
+			// the BL helper would do anyway (same cache lines).
 			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fdiv_enable_off));
-			armAsm->Cbnz(w4, &call_helper);
-			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, efu_enable_off));
-			armAsm->Cbnz(w4, &call_helper);
-			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, ialucount_off));
-			armAsm->Cbz(w4, &skip_helper);
+			armAsm->Ldr(w5, MemOperand(VU1_BASE_REG, efu_enable_off));
+			armAsm->Ldr(w6, MemOperand(VU1_BASE_REG, ialucount_off));
+			armAsm->Orr(w7, w4, w5);
+			armAsm->Orr(w7, w7, w6);
+
+			// Tier 1: all four counters zero → skip BL.
+			armAsm->Orr(w8, w7, VU1_FMACCOUNT_REG);
+			armAsm->Cbz(w8, &skip_helper);
+
+			// Some pipe is non-empty. If any non-FMAC pipe → BL (helper
+			// might drain FDIV/EFU result or pop matured IALU).
+			armAsm->Cbnz(w7, &call_helper);
+
+			// Tier 2: fmaccount > 0, fdiv/efu/ialu empty. Maturity check
+			// on the FMAC front slot. (slot.sCycle is u64 at offset 24,
+			// slot.Cycle is u32 at offset 32 — see fmacPipe layout in
+			// VU.h.) (pos*3)<<4 = pos*48 = sizeof(fmacPipe) trick mirrors
+			// the emitFMACAddPair address-compute pattern.
+			const int64_t fmacreadpos_off = (int64_t)offsetof(VURegs, fmacreadpos);
+			const int64_t fmac_off        = (int64_t)offsetof(VURegs, fmac);
+			const int64_t fmac_sCycle_off = (int64_t)offsetof(fmacPipe, sCycle);
+			const int64_t fmac_Cycle_off  = (int64_t)offsetof(fmacPipe, Cycle);
+
+			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fmacreadpos_off));
+			armAsm->Add(x5, x4, Operand(x4, LSL, 1));            // x5 = pos*3
+			armAsm->Add(x5, VU1_BASE_REG, Operand(x5, LSL, 4));  // x5 = base + pos*48
+			armAsm->Ldr(x6, MemOperand(x5, fmac_off + fmac_sCycle_off));
+			armAsm->Ldr(w4, MemOperand(x5, fmac_off + fmac_Cycle_off));
+			armAsm->Sub(x6, VU1_CYCLE_REG, x6);                  // diff = cycle - sCycle (u64)
+			armAsm->Cmp(x6, x4);                                 // vs Cycle (u32 zero-ext)
+			armAsm->B(lo, &skip_helper);                         // not mature → skip BL
+			// fall through to call_helper
 
 			armAsm->Bind(&call_helper);
 			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
@@ -5665,6 +6017,21 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// contract is "ACC memory-authoritative outside compiled blocks".
 	emitFlushAccReg(acc_off);
 
+#if defined(VU1_BLOCK_SHADOW_VERIFY) && defined(VU1_SHADOW_VERIFY)
+	// Block-level shadow verify. By this point vfCacheFlushAndInvalidate
+	// has flushed all deferred VF writes; the pinned-state flushes above
+	// have committed cycle / wpos / fmaccount / flags / ACC. Memory is
+	// JIT's authoritative end-of-block state. Now invoke the verify
+	// helper which captures it, restores from snapshot, replays interp,
+	// and compares. Skipped at compile time when any pair was XGKICK.
+	if (!block_has_xgkick)
+	{
+		armAsm->Mov(w0, startPC);
+		armAsm->Mov(w1, numPairs);
+		armEmitCall(reinterpret_cast<const void*>(vu1_block_shadow_verify));
+	}
+#endif
+
 	// --- Epilogue (96-byte frame; mirrors the prologue layout above) ---
 	armAsm->Ldp(x20, x28, MemOperand(sp, 80));
 	armAsm->Ldp(VU1_TERM_ADDR_REG, x19, MemOperand(sp, 64));
@@ -5750,9 +6117,9 @@ static void DumpTopBlocks()
 			return a.execs > b.execs;
 		});
 
-	INFO_LOG("VU1 JIT top-5 hottest blocks (of {} active variants, total entries={}, total pair-execs={})",
+	INFO_LOG("VU1 JIT top-20 hottest blocks (of {} active variants, total entries={}, total pair-execs={})",
 		active_blocks, total_execs, total_pair_execs);
-	const size_t limit = std::min<size_t>(5, stats.size());
+	const size_t limit = std::min<size_t>(20, stats.size());
 	for (size_t i = 0; i < limit; i++)
 	{
 		const BlockStat& s = stats[i];
@@ -5812,14 +6179,21 @@ static void DumpTopBlocks()
 
 void recArmVU1::Shutdown()
 {
-#ifdef VU1_PROFILE_BLOCKS
-	DumpTopBlocks();
-#endif
+	// VU1_PROFILE_BLOCKS dump is invoked from VMManager::Shutdown via
+	// DumpProfile() — that fires on overlay Exit AND precedes the full
+	// app-exit path that lands here, so dumping again would duplicate it.
 	deleteAllVariants();
 	s_pool.Destroy();
 	s_code_base  = nullptr;
 	s_code_write = nullptr;
 	s_code_end   = nullptr;
+}
+
+void recArmVU1::DumpProfile()
+{
+#ifdef VU1_PROFILE_BLOCKS
+	DumpTopBlocks();
+#endif
 }
 
 void recArmVU1::Reset()

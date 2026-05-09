@@ -24,10 +24,13 @@
 #include "ImGui/ImGuiManager.h"
 #include "common/Path.h"
 #include "common/MemorySettingsInterface.h"
+#include "pcsx2/INISettingsInterface.h"
 #include "SIO/Pad/Pad.h"
 #include "Input/InputManager.h"
 #include "ImGui/ImGuiFullscreen.h"
 #include "Achievements.h"
+#include "common/Error.h"
+#include "common/HTTPDownloaderAndroid.h"
 #include "Host.h"
 #include "ImGui/FullscreenUI.h"
 #include "SIO/Pad/PadDualshock2.h"
@@ -77,6 +80,13 @@ int s_window_height = 0;
 ANativeWindow* s_window = nullptr;
 
 static MemorySettingsInterface s_settings_interface;
+// File-backed RetroAchievements credentials store. Holds Token (written by
+// rcheevos at Achievements.cpp:2018) AND Username (mirrored from BASE on
+// login so it survives restart — BASE itself is the in-memory
+// `s_settings_interface` and resets every launch). Path resolved in
+// Java_..._initialize once EmuFolders::DataRoot is known. Lazy-constructed
+// std::unique_ptr because INISettingsInterface needs a path at construction.
+static std::unique_ptr<INISettingsInterface> s_secrets_settings_interface;
 
 static JNIEnv env_main;
 
@@ -127,10 +137,42 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
         MemorySettingsInterface &si = s_settings_interface;
         Host::Internal::SetBaseSettingsLayer(&si);
 
+        // Build the secrets layer file-backed at <DataRoot>/achievements.ini.
+        // Persists the RetroAchievements auth token across app launches so
+        // the user doesn't have to log in every cold start. Path::Combine
+        // handles the trailing-slash form for both system and app-private
+        // DataRoot. Load() returns false when the file doesn't exist yet
+        // (first launch) — that's fine, the file gets created on first
+        // Save() inside ClientLoginWithPasswordCallback.
+        const std::string secrets_path =
+            Path::Combine(EmuFolders::DataRoot, "achievements.ini");
+        s_secrets_settings_interface =
+            std::make_unique<INISettingsInterface>(secrets_path);
+        s_secrets_settings_interface->Load();
+        Host::Internal::SetSecretsSettingsLayer(s_secrets_settings_interface.get());
+
         VMManager::SetDefaultSettings(si, true, true, true, true, true);
 
-        // complete as quickly as possible
-        si.SetBoolValue("EmuCore/GS", "FrameLimitEnable", false);
+        // Mirror Username from secrets → BASE so Achievements::Initialize's
+        // GetBaseStringSettingValue("Achievements","Username") finds it on
+        // a returning user. We co-store Username in achievements.ini at
+        // login time (see Java_..._loginAchievements below) — without this
+        // re-push, Initialize would have a Token but no Username, fail the
+        // username.empty() guard at Achievements.cpp:608, and skip the
+        // token-relogin path. User would still be "logged in" per the
+        // overlay panel (which falls back to settings layer reads), but
+        // s_client wouldn't be bound and game-side achievement loading
+        // wouldn't fire.
+        const std::string saved_user = s_secrets_settings_interface->GetStringValue(
+            "Achievements", "Username", "");
+        if (!saved_user.empty())
+            Host::SetBaseStringSettingValue("Achievements", "Username", saved_user.c_str());
+
+        // FrameLimitEnable is inert in this fork (no read site outside a
+        // commented MTGS check). Frame pacing is driven by SetLimiterMode at
+        // runtime; the persisted bool is applied after Initialize succeeds in
+        // runVMThread below. Don't pre-force it here — that just confuses the
+        // overlay's saved-state display.
         si.SetIntValue("EmuCore/GS", "VsyncEnable", false);
         si.SetBoolValue("EmuCore", "EnableThreadPinning", true);
         si.SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
@@ -141,6 +183,16 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
 
         si.SetStringValue("SPU2/Output", "Backend", "Oboe");
         si.SetBoolValue("EmuCore", "EnableFastBoot", false);
+
+        // Enable RetroAchievements by default. Pcsx2Config defaults this to
+        // false (privacy-conscious for desktop), but on Android the in-game
+        // overlay's right-side panel + login form make it discoverable, and
+        // without Enabled=true, Achievements::Initialize never runs →
+        // s_client stays null → s_has_achievements stays false → the panel
+        // permanently shows "No achievements" even with a logged-in user
+        // and a recognised game. Users who don't want RA can flip it off
+        // via a future settings toggle (or env override).
+        si.SetBoolValue("Achievements", "Enabled", true);
 
         // Pin BIOS folder to the app's externalFilesDir/bios regardless
         // of where the user pointed DataRoot. The setup wizard's
@@ -214,6 +266,12 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
         env->DeleteLocalRef(local);
         s_vmSetPaused_mid = env->GetStaticMethodID(s_NativeApp_class, "vmSetPaused", "(Z)V");
     }
+
+    // Bind the JNI-backed HTTP downloader's class + method IDs while we
+    // still have a Java-thread env. Worker threads spawned from
+    // HTTPDownloaderAndroid::StartRequest don't have a class loader, so
+    // FindClass would fail there — these globals must be cached up front.
+    HTTPDownloaderAndroid::BindFromJNI(env);
 }
 
 extern "C"
@@ -250,6 +308,74 @@ extern "C"
 JNIEXPORT jstring JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_getBuildVersion(JNIEnv *env, jclass clazz) {
     return env->NewStringUTF(BuildVersion::GitRev);
+}
+
+// Achievements snapshot for the in-game overlay's right-side panel.
+// Format documented at Achievements::GetAchievementsAsJSON. Empty payload
+// (`{"active":false,"loggedIn":false,"userName":"","items":[]}`) when no
+// active game / no client / not logged in.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getAchievementsJSON(JNIEnv *env, jclass clazz) {
+    const std::string json = Achievements::GetAchievementsAsJSON();
+    return env->NewStringUTF(json.c_str());
+}
+
+// RetroAchievements password login. Synchronous — Achievements::Login waits
+// for the HTTP request internally. Returns null on success, otherwise a
+// human-readable error string (rcheevos message or "Failed to create
+// client" / "Failed to create login request"). Callers should dispatch
+// off the Main thread; the request is HTTP and may take a few seconds.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_loginAchievements(JNIEnv *env, jclass clazz,
+                                                       jstring p_user, jstring p_pass) {
+    const std::string user = GetJavaString(env, p_user);
+    const std::string pass = GetJavaString(env, p_pass);
+    Error error;
+    const bool ok = Achievements::Login(user.c_str(), pass.c_str(), &error);
+    if (!ok)
+    {
+        const std::string msg = error.GetDescription();
+        return env->NewStringUTF(msg.empty() ? "Login failed." : msg.c_str());
+    }
+
+    // Login wrote Username to BASE (in-memory, lost on restart) and Token
+    // to SECRETS (file-backed via INISettingsInterface — persists). Mirror
+    // Username INTO secrets.ini too so the next app launch can re-push it
+    // to BASE before Achievements::Initialize runs. Without this the user
+    // re-logs in every launch even though the token survives.
+    if (s_secrets_settings_interface)
+    {
+        s_secrets_settings_interface->SetStringValue("Achievements", "Username", user.c_str());
+        s_secrets_settings_interface->Save();
+    }
+
+    // Achievements::Initialize is gated on EmuConfig.Achievements.Enabled —
+    // a returning user with the old default-off config might still have it
+    // off. Push Enabled=true and ApplySettings so UpdateSettings detects
+    // the change and runs Initialize for any current/future VM. Initialize
+    // reads the just-persisted Token and re-logs in on the persistent
+    // s_client, then BeginLoadGame loads the running game's achievement
+    // set.
+    Host::SetBaseBoolSettingValue("Achievements", "Enabled", true);
+    if (VMManager::HasValidVM())
+        VMManager::ApplySettings();
+    return nullptr;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_logoutAchievements(JNIEnv *env, jclass clazz) {
+    Achievements::Logout();
+    // Achievements::Logout clears Token from SECRETS but leaves the
+    // Username we co-stored there. Drop it too so a fresh launch doesn't
+    // re-mirror a stale username back to BASE.
+    if (s_secrets_settings_interface)
+    {
+        s_secrets_settings_interface->DeleteValue("Achievements", "Username");
+        s_secrets_settings_interface->Save();
+    }
 }
 
 extern "C"
@@ -716,6 +842,17 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
     if (VMManager::Initialize(boot_params, nullptr) == VMBootResult::StartupSuccess)
     {
         Console.Error("VM INIT");
+        // Apply the persisted frame-limit preference now that the VM is up.
+        // The overlay's Frame Limiter toggle stores into the base layer via
+        // setSetting("EmuCore/GS","FrameLimitEnable") + speedhackLimitermode
+        // for live-apply; the live-apply early-returns when no VM exists, so
+        // on a cold start the saved preference would otherwise be ignored
+        // until the user toggled it. Default is `true` (Nominal) to match
+        // VMManager::SetDefaultSettings's behaviour.
+        const bool frame_limit_on = Host::GetBaseBoolSettingValue(
+            "EmuCore/GS", "FrameLimitEnable", true);
+        VMManager::SetLimiterMode(frame_limit_on ? LimiterModeType::Nominal
+                                                 : LimiterModeType::Unlimited);
         VMState _vmState = VMState::Running;
         VMManager::SetState(_vmState);
         ////
@@ -1351,12 +1488,30 @@ static std::string ProbeSerialWithReader(const DiscReader& read)
     std::string contents(sysSize, '\0');
     if (!ReadDiscData(read, sysLba, contents.data(), sysSize)) return {};
 
-    // SYSTEM.CNF format example:
-    //   BOOT2 = cdrom0:\SCUS_972.28;1
-    //   VER = 1.00
-    //   VMODE = NTSC
+    // SYSTEM.CNF format examples:
+    //   PS2: BOOT2 = cdrom0:\SCUS_972.28;1
+    //        VER = 1.00
+    //        VMODE = NTSC
+    //   PS1: BOOT = cdrom:\SLUS_007.13;1
+    //        TCB = tcb=64
+    //        EVENT = ev=51,b=2048,s=2048
+    //        STACK = stack=801fff00
+    // PS2 uses BOOT2, PS1 uses BOOT (no trailing 2). Same serial format
+    // (4 letters + 3 digits + dot + 2 digits) so we share the regex.
+    // Returned string is `<platform>:<serial>` so the Kotlin side knows
+    // which cover repo to hit (xlenore/ps2-covers vs xlenore/psx-covers).
+    const char* platform = "ps2";
     std::size_t bootPos = contents.find("BOOT2");
-    if (bootPos == std::string::npos) return {};
+    if (bootPos == std::string::npos)
+    {
+        // Check for PS1 BOOT line. Must NOT match a substring of BOOT2 —
+        // we already failed that. Rare edge: if a disc has both keys
+        // (it shouldn't), BOOT2 wins, which is correct (PS2).
+        bootPos = contents.find("BOOT");
+        if (bootPos == std::string::npos)
+            return {};
+        platform = "ps1";
+    }
 
     std::size_t lineEnd = contents.find_first_of("\r\n", bootPos);
     if (lineEnd == std::string::npos) lineEnd = contents.size();
@@ -1372,7 +1527,7 @@ static std::string ProbeSerialWithReader(const DiscReader& read)
     std::string serial = m[1].str() + "-" + m[2].str() + m[3].str();
     std::transform(serial.begin(), serial.end(), serial.begin(),
         [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    return serial;
+    return std::string(platform) + ":" + serial;
 }
 
 // Minimal core_file wrapper around an existing FILE*. libchdr only needs

@@ -107,9 +107,11 @@ object SetupImpl {
      *  folder without MANAGE_EXTERNAL_STORAGE). null = no error. */
     private val systemDirError = mutableStateOf<String?>(null)
 
-    // -------- ROMs dir setup state --------
-    private val romsDirUri = mutableStateOf<Uri?>(null)
-    private val romsDirDisplay = mutableStateOf<String?>(null)
+    // -------- ROMs dirs setup state --------
+    /** Working list of ROM-folder URIs while the wizard is open. Persists
+     *  to Main.romsDirs (and prefs) on Next at the ROMs step. The user
+     *  can add multiple folders + remove individual entries. */
+    private val romsDirsState = mutableStateListOf<Uri>()
 
     // ---- Persist + advance helpers ----
 
@@ -133,10 +135,15 @@ object SetupImpl {
         // pre-selected row matches the already-configured BIOS by both
         // filename and the existing private file already exists, skip the
         // copy. The pref already points at outFile and emucore is happy.
+        //
+        // We DON'T push setSetting from finishBiosStep on a clean install —
+        // kickoffEmucoreInit is gated on setupComplete, so Java_..._initialize
+        // hasn't run yet and the base settings layer isn't installed. Calling
+        // Host::SetBaseStringSettingValue with no LAYER_BASE installed
+        // null-derefs in LayeredSettingsInterface. The pin is now applied
+        // post-init via Main.kickoffEmucoreInit's pushBiosFilenamePin().
         if (outFile.absolutePath == Main.bios.value && outFile.exists()) {
             configuredBiosInfo.value = bios.info
-            // Still push the filename — see comment below for why.
-            NativeApp.setSetting("Filenames", "BIOS", "string", outFile.name)
             return outFile.absolutePath
         }
 
@@ -148,16 +155,10 @@ object SetupImpl {
             Main.prefs.edit().putString("bios", outFile.absolutePath).apply()
             configuredBiosInfo.value = bios.info
 
-            // emucore's LoadBIOS calls FullpathToBios() = EmuFolders::Bios +
-            // BaseFilenames.Bios. When BaseFilenames.Bios is empty (no setting
-            // pushed) it falls back to FindBiosImage(), which alphabetically
-            // scans the bios folder and returns the FIRST valid match — so
-            // re-entering setup and picking a different BIOS would copy it
-            // but emucore would keep using whatever sorted first. Pushing
-            // "Filenames/BIOS" makes FullpathToBios() pin to this exact file.
-            // Section/key matches PCSX2's FilenameOptions::LoadSave (Pcsx2Config.cpp:1694)
-            // and the ImGui FullscreenUI BIOS picker (FullscreenUI_Settings.cpp:2481).
-            NativeApp.setSetting("Filenames", "BIOS", "string", outFile.name)
+            // BIOS filename pin (setSetting "Filenames/BIOS") is deferred —
+            // see comment above. kickoffEmucoreInit reads Main.bios.value
+            // after Java_..._initialize completes and pushes the filename
+            // then.
             outFile.absolutePath
         } catch (_: Exception) {
             null
@@ -238,19 +239,22 @@ object SetupImpl {
     }
 
     private fun finishRomsStep(context: Context): String? {
-        val uri = romsDirUri.value
-        // Re-entry from Settings cog: keep the previous URI if no new one
-        // was picked. The persistable-permission grant survives across
-        // process restarts, so we don't need to re-take it.
-        if (uri == null) return Main.romsDir.value
+        // Need at least one ROM folder. Re-entry from the Settings cog
+        // pre-loads Main.romsDirs into romsDirsState so the user sees
+        // their existing list; if they didn't change anything, we still
+        // re-run the persistable-permission take (idempotent, harmless).
+        if (romsDirsState.isEmpty()) return null
 
-        try {
-            context.contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        } catch (_: SecurityException) { /* already persisted, or revoked */ }
-        Main.romsDir.value = uri.toString()
-        Main.prefs.edit().putString("roms", uri.toString()).apply()
-        return uri.toString()
+        for (uri in romsDirsState) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: SecurityException) { /* already persisted, or revoked */ }
+        }
+        Main.setRomsDirs(romsDirsState.map { it.toString() })
+        // Returning the first URI's string keeps the existing String?-returning
+        // contract for the wizard's Next gating (non-null = success).
+        return romsDirsState.first().toString()
     }
 
     private fun refreshAllowNext() {
@@ -266,8 +270,8 @@ object SetupImpl {
             // / missing biosDir) an already-configured BIOS we're keeping.
             2 -> selectedBiosIdx.value != null ||
                  (biosDirUri.value == null && Main.bios.value != null)
-            // ROMs page.
-            3 -> romsDirUri.value != null
+            // ROMs page — Next when at least one folder is selected.
+            3 -> romsDirsState.isNotEmpty()
             else -> false
         }
     }
@@ -324,19 +328,13 @@ object SetupImpl {
         systemDirUseDefault.value = false
         systemDirError.value = null
 
-        val existingRoms = Main.romsDir.value
-        if (existingRoms != null) {
-            try {
-                val uri = Uri.parse(existingRoms)
-                romsDirUri.value = uri
-                romsDirDisplay.value = uri.lastPathSegment ?: existingRoms
-            } catch (_: Exception) {
-                romsDirUri.value = null
-                romsDirDisplay.value = null
-            }
-        } else {
-            romsDirUri.value = null
-            romsDirDisplay.value = null
+        // Pre-load saved ROMs list. Each URI is parsed best-effort —
+        // malformed entries (rare, only if prefs was hand-edited) are
+        // dropped silently rather than failing the whole list.
+        romsDirsState.clear()
+        for (s in Main.romsDirs.value) {
+            val u = try { Uri.parse(s) } catch (_: Exception) { null } ?: continue
+            romsDirsState.add(u)
         }
     }
 
@@ -356,7 +354,7 @@ object SetupImpl {
         // "Pick a different folder" immediately on re-entry when we already
         // have a remembered biosDir, even before the auto-rescan finishes.
         2 -> if (biosDirUri.value == null) "Pick BIOS Folder" else "Pick a different folder"
-        3 -> if (romsDirUri.value == null) "Pick ROMs Folder" else "Pick a different folder"
+        3 -> if (romsDirsState.isEmpty()) "Pick ROMs Folder" else "Add Another Folder"
         else -> null
     }
 
@@ -414,8 +412,17 @@ object SetupImpl {
             contract = ActivityResultContracts.OpenDocumentTree()
         ) { treeUri: Uri? ->
             if (treeUri != null) {
-                romsDirUri.value = treeUri
-                romsDirDisplay.value = treeUri.lastPathSegment ?: treeUri.toString()
+                // Take the persistable grant immediately so the URI survives
+                // across app restarts even if the user closes the wizard
+                // before tapping Next. De-duplicate by URI string so picking
+                // the same folder twice doesn't add a redundant entry.
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: SecurityException) { /* already persisted */ }
+                if (romsDirsState.none { it.toString() == treeUri.toString() }) {
+                    romsDirsState.add(treeUri)
+                }
                 refreshAllowNext()
             }
         }
@@ -841,35 +848,70 @@ object SetupImpl {
         }
     }
 
-    /** ROMs page content — selected-folder confirmation. Picker is in the nav row. */
+    /** ROMs page content — list of selected folders, each with a remove
+     *  button. The Pick / Add button lives in the nav row at the bottom
+     *  (midButtonLabel returns "Add Another Folder" when the list is
+     *  non-empty, "Pick ROMs Folder" when empty). */
     @Composable
     private fun SetupRomsDirContent() {
         Column(Modifier.fillMaxSize()) {
             Text(
-                "Pick the folder where you keep your PS2 ROM dumps (.iso / .chd / .gz / etc.). ARMSX2 will list games from this folder.",
+                "Pick one or more folders where you keep your PS2 (.iso / .chd / etc.) and PS1 (.bin / .iso) ROM dumps. " +
+                "ARMSX2 will list games from every folder you add.",
                 fontSize = 14.sp, color = Color.LightGray,
                 modifier = Modifier.padding(bottom = 12.dp),
             )
 
-            val display = romsDirDisplay.value
-            if (display != null) {
-                Row(
-                    Modifier.fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF333333))
-                        .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("📁", fontSize = 24.sp)
-                    Spacer(Modifier.width(8.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("Selected:", color = Color.LightGray, fontSize = 12.sp)
-                        Text(display, color = Color.White, fontSize = 14.sp)
+            if (romsDirsState.isEmpty()) {
+                Text(
+                    "No ROMs folders yet — use the Pick ROMs Folder button below to add one.",
+                    color = Color.LightGray,
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (uri in romsDirsState.toList()) {
+                        RomsDirRow(
+                            uri = uri,
+                            onRemove = {
+                                romsDirsState.remove(uri)
+                                refreshAllowNext()
+                            },
+                        )
                     }
                 }
-            } else {
-                Text("No ROMs folder selected yet — use the Pick ROMs Folder button below.",
-                    color = Color.LightGray)
+            }
+        }
+    }
+
+    @Composable
+    private fun RomsDirRow(uri: Uri, onRemove: () -> Unit) {
+        val display = uri.lastPathSegment ?: uri.toString()
+        Row(
+            Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF333333))
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("📁", fontSize = 22.sp)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(display, color = Color.White, fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold)
+                Text(uri.toString(), color = Color(0xFFAAAAAA), fontSize = 10.sp,
+                    maxLines = 1)
+            }
+            Spacer(Modifier.width(8.dp))
+            // Tap-to-remove. Tinted PS2-blue-ish so it's obviously
+            // interactive without dominating the row.
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF5A1A1A))
+                    .clickable(onClick = onRemove)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Text("Remove", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
     }

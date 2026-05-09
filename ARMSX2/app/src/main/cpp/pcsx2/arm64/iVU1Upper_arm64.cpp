@@ -144,17 +144,53 @@ namespace
 	bool s_broadcastCacheValid = false;
 	u32  s_broadcastCacheFt    = 0;
 	int  s_broadcastCacheComp  = -1;
+
+	// FMAC opt #18: deferred-Dup broadcast plan. emitLoadBroadcast plans the
+	// source (VF cache slot + lane, or VF[0] constant, or Q/I) but defers the
+	// Dup-into-v1 until a consumer actually needs v1. The matrix-transform
+	// hot path (MULAx/MADDAy/MADDAz/MADDw chain — top block in GoW2 at
+	// pc=0x05d8 was 30% of VU1 time) only needs an FMUL where ARM64 supports
+	// `Fmul Vd.4s, Vn.4s, Vm.s[lane]` directly — emitting the Dup is wasted.
+	//
+	// Lifetime: planned at op start, consumed by emitBinary/Ternary/MaxFmac,
+	// invalidated on any code path that touches v1 (BL, vfCacheLoadInto into
+	// v1, emitLoadQI, addSubHack, FTOI/ITOF, MR32) — same hooks as the v1
+	// broadcast cache above. None means "v1 already holds whatever it should;
+	// don't try lane-indexed shortcuts" — used by FMAC_*_FULL paths and Q/I.
+	// CacheLane: VF cache slot (v17..v24), lane 0..3 (X..W).
+	// QIScalar:  Q or I scalar pre-loaded into v1.s[0] only — lane-FMUL via
+	//            v1.s[0]. Materialization Dups v1.s[0] into v1.4s. Saves one
+	//            Dup per Q/I-broadcast FMUL (MULq, MULi, MADDq, etc.).
+	// FullSlot:  full VF[ft] vector resident in a cache slot — used by FMAC_*_FULL
+	//            (MUL.xyzw, ADD.w, MULA.xyz, etc.). Consumers emit the ALU op
+	//            directly against the slot reg, skipping the prior `Mov v1, slot`.
+	//            Materialization is `Mov v1.16b, slot.16b` for clamp/hack/MAX.
+	enum class BroadcastPlanKind { None, V1Held, ConstZero, ConstOne, CacheLane, QIScalar, FullSlot };
+	BroadcastPlanKind s_broadcastPlanKind = BroadcastPlanKind::None;
+	int               s_broadcastPlanSlotReg = 0; // CacheLane/QIScalar/FullSlot: NEON reg code
+	int               s_broadcastPlanLane    = 0; // CacheLane: 0..3 (X..W); QIScalar: always 0; FullSlot: unused
 }
 
 void vu1BroadcastCacheReset()
 {
 	s_broadcastCacheValid = false;
+	s_broadcastPlanKind = BroadcastPlanKind::None;
 }
 
 void vu1BroadcastCacheNoteVfWritten(int vfreg)
 {
 	if (s_broadcastCacheValid && static_cast<int>(s_broadcastCacheFt) == vfreg)
 		s_broadcastCacheValid = false;
+	// If plan references a slot whose VF was just written, the slot still
+	// holds the up-to-date value (vfCacheStore writes the slot then optionally
+	// to memory) — but the lane index we recorded is for the OLD value. In
+	// practice this never fires mid-op (writes happen at writeback, after the
+	// FMUL consumer); reset defensively.
+	if (s_broadcastPlanKind == BroadcastPlanKind::CacheLane
+		&& static_cast<int>(s_broadcastCacheFt) == vfreg)
+	{
+		s_broadcastPlanKind = BroadcastPlanKind::None;
+	}
 }
 
 // ============================================================================
@@ -767,37 +803,155 @@ static void emitLoadBroadcast(u32 ft, int comp) // comp: 0=x,1=y,2=z,3=w
 	// reused pair, plus 1 Ldr in the rare case that VF[ft]'s cache slot
 	// had been evicted (vfCacheLoadResident's miss path).
 	if (s_broadcastCacheValid && s_broadcastCacheFt == ft && s_broadcastCacheComp == comp)
+	{
+		s_broadcastPlanKind = BroadcastPlanKind::V1Held;
 		return;
+	}
 
+	// FMAC opt #18: defer the Dup. Plan the broadcast source so a downstream
+	// FMUL consumer can use ARM64's lane-indexed Fmul (`Fmul Vd, Vn, Vm.s[lane]`)
+	// and skip the Dup entirely. Consumers that need v1 as a vector
+	// (FADD/FSUB, clamp on v1, addSubHack) call emitMaterializeBroadcast first.
 	if (ft == 0)
 	{
-		// VF[0] is the hardwired constant (0, 0, 0, 1). The broadcast value
-		// is compile-time known: comp 0/1/2 → 0.0f, comp 3 → 1.0f. Build
-		// directly into v1 instead of Ldr+Dup from memory. (#2 from FMAC
-		// optimization deep-dive — VF[0] hardwired const-fold.)
-		if (comp == 3)
-			armAsm->Fmov(v1.V4S(), 1.0f);
-		else
-			armAsm->Movi(v1.V4S(), 0);
+		// VF[0] is the hardwired constant (0, 0, 0, 1) — comp 0/1/2 → 0.0f,
+		// comp 3 → 1.0f. Recorded as a const-kind plan; materialization builds
+		// the constant into v1. Lane-FMUL fast-path doesn't apply here.
+		s_broadcastPlanKind = (comp == 3) ? BroadcastPlanKind::ConstOne
+		                                  : BroadcastPlanKind::ConstZero;
 	}
 	else
 	{
+		// vfCacheLoadResident bumps the slot's LRU clock — a single subsequent
+		// vfCacheLoadInto miss inside the same op cannot evict this slot
+		// (an LRU eviction picks the LEAST-recently-used slot), so the plan
+		// stays valid through the FMUL consumer.
 		const auto resident = vfCacheLoadResident(static_cast<int>(ft));
-		armAsm->Dup(v1.V4S(), resident.V4S(), comp);
+		s_broadcastPlanKind    = BroadcastPlanKind::CacheLane;
+		s_broadcastPlanSlotReg = resident.GetCode();
+		s_broadcastPlanLane    = comp;
 	}
 
-	s_broadcastCacheValid = true;
+	// v1 doesn't actually hold (ft, comp) yet — materialization will set this.
+	s_broadcastCacheValid = false;
 	s_broadcastCacheFt    = ft;
 	s_broadcastCacheComp  = comp;
 }
 
-// Load Q or I register broadcast into v1.4S.
+// FMAC opt #18: materialize the deferred broadcast into v1. Idempotent — a
+// V1Held plan is a no-op. Called by every consumer that needs v1 as a real
+// vector (FADD/FSUB, clamp-on-v1, addSubHack, MAX/MINI). Lane-indexed FMUL
+// callers skip this and use tryEmitFmulLaneBroadcast instead.
+static void emitMaterializeBroadcast()
+{
+	// Track whether the materialize result is a VF (ft, comp) broadcast — only
+	// then is the (ft, comp) cache below valid for next-pair hits. QI stays
+	// off the cache because it's not keyed by VF.
+	bool isVfBroadcast = true;
+	switch (s_broadcastPlanKind)
+	{
+		case BroadcastPlanKind::None:
+		case BroadcastPlanKind::V1Held:
+			return;
+		case BroadcastPlanKind::ConstZero:
+			armAsm->Movi(v1.V4S(), 0);
+			break;
+		case BroadcastPlanKind::ConstOne:
+			armAsm->Fmov(v1.V4S(), 1.0f);
+			break;
+		case BroadcastPlanKind::CacheLane:
+		{
+			const a64::VRegister slotReg(s_broadcastPlanSlotReg, 128);
+			armAsm->Dup(v1.V4S(), slotReg.V4S(), s_broadcastPlanLane);
+			break;
+		}
+		case BroadcastPlanKind::QIScalar:
+			// Scalar pre-loaded in v1.s[0]; broadcast it into all 4 lanes.
+			// Same-source-dst Dup is well-defined (read-then-write).
+			armAsm->Dup(v1.V4S(), v1.V4S(), 0);
+			isVfBroadcast = false;
+			break;
+		case BroadcastPlanKind::FullSlot:
+		{
+			// Full VF[ft] vector lives in a cache slot. Mov it into v1 for
+			// any consumer that can't read the slot directly (clamp on v1,
+			// MAX/MINI's Smax/Smin operands, addSubHack mutation).
+			const a64::VRegister slotReg(s_broadcastPlanSlotReg, 128);
+			if (slotReg.GetCode() != v1.GetCode())
+				armAsm->Mov(v1.V16B(), slotReg.V16B());
+			isVfBroadcast = false; // Not a (ft, comp) broadcast — keep cache invalid.
+			break;
+		}
+	}
+	s_broadcastPlanKind   = BroadcastPlanKind::V1Held;
+	s_broadcastCacheValid = isVfBroadcast;
+}
+
+// FMAC opt #18: emit `Fmul vd.4s, vn.4s, slot.s[lane]` when the broadcast plan
+// has a NEON-resident source (VF cache slot OR Q/I scalar pre-loaded into
+// v1.s[0]). Returns true on emit, false if the plan is None/V1Held/Const*
+// (caller falls back to materialize + regular Fmul). Same single-rounded
+// semantics as Dup-then-Fmul, so PS2's two-rounding (separate FMUL + FADD)
+// remains preserved by the caller emitting an FADD/FSUB after this.
+//
+// vixl signature: Fmul(vd, vn, vm, vm_index) requires vm to be the 1-element
+// single-precision scalar form (.S(), Is1S) — not .V4S(). Passing .V4S()
+// triggers vixl's assert at assembler-aarch64.cc:4659.
+static bool tryEmitFmulLaneBroadcast(const a64::VRegister& vd, const a64::VRegister& vn)
+{
+	if (s_broadcastPlanKind != BroadcastPlanKind::CacheLane
+		&& s_broadcastPlanKind != BroadcastPlanKind::QIScalar)
+		return false;
+	const a64::VRegister slotReg(s_broadcastPlanSlotReg, 128);
+	armAsm->Fmul(vd.V4S(), vn.V4S(), slotReg.S(), s_broadcastPlanLane);
+	return true;
+}
+
+// FMAC opt #18 (FullSlot extension): plan a full-vector `src2 = VF[ft]` for
+// FMAC_*_FULL paths. Replaces the old `vfCacheLoadInto(ft, v1)` pre-load —
+// FMUL/FADD/FSUB consumers can read the cache slot directly (`Fmul Vd.4s,
+// Vn.4s, slot.4s`) and skip the Mov-into-v1 entirely. Saves 1 Mov per
+// full-vector FMAC op when the slot is resident; same Ldr cost on a miss.
+//
+// VF[0] is hardwired memory-only (vfCacheLoadInto special-cases ft=0 to
+// Ldr from memory and never allocates a cache slot). For the rare ft==0
+// FULL path, fall back to the legacy v1 path so consumers still see a
+// well-formed v1 vector.
+static void emitPlanFullSlot(u32 ft)
+{
+	// Reset prior plan/v1-broadcast — caller is about to overwrite ft's slot
+	// state, and any stale broadcast in v1 is no longer safe to reuse.
+	s_broadcastCacheValid = false;
+
+	if (ft == 0)
+	{
+		// Legacy path: VF[0] not in the slot pool. Load full vector to v1.
+		vfCacheLoadInto(0, v1);
+		s_broadcastPlanKind = BroadcastPlanKind::V1Held;
+		return;
+	}
+
+	const auto resident = vfCacheLoadResident(static_cast<int>(ft));
+	s_broadcastPlanKind    = BroadcastPlanKind::FullSlot;
+	s_broadcastPlanSlotReg = resident.GetCode();
+	// Lane unused for FullSlot.
+}
+
+// Load Q or I register broadcast.
+//
+// FMAC opt #18 (extended): defer the Dup. Ldr the scalar into v1.s[0] only
+// and record a QIScalar plan. FMUL consumers use lane-indexed `Fmul Vd.4s,
+// Vn.4s, v1.s[0]` directly. ADD/SUB/clamp consumers materialize via
+// `Dup v1.4s, v1.s[0]` (idempotent). Saves one Dup per MULq/MULi pair.
 static void emitLoadQI(int64_t vi_off)
 {
-	// FMAC opt #16: Q/I broadcast overwrites v1 with a non-VF value.
-	vu1BroadcastCacheReset();
-	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vi_off));
-	armAsm->Dup(v1.V4S(), w0);
+	// v1 broadcast cache: invalid — v1 no longer holds a VF broadcast.
+	s_broadcastCacheValid = false;
+	// Ldr s1 zero-extends the upper 96 bits of v1 — only v1.s[0] is meaningful.
+	armAsm->Ldr(s1, MemOperand(VU1_BASE_REG, vi_off));
+	s_broadcastPlanKind    = BroadcastPlanKind::QIScalar;
+	s_broadcastPlanSlotReg = v1.GetCode();
+	s_broadcastPlanLane    = 0;
 }
 
 // --- vuDouble-style input clamping for NEON vectors ---
@@ -909,9 +1063,25 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw,
 	const bool singleLane = (xyzw == 0x1u || xyzw == 0x2u || xyzw == 0x4u || xyzw == 0x8u);
 	const bool addSubHack = isScalarAdd && CHECK_VUADDSUBHACK && singleLane;
 
+	// FMAC opt #18: fast-path eligibility. Two flavors:
+	//   - FullSlot: read VF[ft] directly from its cache slot for FADD/FSUB/FMUL.
+	//               Saves the Mov-into-v1 the FMAC_*_FULL macro used to emit.
+	//   - Lane-FMUL (CacheLane/QIScalar): only for op=MUL; emits `Fmul vd, vn,
+	//               slot.s[lane]` and skips the Dup-into-v1.
+	// Both gates: !clampInputs (clamp needs v1 vector), !addSubHack (mutates v1),
+	// !same_operands (we still use v0=Mov(v1) on the legacy path).
+	const bool fastPathFullSlot = !same_operands && !clampInputs && !addSubHack
+		&& (s_broadcastPlanKind == BroadcastPlanKind::FullSlot);
+	const bool fastPathLaneFmul = !same_operands && !clampInputs && !addSubHack
+		&& (op == 2)
+		&& (s_broadcastPlanKind == BroadcastPlanKind::CacheLane
+		    || s_broadcastPlanKind == BroadcastPlanKind::QIScalar);
+	const bool fastPathAvailable = fastPathFullSlot || fastPathLaneFmul;
+	const bool needsV1Materialized = !fastPathAvailable;
+	if (needsV1Materialized)
+		emitMaterializeBroadcast();
+
 	// Load VF[fs] → v0 (via cache: hit → Mov from resident slot, miss → Ldr).
-	// v1 must already be loaded with src2 (by emitLoadBroadcast / emitLoadQI /
-	// the FMAC_*_FULL caller's Ldr).
 	if (same_operands)
 		armAsm->Mov(v0.V16B(), v1.V16B());
 	else
@@ -931,11 +1101,32 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw,
 	if (addSubHack)
 		emitVuAddSubHack(v0, v1);
 
-	// Perform NEON op: v5 = v0 OP v1
-	switch (op) {
-		case 0: armAsm->Fadd(v5.V4S(), v0.V4S(), v1.V4S()); break;
-		case 1: armAsm->Fsub(v5.V4S(), v0.V4S(), v1.V4S()); break;
-		case 2: armAsm->Fmul(v5.V4S(), v0.V4S(), v1.V4S()); break;
+	// Perform NEON op: v5 = v0 OP src2 (slot-direct on fast path, v1 otherwise).
+	bool opEmitted = false;
+	if (fastPathFullSlot)
+	{
+		const a64::VRegister slotReg(s_broadcastPlanSlotReg, 128);
+		switch (op) {
+			case 0: armAsm->Fadd(v5.V4S(), v0.V4S(), slotReg.V4S()); break;
+			case 1: armAsm->Fsub(v5.V4S(), v0.V4S(), slotReg.V4S()); break;
+			case 2: armAsm->Fmul(v5.V4S(), v0.V4S(), slotReg.V4S()); break;
+		}
+		opEmitted = true;
+	}
+	else if (fastPathLaneFmul)
+	{
+		opEmitted = tryEmitFmulLaneBroadcast(v5, v0);
+	}
+	if (!opEmitted)
+	{
+		// V1Held/None/ConstZero/ConstOne hit the legacy v1 path. Materialize
+		// is idempotent (no-op for V1Held/None, emits constant for Const*).
+		emitMaterializeBroadcast();
+		switch (op) {
+			case 0: armAsm->Fadd(v5.V4S(), v0.V4S(), v1.V4S()); break;
+			case 1: armAsm->Fsub(v5.V4S(), v0.V4S(), v1.V4S()); break;
+			case 2: armAsm->Fmul(v5.V4S(), v0.V4S(), v1.V4S()); break;
+		}
 	}
 
 	if (needsFlags)
@@ -966,6 +1157,21 @@ static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw,
 	const bool clampInputs = CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1);
 	const bool clampOutput = !needsFlags && CHECK_VU_OVERFLOW(1);
 
+	// FMAC opt #18: fast-path eligibility for the multiply step. Two flavors:
+	//   - FullSlot: read VF[ft] directly from cache slot for `Fmul v4, v0, slot`.
+	//   - Lane-FMUL (CacheLane/QIScalar): `Fmul v4, v0, slot.s[lane]`.
+	// Subsequent FADD/FSUB still preserves PS2's two-rounding (FMUL + separate
+	// FADD), since the slot-direct/lane-indexed FMUL is single-rounded only.
+	const bool fastPathFullSlot = !same_operands && !clampInputs
+		&& (s_broadcastPlanKind == BroadcastPlanKind::FullSlot);
+	const bool fastPathLaneFmul = !same_operands && !clampInputs
+		&& (s_broadcastPlanKind == BroadcastPlanKind::CacheLane
+		    || s_broadcastPlanKind == BroadcastPlanKind::QIScalar);
+	const bool fastPathAvailable = fastPathFullSlot || fastPathLaneFmul;
+	const bool needsV1Materialized = !fastPathAvailable;
+	if (needsV1Materialized)
+		emitMaterializeBroadcast();
+
 	// Load VF[fs] → v0 (via cache).
 	if (same_operands)
 		armAsm->Mov(v0.V16B(), v1.V16B());
@@ -986,8 +1192,28 @@ static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw,
 		emitVuClampVec(v5.V4S());
 	}
 
-	// Separate multiply: v4 = VF[fs] * src2 (with rounding)
-	armAsm->Fmul(v4.V4S(), v0.V4S(), v1.V4S());
+	// Separate multiply: v4 = VF[fs] * src2 (with rounding). Slot-direct or
+	// lane-indexed fast paths when the broadcast plan supports it.
+	bool fmulEmitted = false;
+	if (fastPathFullSlot)
+	{
+		const a64::VRegister slotReg(s_broadcastPlanSlotReg, 128);
+		armAsm->Fmul(v4.V4S(), v0.V4S(), slotReg.V4S());
+		fmulEmitted = true;
+	}
+	else if (fastPathLaneFmul)
+	{
+		fmulEmitted = tryEmitFmulLaneBroadcast(v4, v0);
+	}
+	if (!fmulEmitted)
+	{
+		// VF[0] const-broadcast (e.g., MADDw...vf00) and prior-pair-V1Held
+		// hits land here and need v1 to be a real vector for the Fmul.
+		// Idempotent on V1Held/None; emits Movi/Fmov for ConstZero/One.
+		emitMaterializeBroadcast();
+		armAsm->Fmul(v4.V4S(), v0.V4S(), v1.V4S());
+	}
+
 	// Separate add/sub: v5 = ACC ± product (with rounding)
 	if (subtract)
 		armAsm->Fsub(v5.V4S(), v5.V4S(), v4.V4S());
@@ -1106,6 +1332,11 @@ static void emitOpFmac(bool isSub, u32 fs, u32 ft, u32 fd_or_zero)
 // MUST use emitNoFlagWriteback — MAX/MINI on PS2 don't update MAC/Status.
 static void emitMaxFmac(bool isMini, u32 fs, u32 fd, u32 xyzw)
 {
+	// FMAC opt #18: MAX/MINI consume v1 as a vector (Smax/Smin operands), so
+	// we must materialize the broadcast plan first. ARM64 has no lane-indexed
+	// Smax/Smin, and the consumer uses v1 throughout the comparison.
+	emitMaterializeBroadcast();
+
 	vfCacheLoadInto(static_cast<int>(fs), v0);
 	// v1 must already be loaded with src2
 
@@ -1223,9 +1454,14 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 			} \
 			return; \
 		} \
-		vfCacheLoadInto(static_cast<int>(ft), v1); \
-		/* SQR detection (#3 deep-dive): MUL/ADD with fs == ft skips the \
-		 * second vfCacheLoadInto; v0 = v1 via Mov. SUB+self handled above. */ \
+		/* FMAC opt #18: plan a slot-direct read of VF[ft] instead of pre- \
+		 * loading v1. emitBinaryFmac's fast path emits the ALU op directly \
+		 * against the slot; legacy materialize + Mov-into-v1 only fires for \
+		 * clamp/hack/same_operands paths or VF[0]. */ \
+		emitPlanFullSlot(ft); \
+		/* SQR detection (#3 deep-dive): MUL/ADD with fs == ft still uses \
+		 * the legacy v1-materialized path inside emitBinaryFmac. SUB+self \
+		 * is handled above. */ \
 		emitBinaryFmac(op, fs, dst, xyzw, /*isScalarAdd=*/false, \
 		               /*same_operands=*/(fs == ft)); \
 	}
@@ -1271,7 +1507,10 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 fs = (VU1.code >> 11) & 0x1F; \
 		const u32 ft = (VU1.code >> 16) & 0x1F; \
 		const u32 xyzw = (VU1.code >> 21) & 0xF; \
-		vfCacheLoadInto(static_cast<int>(ft), v1); \
+		/* FMAC opt #18: plan a slot-direct read of VF[ft]. emitTernaryFmac's \
+		 * multiply step emits Fmul against the slot directly; only clamp / \
+		 * same_operands / VF[0] paths fall back to v1-materialize. */ \
+		emitPlanFullSlot(ft); \
 		int64_t dst = (toACC) ? accOff() : vfOff(fd); \
 		/* SQR detection (#3 deep-dive): when fs == ft, skip the redundant \
 		 * v0 load and use v1 for both operands. */ \
@@ -1307,7 +1546,12 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 fs = (VU1.code >> 11) & 0x1F; \
 		const u32 ft = (VU1.code >> 16) & 0x1F; \
 		const u32 xyzw = (VU1.code >> 21) & 0xF; \
-		vfCacheLoadInto(static_cast<int>(ft), v1); \
+		/* FMAC opt #18: plan; emitMaxFmac materializes v1 at entry since \
+		 * Smax/Smin have no slot-direct or lane-indexed variants. So this \
+		 * doesn't actually save a Mov for MAX/MINI — but using the same \
+		 * planning path keeps state consistent (broadcast cache reset, plan \
+		 * tracked) instead of the bare vfCacheLoadInto bypass. */ \
+		emitPlanFullSlot(ft); \
 		emitMaxFmac(isMini, fs, fd, xyzw); \
 	}
 

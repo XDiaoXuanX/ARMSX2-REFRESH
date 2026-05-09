@@ -59,6 +59,7 @@ import com.armsx2.RenderMode
 import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
 import com.armsx2.ui.settings.PerformanceTab
+import com.armsx2.ui.settings.RecompilerTab
 import com.armsx2.ui.settings.RendererTab
 import kr.co.iefriends.pcsx2.NativeApp
 
@@ -95,6 +96,7 @@ object InGameOverlay {
         data object LoadStateSlots : State()
         data object ExitConfirm : State()
         data object ResetConfirm : State()
+        data object AchievementsLogin : State()
     }
 
     private val state = mutableStateOf<State>(State.Root)
@@ -107,6 +109,7 @@ object InGameOverlay {
         PlayingNow("Playing Now"),
         Performance("Performance"),
         Renderer("Renderer"),
+        Recompiler("Recompiler"),
     }
     private val currentTab = mutableStateOf(Tab.PlayingNow)
 
@@ -224,13 +227,30 @@ object InGameOverlay {
                 }
             }
 
-            // Top-right: ARMSX2 branding + version. Mirrors the SetupImpl
-            // title row's right-aligned "ARMSX2 [logo]".
-            BrandHeader(
+            // Top-right column: ARMSX2 branding + version, and below it the
+            // achievements panel (visible on the Root state only — submenus
+            // own the screen for confirms / pickers). Polls
+            // NativeApp.getAchievementsJSON every few seconds while open so
+            // freshly-unlocked rows appear without a manual reopen.
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(20.dp),
-            )
+                    .fillMaxHeight()
+                    .padding(20.dp)
+                    .width(360.dp),
+                horizontalAlignment = Alignment.End,
+            ) {
+                BrandHeader(modifier = Modifier)
+                if (state.value is State.Root) {
+                    Spacer(Modifier.height(12.dp))
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        AchievementsPanel(
+                            modifier = Modifier.fillMaxWidth(),
+                            onSignInClick = { state.value = State.AchievementsLogin },
+                        )
+                    }
+                }
+            }
 
             // Bottom-left: confirm dialogs and slot pickers only. Root
             // content lives in the top-left column above with its tab
@@ -259,6 +279,9 @@ object InGameOverlay {
                         )
                         is State.ExitConfirm -> ExitConfirm()
                         is State.ResetConfirm -> ResetConfirm()
+                        is State.AchievementsLogin -> AchievementsLoginPanel(
+                            onClose = { state.value = State.Root },
+                        )
                         is State.Root -> Unit
                     }
                 }
@@ -301,10 +324,19 @@ object InGameOverlay {
             ) {
                 val context = LocalContext.current
                 if (coverUrl != null) {
+                    // PS2 boxart matches the 0.7 aspect cell — Crop fills.
+                    // PS1 jewel-case covers are squarer; Fit + Center
+                    // letterboxes them inside the same cell so the full
+                    // art is visible without cropping.
+                    val scale = when (cached?.platform) {
+                        com.armsx2.GamePlatform.PS1 -> ContentScale.Fit
+                        else -> ContentScale.Crop
+                    }
                     SubcomposeAsyncImage(
                         model = ImageRequest.Builder(context).data(coverUrl).crossfade(true).build(),
                         contentDescription = "$title cover",
-                        contentScale = ContentScale.Crop,
+                        contentScale = scale,
+                        alignment = Alignment.Center,
                         modifier = Modifier.fillMaxSize(),
                         loading = { /* dim background shows through */ },
                         error = { Text("📀", color = Color(0xFF3F3F3F), fontSize = 28.sp) },
@@ -405,6 +437,7 @@ object InGameOverlay {
             Tab.PlayingNow -> PlayingNowTab()
             Tab.Performance -> PerformanceTab(settingsState)
             Tab.Renderer -> RendererTab(settingsState)
+            Tab.Recompiler -> RecompilerTab(settingsState)
         }
     }
 

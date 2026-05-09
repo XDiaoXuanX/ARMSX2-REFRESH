@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +45,7 @@ import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.armsx2.FilenameParser
 import com.armsx2.GameInfo
+import com.armsx2.GamePlatform
 import com.armsx2.Main
 import kr.co.iefriends.pcsx2.NativeApp
 import org.json.JSONArray
@@ -72,36 +74,38 @@ object GamesList {
     @Composable
     fun GamesRow() {
         val context = LocalContext.current
-        val romsDir = Main.romsDir.value
+        val romsDirs = Main.romsDirs.value
 
-        // Cache-or-scan: hydrate from prefs on first composition, then
-        // scan only when the configured dir differs from what's cached.
-        // Sequential inside one LaunchedEffect so there's no race between
-        // the hydration and the auto-scan.
-        LaunchedEffect(romsDir) {
-            if (romsDir == null) return@LaunchedEffect
+        // Stable cache key — order-independent join of all configured dirs.
+        // Two-dir configs in either order hit the same cache, single-dir
+        // matches the old format. Used for both "is the cache stale?"
+        // checks and the cache write below.
+        val romsKey = remember(romsDirs) { cacheKeyForDirs(romsDirs) }
+
+        LaunchedEffect(romsKey) {
+            if (romsDirs.isEmpty()) return@LaunchedEffect
 
             if (!cacheLoaded.value) {
                 cacheLoaded.value = true
-                val (cachedDir, cachedGames) = loadCache(context)
-                if (cachedDir == romsDir) {
+                val (cachedKey, cachedGames) = loadCache(context)
+                if (cachedKey == romsKey) {
                     games.clear()
                     games.addAll(cachedGames)
-                    lastScannedRoms.value = romsDir
+                    lastScannedRoms.value = romsKey
                     return@LaunchedEffect
                 }
             }
 
-            if (lastScannedRoms.value != romsDir && !scanning.value) {
-                scanRoms(context, romsDir)
+            if (lastScannedRoms.value != romsKey && !scanning.value) {
+                scanRoms(context, romsDirs, romsKey)
             }
         }
 
         Box(Modifier.fillMaxSize().padding(16.dp)) {
             when {
-                romsDir == null -> EmptyMessage(
-                    "No ROMs folder configured",
-                    "Use the Settings cog to set one up.",
+                romsDirs.isEmpty() -> EmptyMessage(
+                    "No ROMs folders configured",
+                    "Use the Settings cog to add one or more.",
                 )
                 scanning.value && games.isEmpty() -> ScanningSpinner()
                 scanError.value != null -> Text(
@@ -117,22 +121,7 @@ object GamesList {
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         item(key = "__refresh__") {
-                            // LazyVerticalGrid hands items unbounded height,
-                            // so fillMaxHeight() inside an item collapses to
-                            // zero — siblings can't be matched implicitly.
-                            // Use BoxWithConstraints to read the cell width,
-                            // then size this slot to the same intrinsic
-                            // height a GameCard would have at that width:
-                            //   hero box (aspect 0.7 → width / 0.7) +
-                            //   ~64dp label/serial/stars column.
                             BoxWithConstraints {
-                                // Hero (aspect 0.7 → width/0.7) + label
-                                // column. With minLines=2 on the title the
-                                // label is now always:
-                                //   8dp pad + 2×13sp title (~36dp) +
-                                //   2dp + 10sp serial (~14dp) +
-                                //   4dp + 12sp stars (~16dp) + 8dp pad
-                                //   ≈ 88dp.
                                 val gameCardHeight = maxWidth / 0.7f + 88.dp
                                 Column(
                                     Modifier.height(gameCardHeight),
@@ -142,8 +131,8 @@ object GamesList {
                                         modifier = Modifier.weight(1f),
                                         isScanning = scanning.value,
                                         onRefresh = {
-                                            if (!scanning.value && romsDir != null)
-                                                scanRoms(context, romsDir)
+                                            if (!scanning.value && romsDirs.isNotEmpty())
+                                                scanRoms(context, romsDirs, romsKey)
                                         },
                                     )
                                     BiosCard(
@@ -164,6 +153,12 @@ object GamesList {
             }
         }
     }
+
+    /** Sorted "|" join so ["A","B"] and ["B","A"] produce the same key.
+     *  We dedupe within the user's selection in case they accidentally
+     *  pick the same folder twice. */
+    private fun cacheKeyForDirs(dirs: List<String>): String =
+        dirs.toSet().sorted().joinToString("|")
 
     @Composable
     private fun EmptyMessage(title: String, body: String) {
@@ -328,16 +323,29 @@ object GamesList {
                 if (coverUrl != null) {
                     // SubcomposeAsyncImage so we can render a real fallback
                     // composable when the cover URL 404s — happens for any
-                    // game the xlenore/ps2-covers `default/` folder doesn't
-                    // have (e.g. obscure releases, regional dumps whose
-                    // serial isn't covered there).
+                    // game the xlenore covers repo doesn't have (obscure
+                    // releases, regional dumps whose serial isn't covered).
+                    //
+                    // Per-platform contentScale: PS2 boxart is taller than
+                    // wide (matches the cell's 0.7 aspect ratio cleanly), so
+                    // ContentScale.Crop fills the cell with no margin. PS1
+                    // jewel-case covers are squarer/wider — cropping would
+                    // chop the sides; ContentScale.Fit + Center letterboxes
+                    // the cover inside the taller cell so the full art is
+                    // visible. Cell aspect stays uniform so the grid layout
+                    // doesn't shift between platforms.
+                    val scale = when (game.platform) {
+                        GamePlatform.PS2 -> ContentScale.Crop
+                        GamePlatform.PS1 -> ContentScale.Fit
+                    }
                     SubcomposeAsyncImage(
                         model = ImageRequest.Builder(context)
                             .data(coverUrl)
                             .crossfade(true)
                             .build(),
                         contentDescription = "${game.title} cover",
-                        contentScale = ContentScale.Crop,
+                        contentScale = scale,
+                        alignment = Alignment.Center,
                         modifier = Modifier.fillMaxSize(),
                         loading = { CoverLoadingTile() },
                         error = { NoCoverTile(missingSerial = false) },
@@ -457,56 +465,65 @@ object GamesList {
     }
 
     /**
-     * Walk the ROMs folder via DocumentFile, probe each disc image's
-     * SYSTEM.CNF for its real serial when possible, and persist results
-     * to prefs. Falls back to filename-based serial extraction for any
-     * file the C++ probe rejects (CHD / CSO / GZ / etc., or ISOs whose
-     * filesystem doesn't follow the typical PS2 layout).
+     * Walk every configured ROM folder via DocumentFile, probe each disc
+     * image's SYSTEM.CNF for its real serial + platform when possible,
+     * and persist merged results to prefs. Falls back to filename-based
+     * serial extraction for compressed formats (CHD/CSO/GZ) or non-ISO9660
+     * raw images.
+     *
+     * De-duplication: same URI in two configured folders (rare — would
+     * require nested SAF mounts) is merged by URI string. Title sort is
+     * case-insensitive across the union.
      */
-    private fun scanRoms(context: Context, romsUriString: String) {
+    private fun scanRoms(context: Context, romsUriStrings: List<String>, romsKey: String) {
         scanning.value = true
         scanError.value = null
-        lastScannedRoms.value = romsUriString
+        lastScannedRoms.value = romsKey
         Main.invoke {
             try {
-                val uri = Uri.parse(romsUriString)
-                val tree = DocumentFile.fromTreeUri(context, uri)
-                val files = tree?.listFiles() ?: emptyArray()
-                val collected = mutableListOf<GameInfo>()
-                for (f in files) {
-                    if (!f.isFile) continue
-                    val name = f.name ?: continue
-                    val ext = name.substringAfterLast('.', "").lowercase()
-                    if (ext !in GAME_EXTENSIONS) continue
+                val collected = linkedMapOf<String, GameInfo>() // URI → info, preserves first-seen order
+                for (dirUri in romsUriStrings) {
+                    val uri = try { Uri.parse(dirUri) } catch (_: Exception) { null } ?: continue
+                    val tree = DocumentFile.fromTreeUri(context, uri) ?: continue
+                    val files = tree.listFiles()
+                    for (f in files) {
+                        if (!f.isFile) continue
+                        val name = f.name ?: continue
+                        val ext = name.substringAfterLast('.', "").lowercase()
+                        if (ext !in GAME_EXTENSIONS) continue
 
-                    // Try the real ISO9660 probe first. Native handles
-                    // 2048/0 (.iso), 2352/{16,24} (.bin Mode 1/Mode 2 raw),
-                    // and CHD via libchdr (DVD + CD frame sizes). Other
-                    // compressed formats (CSO/GZ/etc.) still fall through
-                    // to filename parsing.
-                    val realSerial = if (ext == "iso" || ext == "bin" || ext == "chd")
-                        probeDiscSerial(context, f.uri) else null
-                    val (titleFromName, serialFromName) = FilenameParser.parse(name)
-                    val finalSerial = realSerial ?: serialFromName
-                    // PCSX2 gamedb returns 0..6 (Unknown / Nothing / Intro /
-                    // Menu / InGame / Playable / Perfect). Per spec we treat
-                    // 0 and 1 as zero stars (no usable progress) and 2..6
-                    // map to 1..5 stars.
-                    val compatRaw = if (finalSerial != null)
-                        NativeApp.getCompatibilityForSerial(finalSerial) else 0
-                    val compatStars = (compatRaw - 1).coerceIn(0, 5)
-                    collected += GameInfo(
-                        uri = f.uri,
-                        title = titleFromName,
-                        serial = finalSerial,
-                        compatibility = compatStars,
-                        extension = ext.uppercase(),
-                    )
+                        // ISO9660 probe (PS2 BOOT2 + PS1 BOOT). Native
+                        // returns "<platform>:<serial>" tag — e.g.
+                        // "ps1:SLUS-00713" — when SYSTEM.CNF is parseable.
+                        // Compressed formats fall through to filename.
+                        val rawProbe = if (ext == "iso" || ext == "bin" || ext == "chd")
+                            probeDiscSerial(context, f.uri) else null
+                        val (probeSerial, probePlatform) = parseProbeResult(rawProbe)
+                        val (titleFromName, serialFromName) = FilenameParser.parse(name)
+                        val finalSerial = probeSerial ?: serialFromName
+                        val finalPlatform = probePlatform ?: GamePlatform.PS2
+                        // PCSX2 gamedb returns 0..6 (Unknown / Nothing /
+                        // Intro / Menu / InGame / Playable / Perfect).
+                        // Map 0,1 → 0 stars; 2..6 → 1..5 stars. PS1 will
+                        // typically miss the PS2-only gamedb and stay 0.
+                        val compatRaw = if (finalSerial != null)
+                            NativeApp.getCompatibilityForSerial(finalSerial) else 0
+                        val compatStars = (compatRaw - 1).coerceIn(0, 5)
+                        val info = GameInfo(
+                            uri = f.uri,
+                            title = titleFromName,
+                            serial = finalSerial,
+                            compatibility = compatStars,
+                            extension = ext.uppercase(),
+                            platform = finalPlatform,
+                        )
+                        collected.putIfAbsent(f.uri.toString(), info)
+                    }
                 }
-                collected.sortBy { it.title.lowercase() }
+                val sorted = collected.values.sortedBy { it.title.lowercase() }
                 games.clear()
-                games.addAll(collected)
-                saveCache(context, romsUriString, collected)
+                games.addAll(sorted)
+                saveCache(context, romsKey, sorted)
             } catch (e: Exception) {
                 scanError.value = "Scan failed: ${e.message}"
             } finally {
@@ -515,7 +532,20 @@ object GamesList {
         }
     }
 
-    /** Open `uri` for read, hand the fd to native, get the serial back. */
+    /** Split a "ps1:SLUS-00713" / "ps2:SLUS-20312" probe return into
+     *  (serial, platform). Untagged input (legacy native or filename-only)
+     *  falls back to (input, null). null/empty → (null, null). */
+    private fun parseProbeResult(raw: String?): Pair<String?, GamePlatform?> {
+        if (raw.isNullOrEmpty()) return null to null
+        val colon = raw.indexOf(':')
+        if (colon <= 0) return raw to null
+        val tag = raw.substring(0, colon)
+        val serial = raw.substring(colon + 1)
+        return serial to GamePlatform.fromKey(tag)
+    }
+
+    /** Open `uri` for read, hand the fd to native, get the
+     *  "<platform>:<serial>" back. */
     private fun probeDiscSerial(context: Context, uri: Uri): String? {
         return try {
             val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
@@ -528,7 +558,7 @@ object GamesList {
 
     // ---------------- Prefs cache ----------------
 
-    private fun saveCache(context: Context, romsUri: String, list: List<GameInfo>) {
+    private fun saveCache(context: Context, romsKey: String, list: List<GameInfo>) {
         val arr = JSONArray()
         for (g in list) {
             arr.put(JSONObject().apply {
@@ -537,18 +567,25 @@ object GamesList {
                 put("serial", g.serial ?: JSONObject.NULL)
                 put("compat", g.compatibility)
                 put("ext", g.extension)
+                put("platform", g.platform.key)
             })
         }
         Main.prefs.edit()
-            .putString("gamesCacheDir", romsUri)
+            .putString("gamesCacheKey", romsKey)
             .putString("gamesCache", arr.toString())
             .apply()
     }
 
     private fun loadCache(context: Context): Pair<String?, List<GameInfo>> {
         val prefs = Main.prefs
-        val cachedDir = prefs.getString("gamesCacheDir", null)
-        val cachedJson = prefs.getString("gamesCache", null) ?: return cachedDir to emptyList()
+        // New key format ("|"-joined sorted dir set) under "gamesCacheKey".
+        // Legacy key (single dir) was under "gamesCacheDir" — read either,
+        // prefer the new one. Caller compares against the current
+        // cacheKeyForDirs() so a legacy single-dir cache still matches an
+        // unchanged single-dir config.
+        val cachedKey = prefs.getString("gamesCacheKey", null)
+            ?: prefs.getString("gamesCacheDir", null)
+        val cachedJson = prefs.getString("gamesCache", null) ?: return cachedKey to emptyList()
         return try {
             val arr = JSONArray(cachedJson)
             val list = mutableListOf<GameInfo>()
@@ -560,17 +597,15 @@ object GamesList {
                     title = obj.getString("title"),
                     serial = rawSerial,
                     compatibility = obj.optInt("compat", 0),
-                    // Older caches won't have "ext" — fall back to deriving
-                    // it from the URI path so existing entries still get a
-                    // badge without forcing a refresh.
                     extension = obj.optString("ext", "").ifEmpty {
                         obj.getString("uri").substringAfterLast('.', "").uppercase()
                     },
+                    platform = GamePlatform.fromKey(obj.optString("platform", null)),
                 ))
             }
-            cachedDir to list
+            cachedKey to list
         } catch (_: Exception) {
-            cachedDir to emptyList()
+            cachedKey to emptyList()
         }
     }
 }

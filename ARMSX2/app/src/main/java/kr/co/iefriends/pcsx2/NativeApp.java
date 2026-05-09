@@ -91,6 +91,23 @@ public class NativeApp {
 	public static native String getPauseGameTitle();
 	public static native String getPauseGameSerial();
 
+	/** Snapshot the current game's achievements as JSON for the in-game
+	 *  overlay's right-side panel. See Achievements::GetAchievementsAsJSON
+	 *  in the C++ side for the schema. Returns the empty-state payload
+	 *  (active=false, items=[]) when no game is loaded or not logged in. */
+	public static native String getAchievementsJSON();
+
+	/** RetroAchievements password login. Returns null on success or a
+	 *  human-readable error string. Synchronous — runs the HTTP login
+	 *  request to completion, may take a few seconds. Callers MUST
+	 *  dispatch off the Main thread (Dispatchers.IO from Compose).
+	 *  After success the next getAchievementsJSON poll will reflect
+	 *  loggedIn=true; no separate callback wiring needed. */
+	public static native String loginAchievements(String username, String password);
+
+	/** RetroAchievements logout. Idempotent. */
+	public static native void logoutAchievements();
+
 	public static native void setPadVibration(boolean isonoff);
 	public static native void setPadButton(int index, int range, boolean iskeypressed);
 	public static native void resetKeyStatus();

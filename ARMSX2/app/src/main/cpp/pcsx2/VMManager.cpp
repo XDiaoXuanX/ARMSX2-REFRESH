@@ -1672,6 +1672,16 @@ void VMManager::Shutdown(bool save_resume_state)
 		vu1Thread.WaitVU();
 	MTGS::WaitGS();
 
+	// VU1_PROFILE_BLOCKS: per-game shutdown is the right surface for the
+	// hot-block dump — overlay Exit lands here, full app exit picks it up
+	// later via ShutdownCPUProviders. No-op when the macro is undefined.
+	// VU1 is drained above, so s_variants is stable.
+#if defined(__aarch64__) || defined(_M_ARM64)
+#ifndef INTERP_VU1
+	CpuArmVU1.DumpProfile();
+#endif
+#endif
+
 	if (!GSDumpReplayer::IsReplayingDump() && save_resume_state)
 	{
 		std::string resume_file_name(GetCurrentSaveStateFileName(-1));
@@ -2298,22 +2308,12 @@ void VMManager::Internal::Throttle()
 		return;
 	}
 
-	// Conversion of delta from CPU ticks (microseconds) to milliseconds
-	const s32 msec = static_cast<s32>((sDeltaTime * -1000) / static_cast<s64>(GetTickFrequency()));
-
-	// If any integer value of milliseconds exists, sleep it off.
-	// Prior comments suggested that 1-2 ms sleeps were inaccurate on some OSes;
-	// further testing suggests instead that this was utter bullshit.
-	if (msec > 1)
-	{
-		Threading::Sleep(msec - 1);
-	}
-
-	// Conversion to milliseconds loses some precision; after sleeping off whole milliseconds,
-	// spin the thread without sleeping until we finally reach our expected end time.
-	while (GetCPUTicks() < uExpectedEnd)
-	{
-	}
+	// Sleep until the expected frame end. On Android/Linux this is clock_nanosleep
+	// with TIMER_ABSTIME against CLOCK_MONOTONIC; HRTIMER wakeup is within ~50-200us
+	// of the deadline, vs the prior msec-sleep + GetCPUTicks busy-spin which burned
+	// ~10% of EE thread CPU calling clock_gettime in a tight loop while waiting out
+	// the sub-millisecond tail.
+	Threading::SleepUntil(uExpectedEnd);
 
 	// Finally, set our next frame start to when this one ends
 	s_limiter_frame_start = uExpectedEnd;

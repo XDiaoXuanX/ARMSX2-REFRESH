@@ -53,9 +53,10 @@
 //#define INTERP_VU_MISC       // MOVE, MR32, MFIR, MTIR, MFP, flag ops, random, EFU, XITOP, XTOP, XGKICK
 
 // Diagnostic: emit per-block exec counter at VU1 block linkEntry and dump the
-// top-5 hottest blocks (with per-pair disassembly) on recArmVU1::Shutdown —
-// fires when the Compose Stop button is pressed. Adds ~5 insns per block
-// entry (measurable cost on linked-chain entries), so keep off unless profiling.
+// top-20 hottest blocks (with per-pair disassembly) on per-game shutdown —
+// fires from VMManager::Shutdown via recArmVU1::DumpProfile, so the overlay's
+// Exit button surfaces the dump (not just full app exit). Adds ~5 insns per
+// block entry (measurable cost on linked-chain entries), keep off unless profiling.
 //#define VU1_PROFILE_BLOCKS
 
 // EXPERIMENT: force cpuRegs.cycle writeback to memory at every EE block-end
@@ -164,7 +165,35 @@
 //
 // Once the harness has gone silent through GoW2 specifically (the prior
 // regression), Phase 2 ships safely. Until then, leave commented out.
-#define VU1_DEFER_VF_WRITES
+//#define VU1_DEFER_VF_WRITES
+
+// VU1 BLOCK-LEVEL shadow verify. Companion to VU1_SHADOW_VERIFY (per-pair).
+//
+// Per-pair shadow flushes the VF (NEON) cache before each snapshot/verify
+// BL — that's correct for catching per-pair semantic bugs but it MASKS
+// cross-pair coherence bugs. Specifically: under VU1_DEFER_VF_WRITES, pair
+// K's FMAC writeback stays in a NEON cache slot until a flush site fires.
+// If pair K+M reads VF[X] memory directly (e.g. inline Ldr in MTIR / MFP /
+// MFIR / LQ family) without a paired vfCacheFlushOne(X), it sees stale
+// memory. Per-pair shadow's pre-snapshot flush forces memory coherent at
+// every pair boundary, so K+M's emit reads correct memory under shadow but
+// stale memory in real execution. Bug invisible to per-pair.
+//
+// Block-level shadow runs the WHOLE block end-to-end with the cache living
+// across pairs (matching real execution), then compares end-of-block state.
+// Block epilogue's vfCacheFlushAndInvalidate commits all deferred writes
+// before snapshot-post. A coherence bug shows up as a divergent VF/VI/Mem
+// in the end state.
+//
+// Use when:
+// - Per-pair shadow runs silent through a graphical bug (e.g., SH2 under
+//   VU1_DEFER_VF_WRITES) that ONLY manifests in real execution.
+// - You need to catch missed vfCacheFlushOne / vfCacheInvalidate sites in
+//   the JIT's inline-emit lower ops.
+//
+// Requires VU1_SHADOW_VERIFY also defined (shares the divergence latch and
+// log helpers). MTVU must be off.
+//#define VU1_BLOCK_SHADOW_VERIFY
 
 // Diagnostic: TPC-range fallback bisection. Pairs whose pc falls in
 // [INTERP_VU0_PC_LOW, INTERP_VU0_PC_HIGH] route to vu0Exec; others go
@@ -230,7 +259,77 @@
 //DMAC
 //#define INTERP_DMAC          // VIF0, VIF1, GIF, IPU0/1, SIF0/1/2, SPR0/1 + interrupt handlers
 
+// Diagnostic: IOP shadow-compare. Mirrors the VU0/VU1 design — pre-block
+// snapshot of psxRegs, post-block snapshot, restore + interp re-run via
+// psxInterpReplayBlock, register-by-register compare, halt-on-first-
+// divergence with PRE/JIT/INTERP dump and native backtrace. Use this to
+// validate IOP JIT codegen changes (e.g. const-prop tightening, new ALU
+// op natives, or LWL/LWR/SWL/SWR fastpaths) against the interpreter.
+//
+// Constraints:
+//   - Validates GPR + CP0 + pc + hi/lo. CYCLE-RELATED FIELDS ARE MASKED
+//     (cycle, iopCycleEE, iopBreak, iopNextEventCycle, sCycle/eCycle,
+//     interrupt, pcWriteback) — JIT uses block-end batched cycle add,
+//     interp uses per-instruction increment, so they diverge by-design.
+//     CP2D/CP2C (GTE) is also masked since GTE is interp-stubbed.
+//   - Memory (iopMem->Main, iopHw, scratchpad) is NOT rolled back. Blocks
+//     that write to HW registers will see double-writes during interp
+//     replay; for those blocks the harness may go silent or fire
+//     spuriously. Best for ALU/branch-heavy bug investigation.
+//   - Slows IOP emulation drastically. Debug-only.
+//
+// Recommended workflow when chasing an IOP JIT codegen bug:
+//   1. Rebuild with IOP_SHADOW_VERIFY defined.
+//   2. Reproduce the symptom. The harness aborts on the first per-block
+//      divergence and dumps PRE / JIT / INTERP state for the offending
+//      block.
+//   3. The first divergent field maps to the JIT bug (e.g. GPR[t0]
+//      mismatch → wrong codegen for whatever op writes t0 in that block).
+//#define IOP_SHADOW_VERIFY
+
+// Cycle-window gate for IOP_SHADOW_VERIFY. Same shape as VU0/VU1 — both
+// snapshot and verify BLs are emitted unconditionally; the runtime gate
+// inside iop_shadow_verify skips the interp re-run + memcmp when
+// psxRegs.cycle is outside [FROM, TO]. Use to bypass long boot sequences
+// when reproducing a specific scene.
+//#define IOP_SHADOW_VERIFY_FROM_CYCLE 0ULL
+//#define IOP_SHADOW_VERIFY_TO_CYCLE   0ULL
+
+// PC-range skip for per-block IOP shadow. Blocks whose startpc falls in
+// [LO, HI) are excluded from the per-block comparison. Use to silence
+// known false positives — typically iopMem-loop blocks like 0xbfc4ab68
+// (LW r5,0(r6) / ADDU r5,r5,r16 / SW r5,0(r6) increment a counter in
+// memory; the replay reads the JIT's already-stored value and computes a
+// one-iteration-ahead result). Per-instruction shadow is unaffected by
+// this skip and stays accurate on those same blocks.
+//
+// Define both macros to enable. Example to skip the IOPBOOT counter block:
+//#define IOP_SHADOW_VERIFY_SKIP_PC_LO 0xbfc4ab68u
+//#define IOP_SHADOW_VERIFY_SKIP_PC_HI 0xbfc4ab80u
+
+// Per-instruction shadow for IOP. Requires IOP_SHADOW_VERIFY also defined
+// (shares halt path / divergence latch). When per-block divergence reports
+// the block but not the instruction, this narrows it: snapshot before each
+// non-branch op emit, run ONE execI from the snapshot post-emit, compare.
+// Halts at the EXACT pc of the divergent op. Doesn't fire on branch ops
+// (their codegen exits to dispatcher before reaching the post-emit BL) —
+// branch-codegen bugs still surface via per-block shadow.
+//
+// Cost: 2 BLs per non-branch op (snapshot + verify). Per-block shadow
+// already costs O(block) to replay; per-instruction adds another factor
+// of N instructions × 1 execI per BL. Slow but precise — debug only.
+//#define IOP_SHADOW_VERIFY_PER_INSTR
+
 //IOP
+// INTERP_IOP master: flips ALL sub-categories to interp stubs AND disables
+// delay-slot swap (psxTrySwapDelaySlot returns false unconditionally). This
+// makes the IOP JIT a thin dispatcher around the interpreter — every op
+// goes through iopArmCallInterpreter(psxXxx). Const-prop is effectively
+// disabled (resets after each BL), execution order matches MIPS+interp
+// exactly. Use for shadow-verify when chasing native-only hangs/bugs:
+// running native+shadow with INTERP_IOP turned on means JIT side is
+// effectively interp, divergences should be near-zero. To narrow: turn
+// INTERP_IOP off and bring sub-categories back to native one at a time.
 //#define INTERP_IOP             // Master
 //#define INTERP_IOP_ALU         // BISECT: uncommented → per-instruction ISTUBs in iR3000Atables_arm64.cpp
 //#define INTERP_IOP_BRANCH      // BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ/BLTZAL/BGEZAL/J/JAL/JR/JALR

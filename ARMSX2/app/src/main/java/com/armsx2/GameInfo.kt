@@ -8,19 +8,36 @@ import android.net.Uri
  * are common dump conventions. compatibility is left at 0 (no stars filled)
  * until we add a gamedb JNI bridge.
  *
- * `coverUrl` is computed from the serial using the xlenore/ps2-covers
- * repository (the user-specified source) when a serial was extractable;
- * null otherwise. Coil renders a placeholder for null URLs / 404s.
+ * `platform` distinguishes PS1 ("ps1") from PS2 ("ps2") so we hit the
+ * right cover repo: xlenore/ps2-covers vs xlenore/psx-covers. Native
+ * (getGameSerialFromFd) tags its return with the platform when SYSTEM.CNF
+ * is parseable; filename-only fallback defaults to "ps2".
  */
+enum class GamePlatform(val key: String) {
+    PS2("ps2"),
+    PS1("ps1");
+
+    companion object {
+        fun fromKey(s: String?): GamePlatform =
+            if (s == "ps1") PS1 else PS2
+    }
+}
+
 data class GameInfo(
     val uri: Uri,
     val title: String,
     val serial: String?,
     val compatibility: Int = 0,    // 0..5 (TODO: pull from gamedb)
     val extension: String = "",    // upper-case container ext, e.g. "ISO", "CHD"
+    val platform: GamePlatform = GamePlatform.PS2,
 ) {
-    val coverUrl: String? get() = serial?.let {
-        "https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/$it.jpg"
+    val coverUrl: String? get() = serial?.let { s ->
+        when (platform) {
+            GamePlatform.PS2 ->
+                "https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/$s.jpg"
+            GamePlatform.PS1 ->
+                "https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/default/$s.jpg"
+        }
     }
 }
 
