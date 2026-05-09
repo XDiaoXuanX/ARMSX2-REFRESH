@@ -124,11 +124,47 @@ __fi int psxRemainingCycles(IopEventId n)
 		return 0;
 }
 
+// =====================  PSX_INT PER-EVENT TUNING KNOBS  =====================
+// Scale factor (in 1/256ths) applied to each PSX_INT(n, ecycle) call, so we
+// can characterize which IOP-side interrupt's delay is too short and is
+// causing the PS1 "global speedup" by letting the IOP run more code per
+// real-second than it should. 256 = 1.0× (default upstream behavior).
+//
+// Crank an entry up — say 1024 (4×) or 4096 (16×) — and observe whether
+// PS1 game speed changes. If cranking IopEvt_X slows the game, that path
+// is dispatching too often / undercharging cycles in the upstream code.
+//
+// Sized to NUM_EVENTS (= IopEvt count). Order MUST match enum IopEventId.
+static constexpr u32 PSX_INT_SCALE_256[] = {
+		256, // IopEvt_SIF2
+		256, // IopEvt_Cdvd
+		256, // IopEvt_SIF0
+		256, // IopEvt_SIF1
+		256, // IopEvt_Dma11      (SIO2 in)
+		256, // IopEvt_Dma12      (SIO2 out)
+		256, // IopEvt_SIO
+		256, // IopEvt_Cdrom      (PS1 CDROM)
+		256, // IopEvt_CdromRead  (PS1 CDROM read)
+		256, // IopEvt_CdvdRead
+		256, // IopEvt_CdvdSectorReady
+		256, // IopEvt_DEV9
+		256, // IopEvt_USB
+};
+static_assert(sizeof(PSX_INT_SCALE_256) / sizeof(PSX_INT_SCALE_256[0]) ==
+	(IopEvt_USB + 1), "PSX_INT_SCALE_256 size must match IopEventId enum");
+
 __fi void PSX_INT( IopEventId n, s32 ecycle )
 {
 	// 19 is CDVD read int, it's supposed to be high.
 	//if (ecycle > 8192 && n != 19)
 	//	DevCon.Warning( "IOP cycles high: %d, n %d", ecycle, n );
+
+	// Apply the per-event tuning knob. ecycle is signed; scale in 64-bit
+	// to avoid 32-bit overflow when scale > 256, then clamp to s32.
+	const s64 scaled = (static_cast<s64>(ecycle) * static_cast<s64>(PSX_INT_SCALE_256[n])) >> 8;
+	if (scaled > 0x7FFFFFFFLL) ecycle = 0x7FFFFFFF;
+	else if (scaled < -0x7FFFFFFFLL) ecycle = -0x7FFFFFFF;
+	else ecycle = static_cast<s32>(scaled);
 
 	psxRegs.interrupt |= 1 << n;
 
@@ -142,7 +178,7 @@ __fi void PSX_INT( IopEventId n, s32 ecycle )
 	if (psxRegs.iopCycleEE < iopDelta)
 	{
 		// The EE called this int, so inform it to branch as needed:
-		
+
 		cpuSetNextEventDelta(iopDelta - psxRegs.iopCycleEE);
 	}
 }

@@ -1173,7 +1173,12 @@ void psxRecompileNextInstruction(bool delayslot, bool swapped_delayslot)
 	s_recompilingDelaySlot = delayslot;
 
 	psxRegs.code = iopMemRead32(psxpc);
-	s_psxBlockCycles++;
+	// Per-instruction cycle multiplier — see g_iopCycleMultiplier in
+	// R3000AInterpreter.cpp. JIT bakes this in at compile time. NOTE:
+	// changing the value requires invalidating the JIT cache (psxCpu->Reset)
+	// for already-compiled blocks to pick up the new multiplier.
+	extern u32 g_iopCycleMultiplier;
+	s_psxBlockCycles += g_iopCycleMultiplier;
 	psxpc += 4;
 
 	g_pCurInstInfo++;

@@ -28,6 +28,26 @@ bool iopIsDelaySlot = false;
 // on EE thread).
 bool iopShadowSuppressEventTest = false;
 
+// =====================  IOP PER-INSTRUCTION CYCLE MULTIPLIER  =====================
+// Real R3000A executes at ~0.5-0.7 effective IPC due to memory stalls /
+// cache misses; PCSX2 advances psxRegs.cycle by exactly 1 per instruction
+// (= 1.0 IPC), so per real-second PCSX2 runs 1.4-2x more game code than
+// real PS1 — game logic outpaces audio (which is keyed correctly to
+// psxRegs.cycle). This knob inflates the per-instruction cycle cost so
+// the IOP runs proportionally fewer instructions per emulator-frame.
+//
+// SPU2, RTC, T0-T5 counters, and vsync ALL pace by psxRegs.cycle's
+// wall-clock advance, which is set by the EE-side budget (unchanged) —
+// they stay at correct wall-clock rate. Only game CODE slows.
+//
+//   1 = upstream behavior (1.0 IPC, ~1.4x speedup vs real PS1)
+//   2 = 0.5 IPC — game runs ~half speed of upstream  (test/prove path)
+//   3 = ~0.33 IPC — should slow game even more
+//
+// Find the value that brings game speed to match real PS1, then we'll
+// tune more carefully (per-op cycle costs for loads/stores etc).
+u32 g_iopCycleMultiplier = 1;
+
 static bool branch2 = 0;
 static u32 branchPC;
 
@@ -240,7 +260,7 @@ static __fi void execI()
 		PSXCPU_LOG("%s", disR3000AF(psxRegs.code, psxRegs.pc));
 
 	psxRegs.pc+= 4;
-	psxRegs.cycle++;
+	psxRegs.cycle += g_iopCycleMultiplier;
 
 	psxBSC[psxRegs.code >> 26]();
 }
