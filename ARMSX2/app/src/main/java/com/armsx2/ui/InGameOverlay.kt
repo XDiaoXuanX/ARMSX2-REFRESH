@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -97,6 +98,8 @@ object InGameOverlay {
         data object ExitConfirm : State()
         data object ResetConfirm : State()
         data object AchievementsLogin : State()
+        data object HardcoreEnableConfirm : State()
+        data object HardcoreSaveStateBlocked : State()
     }
 
     private val state = mutableStateOf<State>(State.Root)
@@ -118,9 +121,21 @@ object InGameOverlay {
     // out-of-band edits (e.g. from a future global Settings screen).
     private val settingsState = mutableStateOf(Settings())
 
+    // Polled from NativeApp.isHardcoreMode while the overlay is open. Drives
+    // the Save/Load state row dimming and the AchievementsPanel button
+    // colour. Updates on every overlay open and every AchievementsPanel
+    // poll (which already runs every 4s) — see Render() below.
+    val hardcoreOn = mutableStateOf(false)
+
     // Locally tracked frame-limit toggle. 0 = Nominal (60fps cap),
     // 3 = Unlimited. Matches LimiterModeType / SpeedhackButton wiring.
-    private val frameLimitOn = mutableStateOf(true)
+    //
+    // Default ON at app start (60fps cap). The state is held by this
+    // singleton object so within an app session toggling once persists
+    // across game launches — Main.start() re-applies it to native after
+    // Settings.applyTo() runs on each VM init. Process restart resets to
+    // the default (ON).
+    val frameLimitOn = mutableStateOf(true)
 
     // Renderer cycle: matches RenderModeButton's OPENGL ↔ VULKAN_SW path.
     private val currentRenderer = mutableStateOf(RenderMode.OPENGL)
@@ -247,6 +262,17 @@ object InGameOverlay {
                         AchievementsPanel(
                             modifier = Modifier.fillMaxWidth(),
                             onSignInClick = { state.value = State.AchievementsLogin },
+                            onHardcoreToggle = {
+                                if (hardcoreOn.value) {
+                                    // Turn-off is safe (no VM reset) — apply
+                                    // immediately. Native will fold the change
+                                    // through Achievements::DisableHardcoreMode.
+                                    NativeApp.setHardcoreMode(false)
+                                    hardcoreOn.value = false
+                                } else {
+                                    state.value = State.HardcoreEnableConfirm
+                                }
+                            },
                         )
                     }
                 }
@@ -258,10 +284,17 @@ object InGameOverlay {
             // sit at the bottom of the screen (Exit / Reset confirms,
             // save-state slot grid).
             if (state.value !is State.Root) {
+                // The login form needs more vertical room than the other
+                // bottom-left states (it has 2 text fields + disclaimer +
+                // buttons), and on landscape phones with the keyboard up
+                // 75% of the screen isn't quite enough — content clips and
+                // verticalScroll only barely engages. Give the login state
+                // a taller box.
+                val maxFrac = if (state.value is State.AchievementsLogin) 0.92f else 0.75f
                 Box(
                     Modifier
                         .align(Alignment.BottomStart)
-                        .fillMaxHeight(0.75f)
+                        .fillMaxHeight(maxFrac)
                         .width(360.dp)
                         .padding(start = 20.dp, bottom = 20.dp, top = 20.dp),
                     contentAlignment = Alignment.BottomStart,
@@ -282,9 +315,21 @@ object InGameOverlay {
                         is State.AchievementsLogin -> AchievementsLoginPanel(
                             onClose = { state.value = State.Root },
                         )
+                        is State.HardcoreSaveStateBlocked -> HardcoreBlockedBubble()
+                        is State.HardcoreEnableConfirm -> Unit // rendered fullscreen below
                         is State.Root -> Unit
                     }
                 }
+            }
+
+            // PS2-BIOS-style fullscreen confirm for enabling hardcore mode.
+            // Painted on top of everything else, so it eats taps and the
+            // user must explicitly confirm or cancel before returning to
+            // the menu. Enabling hardcore resets the running game (per
+            // upstream Achievements::ResetHardcoreMode) so we want the
+            // user to know exactly what's about to happen.
+            if (state.value is State.HardcoreEnableConfirm) {
+                HardcoreEnableConfirmFullscreen()
             }
             } // displayCutoutPadding inner box
         }
@@ -364,6 +409,10 @@ object InGameOverlay {
                         Spacer(Modifier.width(8.dp))
                         ExtensionBadge(extension)
                     }
+                    if (hardcoreOn.value) {
+                        Spacer(Modifier.width(6.dp))
+                        HardcoreBadge()
+                    }
                 }
             }
         }
@@ -396,6 +445,27 @@ object InGameOverlay {
         ) {
             Text(
                 ext,
+                color = Color.White,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
+        }
+    }
+
+    /** Small red badge displayed next to the extension badge when
+     *  RetroAchievements Hardcore mode is active. Same shape as
+     *  ExtensionBadge so they line up visually. */
+    @Composable
+    private fun HardcoreBadge() {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFFB22222))
+                .padding(horizontal = 5.dp, vertical = 1.dp),
+        ) {
+            Text(
+                "HC",
                 color = Color.White,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
@@ -493,12 +563,22 @@ object InGameOverlay {
         ) {
             MenuRow("Resume Game", icon = LineAwesomeIcons.PlaySolid) { closeAndResume() }
             MenuDivider()
-            MenuRow("Save State", icon = LineAwesomeIcons.SaveSolid) {
-                state.value = State.SaveStateSlots
+            MenuRow(
+                "Save State",
+                icon = LineAwesomeIcons.SaveSolid,
+                dim = hardcoreOn.value,
+            ) {
+                state.value = if (hardcoreOn.value)
+                    State.HardcoreSaveStateBlocked else State.SaveStateSlots
             }
             MenuDivider()
-            MenuRow("Load State", icon = LineAwesomeIcons.FolderOpenSolid) {
-                state.value = State.LoadStateSlots
+            MenuRow(
+                "Load State",
+                icon = LineAwesomeIcons.FolderOpenSolid,
+                dim = hardcoreOn.value,
+            ) {
+                state.value = if (hardcoreOn.value)
+                    State.HardcoreSaveStateBlocked else State.LoadStateSlots
             }
             MenuDivider()
             MenuRow("Change Disc", icon = LineAwesomeIcons.CompactDiscSolid) {
@@ -538,6 +618,13 @@ object InGameOverlay {
                 icon = LineAwesomeIcons.TachometerAltSolid,
             ) {
                 frameLimitOn.value = !frameLimitOn.value
+                // Update both the BASE layer (so a future VM init / settings
+                // reload sees the new value) and call speedhackLimitermode
+                // for immediate effect on the running VM.
+                NativeApp.setSetting(
+                    "EmuCore/GS", "FrameLimitEnable", "bool",
+                    frameLimitOn.value.toString()
+                )
                 NativeApp.speedhackLimitermode(if (frameLimitOn.value) 0 else 3)
             }
             MenuDivider()
@@ -614,6 +701,154 @@ object InGameOverlay {
         }
     }
 
+    /** Modern red-bubble hint shown when the user taps Save / Load State
+     *  while hardcore mode is active. Fits inside the bottom-left modal
+     *  box; auto-dismisses on tap. */
+    @Composable
+    private fun HardcoreBlockedBubble() {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xFF5A1A1A))
+                .clickable { state.value = State.Root }
+                .padding(14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("⛔", fontSize = 16.sp, color = Color(0xFFFF6B6B))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Disabled in Hardcore",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Save states and load states are blocked while RetroAchievements Hardcore mode is active. Disable Hardcore from the Achievements panel to use them.",
+                color = Color(0xFFEEDDDD),
+                fontSize = 11.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Tap to dismiss",
+                color = Color(0xFFFF6B6B),
+                fontSize = 10.sp,
+            )
+        }
+    }
+
+    /** Fullscreen confirmation modal for enabling hardcore mode. Styled
+     *  to evoke the PS2 BIOS UI — centered black panel with a thin double
+     *  border and chunky monospace-feeling title. The action enables the
+     *  Achievements/HardcoreMode flag in the BASE settings layer; native
+     *  ApplySettings folds that into Achievements::ResetHardcoreMode
+     *  which resets the running game. */
+    @Composable
+    private fun HardcoreEnableConfirmFullscreen() {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xCC000000))
+                // Eat taps so background controls don't trigger.
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                ) {},
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(420.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color(0xFF0A0A18))
+                    .border(2.dp, Color(0xFF8888AA), RoundedCornerShape(2.dp))
+                    .padding(2.dp)
+                    .border(1.dp, Color(0xFF333366), RoundedCornerShape(2.dp))
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    "ENABLE HARDCORE MODE",
+                    color = Color(0xFFFF8888),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 2.sp,
+                )
+                Spacer(Modifier.height(2.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Color(0xFF8888AA)),
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "Hardcore mode disables save states, load states, and cheats. Achievements unlocked while hardcore is active are recorded as such on RetroAchievements.",
+                    color = Color(0xFFDDDDEE),
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "The current game will reset.",
+                    color = Color(0xFFFFAAAA),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(20.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    BiosLikeButton(
+                        label = "CANCEL",
+                        primary = false,
+                        modifier = Modifier.weight(1f),
+                    ) { state.value = State.Root }
+                    BiosLikeButton(
+                        label = "ENABLE",
+                        primary = true,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        NativeApp.setHardcoreMode(true)
+                        hardcoreOn.value = true
+                        state.value = State.Root
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun BiosLikeButton(
+        label: String,
+        primary: Boolean,
+        modifier: Modifier = Modifier,
+        onClick: () -> Unit,
+    ) {
+        val bg = if (primary) Color(0xFF5A1A1A) else Color(0xFF1A1A2A)
+        val border = if (primary) Color(0xFFFF6B6B) else Color(0xFF8888AA)
+        val fg = if (primary) Color(0xFFFFCCCC) else Color(0xFFDDDDEE)
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(2.dp))
+                .background(bg)
+                .border(1.dp, border, RoundedCornerShape(2.dp))
+                .clickable(onClick = onClick)
+                .padding(vertical = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                label,
+                color = fg,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp,
+            )
+        }
+    }
+
     /** Single menu row. Compact (24dp) so all 10 root items fit without
      *  scrolling on phone landscape. Background is a left-anchored
      *  alpha gradient that "auras" the text and matches the divider
@@ -627,13 +862,19 @@ object InGameOverlay {
         label: String,
         icon: ImageVector? = null,
         danger: Boolean = false,
+        dim: Boolean = false,
         onClick: () -> Unit,
     ) {
-        val textColor = if (danger) Color(0xFFFF6B6B) else Color.White
-        val auraStart = if (danger)
-            Color(0xFFFF6B6B).copy(alpha = 0.10f)
-        else
-            Color.White.copy(alpha = 0.06f)
+        val textColor = when {
+            dim -> Color(0xFF666666)
+            danger -> Color(0xFFFF6B6B)
+            else -> Color.White
+        }
+        val auraStart = when {
+            dim -> Color.White.copy(alpha = 0.02f)
+            danger -> Color(0xFFFF6B6B).copy(alpha = 0.10f)
+            else -> Color.White.copy(alpha = 0.06f)
+        }
         Box(
             Modifier
                 .fillMaxWidth()

@@ -52,6 +52,7 @@ data class AchievementSnapshot(
     val items: List<Achievement>,
     val active: Boolean,
     val loggedIn: Boolean,
+    val hardcore: Boolean,
     val userName: String,
 )
 
@@ -87,10 +88,12 @@ private fun parseSnapshot(json: String): AchievementSnapshot {
             items = items,
             active = root.optBoolean("active", false),
             loggedIn = root.optBoolean("loggedIn", false),
+            hardcore = root.optBoolean("hardcore", false),
             userName = root.optString("userName", ""),
         )
     } catch (_: Exception) {
-        AchievementSnapshot(emptyList(), active = false, loggedIn = false, userName = "")
+        AchievementSnapshot(emptyList(), active = false, loggedIn = false,
+            hardcore = false, userName = "")
     }
 }
 
@@ -98,9 +101,10 @@ private fun parseSnapshot(json: String): AchievementSnapshot {
 fun AchievementsPanel(
     modifier: Modifier = Modifier,
     onSignInClick: () -> Unit = {},
+    onHardcoreToggle: (() -> Unit)? = null,
 ) {
     var snapshot by remember {
-        mutableStateOf(AchievementSnapshot(emptyList(), false, false, ""))
+        mutableStateOf(AchievementSnapshot(emptyList(), false, false, false, ""))
     }
 
     // Poll on open + every 4s while the composable is alive (overlay
@@ -113,19 +117,56 @@ fun AchievementsPanel(
             val json = withContext(Dispatchers.IO) {
                 runCatching { NativeApp.getAchievementsJSON() }.getOrNull() ?: ""
             }
-            snapshot = parseSnapshot(json)
+            val s = parseSnapshot(json)
+            snapshot = s
+            // Mirror the live hardcore flag to the overlay-level state
+            // that drives Save / Load State row dimming. Doing it here so
+            // we don't add a second polling loop.
+            InGameOverlay.hardcoreOn.value = s.hardcore
             delay(4000)
         }
     }
 
     Column(modifier) {
-        Text(
-            text = "Achievements",
-            color = Color.White,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 6.dp),
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Achievements",
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+            // Hardcore toggle button. Greyed when off, red when on. Tap
+            // routes to the host (overlay) which shows a fullscreen
+            // confirmation before flipping the flag — enabling hardcore
+            // resets the running VM, so we want a deliberate action.
+            @Suppress("KotlinConstantConditions")
+            if (false && onHardcoreToggle != null) {
+                val active = snapshot.hardcore
+                val bg = if (active) Color(0xFFB22222) else Color(0xFF333333)
+                val fg = if (active) Color.White else Color(0xFF888888)
+                val border = if (active) Color(0xFFFF6B6B) else Color(0xFF555555)
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(bg)
+                        .border(1.dp, border, RoundedCornerShape(6.dp))
+                        .clickable(onClick = onHardcoreToggle!!)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "HARDCORE",
+                        color = fg,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+        }
 
         when {
             !snapshot.loggedIn -> StatusCard(
@@ -142,13 +183,44 @@ fun AchievementsPanel(
                 body = "Fetching achievement list.",
             )
             else -> {
+                // Username + logout button on the same row when signed in.
+                // Logout calls Achievements::Logout via JNI which clears the
+                // SECRETS-layer Token; the next AchievementsPanel poll picks
+                // up loggedIn=false and the panel reverts to the "Not signed
+                // in" StatusCard automatically — no local state to reset.
                 if (snapshot.userName.isNotEmpty()) {
-                    Text(
-                        text = snapshot.userName,
-                        color = Color(0xFFAACCFF),
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(bottom = 6.dp),
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = snapshot.userName,
+                            color = Color(0xFFAACCFF),
+                            fontSize = 12.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "Logout",
+                            color = Color(0xFFFF8888),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable {
+                                    runCatching { NativeApp.logoutAchievements() }
+                                    // Snapshot will refresh on the next poll
+                                    // (≤ 4s); render immediate feedback now.
+                                    snapshot = AchievementSnapshot(
+                                        emptyList(), active = false,
+                                        loggedIn = false, hardcore = false,
+                                        userName = ""
+                                    )
+                                }
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
                 }
                 val unlocked = snapshot.items.count { it.unlocked }
                 Text(

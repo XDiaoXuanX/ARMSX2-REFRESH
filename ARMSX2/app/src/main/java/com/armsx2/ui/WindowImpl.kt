@@ -1,13 +1,23 @@
 package com.armsx2.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.armsx2.EmuState
 import com.armsx2.Main
 
@@ -47,6 +57,27 @@ object WindowImpl {
                         // text inside the cards stay fully opaque.
                         Box(Modifier.fillMaxSize().background(Color(0xFF101010).copy(alpha = 0.5f))) {
                             GamesList.GamesRow()
+                            // Top-right close button. Only relevant in this
+                            // overlay path (when stopped, GamesList is the
+                            // primary screen and there's nothing to "close
+                            // back to" — the toolbar is always visible).
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(16.dp)
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF222222))
+                                    .clickable { showLibrary.value = false },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    "✕",
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
                         }
                     }
                     // In-game overlay paints last so it's on top of both

@@ -340,3 +340,26 @@
 //#define INTERP_IOP_COP0        // MFC0/MTC0/CFC0/CTC0/RFE
 #define INTERP_IOP_COP2        // All GTE (keep stubbed)
 #define INTERP_IOP_SYSTEM      // SYSCALL/BREAK
+
+// =====================  PS1DRV / PS1-mode tracing toggles  =====================
+// Per-category PS1-mode runtime tracing. Off by default. Each toggle gates a
+// small set of `Console.WriteLn("[PS1DRV-<cat>] ...")` calls in specific
+// files. Captured via `adb logcat -s STDOUT:W` from a connected device.
+//
+// All sites use the rate-limit helper in PS1DrvTrace.h so noisy events
+// (every-frame stuff) don't flood the log; one-shot transitions log freely.
+//
+// Workflow:
+//   1. Uncomment the relevant toggle below.
+//   2. Rebuild + redeploy.
+//   3. Reproduce the bug; capture logs.
+//   4. Re-comment when done.
+//
+// Convention: tag is [PS1DRV-CDROM], [PS1DRV-DMA], [PS1DRV-IRQ], etc. Match
+// the toggle name's suffix. Filter logs with: adb logcat -s STDOUT:W | grep PS1DRV
+//#define PS1DRV_TRACE_CDROM        // cdrInterrupt / cdrReadInterrupt state transitions, RErr, IRQ delivery
+//#define PS1DRV_TRACE_DMA          // psxDma0/1/2 entry/exit, deferred completion
+//#define PS1DRV_TRACE_IRQ          // iopIntcIrq fires, ISTAT writes, IMASK writes
+//#define PS1DRV_TRACE_GPU          // GP0/GP1 commands flowing through pgif
+//#define PS1DRV_TRACE_SIO            // SIO0 (controller/memcard) transactions
+//#define PS1DRV_TRACE_MDEC         // MDEC command/data writes, DMA completions

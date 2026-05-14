@@ -475,6 +475,8 @@ std::string Achievements::GetAchievementsAsJSON()
 	out += active ? "true" : "false";
 	out += ",\"loggedIn\":";
 	out += logged_in ? "true" : "false";
+	out += ",\"hardcore\":";
+	out += s_hardcore_mode ? "true" : "false";
 	out += ",\"userName\":";
 	append_json_string(out, display_name.c_str());
 

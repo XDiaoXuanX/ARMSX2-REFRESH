@@ -1051,6 +1051,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 		const u32 old_crc = s_disc_crc;
 		bool serial_is_valid = false;
 		std::string title;
+		CDVDDiscType disc_type = CDVDDiscType::Other;
 
 		if (GSDumpReplayer::IsReplayingDump())
 		{
@@ -1062,7 +1063,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 		}
 		else if (CDVDsys_GetSourceType() != CDVD_SourceType::NoDisc)
 		{
-			cdvdGetDiscInfo(&s_disc_serial, &s_disc_elf, &s_disc_version, &s_disc_crc, nullptr);
+			cdvdGetDiscInfo(&s_disc_serial, &s_disc_elf, &s_disc_version, &s_disc_crc, &disc_type);
 			serial_is_valid = !s_disc_serial.empty();
 		}
 		else if (!s_elf_override.empty())
@@ -1078,6 +1079,12 @@ void VMManager::UpdateDiscDetails(bool booting)
 			s_disc_crc = 0;
 			title = fmt::format(TRANSLATE_FS("VMManager", "PS2 BIOS ({})"), BiosZone);
 		}
+
+		// Swap memcard set based on disc type. PS1 disc → .mcr (128KB)
+		// sidecar files; everything else → standard .ps2 (8MB) cards. The
+		// FileMcd_Reopen call below picks up the new flag on its
+		// internal close+open cycle.
+		FileMcd_SetPS1Mode(disc_type == CDVDDiscType::PS1Disc);
 
 		// If we're booting an ELF, use its CRC, not the disc (if any).
 		if (!s_elf_override.empty())

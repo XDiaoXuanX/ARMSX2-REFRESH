@@ -378,6 +378,31 @@ Java_kr_co_iefriends_pcsx2_NativeApp_logoutAchievements(JNIEnv *env, jclass claz
     }
 }
 
+// Enable / disable RetroAchievements hardcore mode. Writes the BASE
+// EmuConfig.Achievements.HardcoreMode flag and applies it via
+// VMManager::ApplySettings — the settings-diff path in
+// Achievements::UpdateSettings() then either calls ResetHardcoreMode()
+// (turn-on requires a fresh boot per upstream's design) or
+// DisableHardcoreMode() (turn-off applies live). The Kotlin side is
+// expected to gate "Enable HC?" on a "this will reset the running game"
+// confirm before calling this with `true`.
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setHardcoreMode(JNIEnv *env, jclass clazz, jboolean enabled) {
+    Host::SetBaseBoolSettingValue("Achievements", "HardcoreMode", enabled == JNI_TRUE);
+    if (VMManager::HasValidVM())
+        VMManager::ApplySettings();
+}
+
+// Returns the live hardcore-mode flag (rcheevos s_hardcore_mode), not the
+// persisted EmuConfig setting — they can transiently differ while a
+// hardcore-enable is waiting for the next boot.
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_isHardcoreMode(JNIEnv *env, jclass clazz) {
+    return Achievements::IsHardcoreModeActive() ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C"
 JNIEXPORT jfloat JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_getFPS(JNIEnv *env, jclass clazz) {

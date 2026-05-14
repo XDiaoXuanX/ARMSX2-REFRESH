@@ -415,6 +415,19 @@ class Main: ComponentActivity() {
             com.armsx2.config.ConfigStore
                 .resolveForGame(currentGame.value?.serial)
                 .applyTo()
+
+            // Settings.applyTo() above writes the persisted FrameLimitEnable
+            // into the BASE settings layer; override it here with the
+            // in-session overlay toggle so the user's runtime choice sticks
+            // across game launches within one app run. Both writes are
+            // needed: native-lib's runVMThread re-reads FrameLimitEnable
+            // from the BASE layer right after VMManager::Initialize and
+            // calls SetLimiterMode based on that, so a bare
+            // speedhackLimitermode() here gets clobbered by VM init.
+            // Mode 0 = Nominal (60fps cap), 3 = Unlimited.
+            val limit = com.armsx2.ui.InGameOverlay.frameLimitOn.value
+            NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", limit.toString())
+            NativeApp.speedhackLimitermode(if (limit) 0 else 3)
         }
 
         /**

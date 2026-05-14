@@ -108,6 +108,17 @@ public class NativeApp {
 	/** RetroAchievements logout. Idempotent. */
 	public static native void logoutAchievements();
 
+	/** Toggle RetroAchievements hardcore mode. Writes
+	 *  EmuConfig.Achievements.HardcoreMode and triggers ApplySettings —
+	 *  enabling hardcore on a running VM resets it on the next frame
+	 *  (per upstream's design). Save states / cheats / runahead are
+	 *  blocked by Achievements.cpp gates while active. */
+	public static native void setHardcoreMode(boolean enabled);
+
+	/** True iff the rcheevos hardcore flag is currently set. The Kotlin
+	 *  achievements panel polls this for the badge / button colour. */
+	public static native boolean isHardcoreMode();
+
 	public static native void setPadVibration(boolean isonoff);
 	public static native void setPadButton(int index, int range, boolean iskeypressed);
 	public static native void resetKeyStatus();

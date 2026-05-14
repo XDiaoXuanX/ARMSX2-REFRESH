@@ -6,7 +6,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -72,28 +71,31 @@ fun AchievementsLoginPanel(onClose: () -> Unit) {
     // Cancel/Sign-In row at the bottom. Wrapping the column in
     // verticalScroll guarantees the buttons stay reachable: on tall
     // screens nothing scrolls, on short ones the user can drag.
+    // Content-sized rather than fillMaxHeight so the box is only as tall as
+    // it needs to be — the bottom-left modal container can otherwise
+    // stretch this to 75% of screen height which clips on small landscape
+    // phones. verticalScroll stays as a safety net for very narrow screens.
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .fillMaxHeight()
             .clip(RoundedCornerShape(8.dp))
             .background(Color(0xFF222222))
             .verticalScroll(scroll)
-            .padding(16.dp),
+            .padding(10.dp),
     ) {
         Text(
             "Sign in to RetroAchievements",
             color = Color.White,
-            fontSize = 16.sp,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(2.dp))
         Text(
-            "Your password isn't stored on device — rcheevos exchanges it for an auth token that lives in the app's settings.",
+            "Password isn't stored — rcheevos exchanges it for an auth token.",
             color = Color(0xFFAAAAAA),
-            fontSize = 11.sp,
+            fontSize = 9.sp,
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(6.dp))
 
         val tfColors = TextFieldDefaults.colors(
             focusedTextColor = Color.White,
@@ -118,7 +120,7 @@ fun AchievementsLoginPanel(onClose: () -> Unit) {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
             modifier = Modifier.fillMaxWidth(),
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         OutlinedTextField(
             value = pass,
             onValueChange = { if (!inFlight) pass = it },
@@ -133,7 +135,7 @@ fun AchievementsLoginPanel(onClose: () -> Unit) {
 
         val err = error
         if (err != null) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -148,7 +150,7 @@ fun AchievementsLoginPanel(onClose: () -> Unit) {
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         Row(modifier = Modifier.fillMaxWidth()) {
             ActionButton(
                 label = "Cancel",

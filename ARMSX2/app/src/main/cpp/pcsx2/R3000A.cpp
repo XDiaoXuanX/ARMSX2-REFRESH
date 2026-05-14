@@ -12,6 +12,7 @@
 #include "IopBios.h"
 #include "IopHw.h"
 #include "IopDma.h"
+#include "Mdec.h"
 #include "CDVD/Ps1CD.h"
 #include "CDVD/CDVD.h"
 
@@ -149,9 +150,11 @@ static constexpr u32 PSX_INT_SCALE_256[] = {
 		256, // IopEvt_CdvdSectorReady
 		256, // IopEvt_DEV9
 		256, // IopEvt_USB
+		256, // IopEvt_DmaMDECin  (PS1 MDEC IN  DMA channel 0)
+		256, // IopEvt_DmaMDECout (PS1 MDEC OUT DMA channel 1)
 };
 static_assert(sizeof(PSX_INT_SCALE_256) / sizeof(PSX_INT_SCALE_256[0]) ==
-	(IopEvt_USB + 1), "PSX_INT_SCALE_256 size must match IopEventId enum");
+	(IopEvt_DmaMDECout + 1), "PSX_INT_SCALE_256 size must match IopEventId enum");
 
 __fi void PSX_INT( IopEventId n, s32 ecycle )
 {
@@ -228,7 +231,8 @@ static __fi void _psxTestInterrupts()
 	// as follows helps speed up most games.
 
 	if( psxRegs.interrupt & ((1 << IopEvt_Cdvd) | (1 << IopEvt_Dma11) | (1 << IopEvt_Dma12)
-		| (1 << IopEvt_Cdrom) | (1 << IopEvt_CdromRead) | (1 << IopEvt_DEV9) | (1 << IopEvt_USB)))
+		| (1 << IopEvt_Cdrom) | (1 << IopEvt_CdromRead) | (1 << IopEvt_DEV9) | (1 << IopEvt_USB)
+		| (1 << IopEvt_DmaMDECin) | (1 << IopEvt_DmaMDECout)))
 	{
 		IopTestEvent(IopEvt_Cdvd,		cdvdActionInterrupt);
 		IopTestEvent(IopEvt_Dma11,		psxDMA11Interrupt);	// SIO2
@@ -237,6 +241,8 @@ static __fi void _psxTestInterrupts()
 		IopTestEvent(IopEvt_CdromRead,	cdrReadInterrupt);
 		IopTestEvent(IopEvt_DEV9,		dev9Interrupt);
 		IopTestEvent(IopEvt_USB,		usbInterrupt);
+		IopTestEvent(IopEvt_DmaMDECin,	psxDMAMDECinInterrupt);
+		IopTestEvent(IopEvt_DmaMDECout,	psxDMAMDECoutInterrupt);
 	}
 }
 

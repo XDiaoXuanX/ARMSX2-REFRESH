@@ -156,9 +156,11 @@ object GamesList {
 
     /** Sorted "|" join so ["A","B"] and ["B","A"] produce the same key.
      *  We dedupe within the user's selection in case they accidentally
-     *  pick the same folder twice. */
+     *  pick the same folder twice. The "|v2" suffix invalidates legacy
+     *  caches that were built before .img/.mdf/.nrg/.dump were probed for
+     *  serials — bump again any time the probe coverage changes. */
     private fun cacheKeyForDirs(dirs: List<String>): String =
-        dirs.toSet().sorted().joinToString("|")
+        dirs.toSet().sorted().joinToString("|") + "|v2"
 
     @Composable
     private fun EmptyMessage(title: String, body: String) {
@@ -382,7 +384,17 @@ object GamesList {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     CompatibilityStars(game.compatibility)
-                    if (game.extension.isNotEmpty()) ExtensionBadge(game.extension)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (game.extension.isNotEmpty()) ExtensionBadge(game.extension)
+                        // Hardcore mode is a global RetroAchievements flag —
+                        // when it's on, ANY game launched from here will
+                        // apply, so render the HC badge on every card. The
+                        // overlay's polling loop owns the flag.
+                        if (InGameOverlay.hardcoreOn.value) {
+                            Spacer(Modifier.width(4.dp))
+                            HardcoreBadge()
+                        }
+                    }
                 }
             }
         }
@@ -400,6 +412,28 @@ object GamesList {
         ) {
             Text(
                 ext,
+                color = Color.White,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
+        }
+    }
+
+    /** RetroAchievements Hardcore badge. Shown on library cards while the
+     *  global hardcore flag is set (so the user knows whichever game they
+     *  launch will run in HC). Same shape as ExtensionBadge for visual
+     *  consistency. */
+    @Composable
+    private fun HardcoreBadge() {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFFB22222))
+                .padding(horizontal = 5.dp, vertical = 1.dp),
+        ) {
+            Text(
+                "HC",
                 color = Color.White,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
@@ -495,9 +529,16 @@ object GamesList {
                         // ISO9660 probe (PS2 BOOT2 + PS1 BOOT). Native
                         // returns "<platform>:<serial>" tag — e.g.
                         // "ps1:SLUS-00713" — when SYSTEM.CNF is parseable.
-                        // Compressed formats fall through to filename.
-                        val rawProbe = if (ext == "iso" || ext == "bin" || ext == "chd")
-                            probeDiscSerial(context, f.uri) else null
+                        // Compressed formats (cso/zso/gz) fall through to
+                        // filename. Raw-sector formats (.img/.mdf/.nrg/
+                        // .dump) are handled by the same plain-ISO path in
+                        // native — they fall through to the 2352/16 and
+                        // 2352/24 fallbacks if 2048/0 fails.
+                        val rawProbe = when (ext) {
+                            "iso", "bin", "chd", "img", "mdf", "nrg", "dump" ->
+                                probeDiscSerial(context, f.uri)
+                            else -> null
+                        }
                         val (probeSerial, probePlatform) = parseProbeResult(rawProbe)
                         val (titleFromName, serialFromName) = FilenameParser.parse(name)
                         val finalSerial = probeSerial ?: serialFromName
