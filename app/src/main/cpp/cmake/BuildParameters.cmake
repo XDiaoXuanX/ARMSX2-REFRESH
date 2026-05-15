@@ -15,7 +15,7 @@ option(PACKAGE_MODE "Use this option to ease packaging of PCSX2 (developer/distr
 #-------------------------------------------------------------------------------
 # Graphical option
 #-------------------------------------------------------------------------------
-if(NOT APPLE)
+if(NOT APPLE OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
 	option(USE_OPENGL "Enable OpenGL GS renderer" ON)
 endif()
 option(USE_VULKAN "Enable Vulkan GS renderer" ON)

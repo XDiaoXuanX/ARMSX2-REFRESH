@@ -17,9 +17,130 @@
 #include "imgui.h"
 #include "IconsFontAwesome5.h"
 
+#include <cctype>
 #include <cinttypes>
 #include <fstream>
 #include <sstream>
+
+static bool IsGLESIdentifierChar(char ch)
+{
+	return std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_';
+}
+
+static void StripGLESFloatSuffixes(std::string& source)
+{
+	for (size_t i = 1; i < source.size();)
+	{
+		const char ch = source[i];
+		const char prev = source[i - 1];
+		const bool prev_numeric = (prev >= '0' && prev <= '9') || prev == '.';
+		const bool next_identifier = (i + 1 < source.size()) && IsGLESIdentifierChar(source[i + 1]);
+		if ((ch == 'f' || ch == 'F') && prev_numeric && !next_identifier)
+		{
+			source.erase(i, 1);
+			continue;
+		}
+
+		i++;
+	}
+}
+
+static void StripGLES300UniformBindings(std::string& source)
+{
+	size_t pos = 0;
+	while ((pos = source.find("layout(", pos)) != std::string::npos)
+	{
+		const size_t open = pos + 7;
+		const size_t close = source.find(')', pos);
+		if (close == std::string::npos)
+			break;
+
+		std::string layout = source.substr(open, close - open);
+		size_t binding = layout.find("binding");
+		if (binding == std::string::npos)
+		{
+			pos = close + 1;
+			continue;
+		}
+
+		size_t begin = binding;
+		while (begin > 0 && (layout[begin - 1] == ' ' || layout[begin - 1] == '\t'))
+			begin--;
+		if (begin > 0 && layout[begin - 1] == ',')
+			begin--;
+
+		size_t end = binding + 7;
+		while (end < layout.size() && (layout[end] == ' ' || layout[end] == '\t'))
+			end++;
+		if (end < layout.size() && layout[end] == '=')
+		{
+			end++;
+			while (end < layout.size() && (layout[end] == ' ' || layout[end] == '\t'))
+				end++;
+			while (end < layout.size() && layout[end] >= '0' && layout[end] <= '9')
+				end++;
+		}
+		while (end < layout.size() && (layout[end] == ' ' || layout[end] == '\t'))
+			end++;
+		if (end < layout.size() && layout[end] == ',')
+			end++;
+
+		layout.erase(begin, end - begin);
+		while (!layout.empty() && (layout.front() == ' ' || layout.front() == '\t' || layout.front() == ','))
+			layout.erase(layout.begin());
+		while (!layout.empty() && (layout.back() == ' ' || layout.back() == '\t' || layout.back() == ','))
+			layout.pop_back();
+
+		if (layout.empty())
+		{
+			size_t after = close + 1;
+			while (after < source.size() && (source[after] == ' ' || source[after] == '\t'))
+				after++;
+			source.erase(pos, after - pos);
+		}
+		else
+		{
+			source.replace(open, close - open, layout);
+			pos = open + layout.size() + 1;
+		}
+	}
+}
+
+static void AdaptGLESShaderSource(std::string& source)
+{
+	StripGLESFloatSuffixes(source);
+	if (GLAD_GL_ES_VERSION_3_0 && !GLAD_GL_ES_VERSION_3_1)
+		StripGLES300UniformBindings(source);
+}
+
+static void DrawElementsBaseVertexCompat(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint base_vertex)
+{
+	if (glDrawElementsBaseVertex)
+	{
+		glDrawElementsBaseVertex(mode, count, type, indices, base_vertex);
+		return;
+	}
+
+	if (glDrawElementsBaseVertexOES)
+	{
+		glDrawElementsBaseVertexOES(mode, count, type, indices, base_vertex);
+		return;
+	}
+
+	if (glDrawElementsBaseVertexEXT)
+	{
+		glDrawElementsBaseVertexEXT(mode, count, type, indices, base_vertex);
+		return;
+	}
+
+	if (base_vertex == 0)
+	{
+		glDrawElements(mode, count, type, indices);
+		return;
+	}
+
+	glDrawElements(mode, count, type, indices);
+}
 
 static constexpr u32 g_vs_cb_index        = 1;
 static constexpr u32 g_ps_cb_index        = 0;
@@ -160,11 +281,15 @@ void GSDeviceOGL::SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 {
 	if (!GSDevice::Create(vsync_mode, allow_present_throttle))
+	{
 		return false;
+	}
 
 	// GL is a pain and needs the window super early to create the context.
 	if (!AcquireWindow(true))
+	{
 		return false;
+	}
 
 	m_gl_context = GLContext::Create(m_window_info);
 	if (!m_gl_context)
@@ -183,7 +308,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 	bool buggy_pbo;
 	if (!CheckFeatures(buggy_pbo))
+	{
 		return false;
+	}
 
 	// Store adapter name currently in use
 	m_name = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
@@ -192,7 +319,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 	// Render a frame as soon as possible to clear out whatever was previously being displayed.
 	if (m_window_info.type != WindowInfo::Type::Surfaceless)
+	{
 		RenderBlankFrame();
+	}
 
 	if (!GSConfig.DisableShaderCache)
 	{
@@ -363,7 +492,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 			const char* name = shaderName(static_cast<ShaderConvert>(i));
 			const std::string ps(GetShaderSource(name, GL_FRAGMENT_SHADER, *convert_glsl));
 			if (!m_shader_cache.GetProgram(&m_convert.ps[i], m_convert.vs, ps))
+			{
 				return false;
+			}
 			m_convert.ps[i].SetFormattedName("Convert pipe %s", name);
 
 			if (static_cast<ShaderConvert>(i) == ShaderConvert::RGBA_TO_8I || static_cast<ShaderConvert>(i) == ShaderConvert::RGB5A1_TO_8I)
@@ -424,7 +555,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 			const char* name = shaderName(static_cast<PresentShader>(i));
 			const std::string ps(GetShaderSource(name, GL_FRAGMENT_SHADER, *shader));
 			if (!m_shader_cache.GetProgram(&m_present[i], present_vs, ps))
+			{
 				return false;
+			}
 			m_present[i].SetFormattedName("Present pipe %s", name);
 
 			// This is a bit disgusting, but it saves allocating a UBO when no shaders currently need it.
@@ -457,7 +590,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		{
 			const std::string ps(GetShaderSource(fmt::format("ps_main{}", i), GL_FRAGMENT_SHADER, *shader));
 			if (!m_shader_cache.GetProgram(&m_merge_obj.ps[i], m_convert.vs, ps))
+			{
 				return false;
+			}
 			m_merge_obj.ps[i].SetFormattedName("Merge pipe %zu", i);
 			m_merge_obj.ps[i].RegisterUniform("BGColor");
 		}
@@ -480,7 +615,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		{
 			const std::string ps(GetShaderSource(fmt::format("ps_main{}", i), GL_FRAGMENT_SHADER, *shader));
 			if (!m_shader_cache.GetProgram(&m_interlace.ps[i], m_convert.vs, ps))
+			{
 				return false;
+			}
 			m_interlace.ps[i].SetFormattedName("Merge pipe %zu", i);
 			m_interlace.ps[i].RegisterUniform("ZrH");
 		}
@@ -490,7 +627,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// Post processing
 	// ****************************************************************
 	if (!CompileShadeBoostProgram() || !CompileFXAAProgram())
+	{
 		return false;
+	}
 
     // Enable CAS when compute is available (GL 4.2+ or GLES 3.1+).
     m_features.cas_sharpening = ((GLAD_GL_VERSION_4_2 && GLAD_GL_ARB_compute_shader) || GLAD_GL_ES_VERSION_3_1) && CreateCASPrograms();
@@ -549,7 +688,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// HW renderer shader
 	// ****************************************************************
 	if (!CreateTextureFX())
+	{
 		return false;
+	}
 
 	// ****************************************************************
 	// Pbo Pool allocation
@@ -570,7 +711,9 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	}
 
 	if (!CreateImGuiProgram())
+	{
 		return false;
+	}
 
 	// Basic to ensure structures are correctly packed
 	static_assert(sizeof(VSSelector) == 1, "Wrong VSSelector size");
@@ -679,7 +822,8 @@ bool GSDeviceOGL::CheckFeatures(bool& buggy_pbo)
 	const bool use_mali_profile = IsMaliGPUProfile();
 	const bool use_adreno_profile = IsAdrenoGPUProfile();
 #else
-	SetRuntimeGPUProfile(vendor_id_mali ? RuntimeGpuProfile::Mali : RuntimeGpuProfile::Adreno);
+	SetRuntimeGPUProfile(vendor_id_mali ? RuntimeGpuProfile::Mali :
+		(vendor_id_adreno ? RuntimeGpuProfile::Adreno : RuntimeGpuProfile::Generic));
 	const bool use_mali_profile = vendor_id_mali;
 	const bool use_adreno_profile = vendor_id_adreno;
 #endif
@@ -919,7 +1063,7 @@ void GSDeviceOGL::SetSwapInterval()
 	const s32 interval = static_cast<s32>(m_vsync_mode == GSVSyncMode::FIFO);
 	GLint current_fbo = 0;
 	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &current_fbo);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GetWindowFramebuffer());
 
 	if (!m_gl_context->SetSwapInterval(interval))
 		WARNING_LOG("GL: Failed to set swap interval to {}", interval);
@@ -1062,7 +1206,7 @@ GSDevice::PresentResult GSDeviceOGL::BeginPresent(bool frame_skip)
 	if (frame_skip || m_window_info.type == WindowInfo::Type::Surfaceless)
 		return PresentResult::FrameSkipped;
 
-	OMSetFBO(0);
+	OMSetFBO(GetWindowFramebuffer());
 	OMSetColorMaskState();
 
 	glDisable(GL_SCISSOR_TEST);
@@ -1185,7 +1329,7 @@ void GSDeviceOGL::DrawPrimitive()
 void GSDeviceOGL::DrawIndexedPrimitive()
 {
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
-	glDrawElementsBaseVertex(m_draw_topology, static_cast<u32>(m_index.count), GL_UNSIGNED_SHORT,
+	DrawElementsBaseVertexCompat(m_draw_topology, static_cast<u32>(m_index.count), GL_UNSIGNED_SHORT,
 		reinterpret_cast<void*>(static_cast<u32>(m_index.start) * sizeof(u16)), static_cast<GLint>(m_vertex.start));
 }
 
@@ -1194,7 +1338,7 @@ void GSDeviceOGL::DrawIndexedPrimitive(int offset, int count)
 	//ASSERT(offset + count <= (int)m_index.count);
 
 	g_perfmon.Put(GSPerfMon::DrawCalls, 1);
-	glDrawElementsBaseVertex(m_draw_topology, count, GL_UNSIGNED_SHORT,
+	DrawElementsBaseVertexCompat(m_draw_topology, count, GL_UNSIGNED_SHORT,
 		reinterpret_cast<void*>((static_cast<u32>(m_index.start) + static_cast<u32>(offset)) * sizeof(u16)),
 		static_cast<GLint>(m_vertex.start));
 }
@@ -1403,6 +1547,8 @@ std::string GSDeviceOGL::GetShaderSource(const std::string_view entry, GLenum ty
 {
 	std::string src = GenGlslHeader(entry, type, macro_sel);
 	src += glsl_h_code;
+	if (m_is_gles)
+		AdaptGLESShaderSource(src);
 	return src;
 }
 
@@ -1410,17 +1556,21 @@ std::string GSDeviceOGL::GenGlslHeader(const std::string_view entry, GLenum type
 {
 	std::string header;
 
-    if (m_is_gles)
-    {
-        if (GLAD_GL_ES_VERSION_3_2)
-            header = "#version 320 es\n";
-        else if (GLAD_GL_ES_VERSION_3_1)
-            header = "#version 310 es\n";
+	if (m_is_gles)
+	{
+		if (GLAD_GL_ES_VERSION_3_2)
+			header = "#version 320 es\n";
+		else if (GLAD_GL_ES_VERSION_3_1)
+			header = "#version 310 es\n";
+		else if (GLAD_GL_ES_VERSION_3_0)
+			header = "#version 300 es\n";
+		else
+			header = "#version 300 es\n";
 
-        if (GLAD_GL_EXT_blend_func_extended)
-            header += "#extension GL_EXT_blend_func_extended : require\n";
-        if (GLAD_GL_ARB_blend_func_extended)
-            header += "#extension GL_ARB_blend_func_extended : require\n";
+		if (GLAD_GL_EXT_blend_func_extended)
+			header += "#extension GL_EXT_blend_func_extended : require\n";
+		if (GLAD_GL_ARB_blend_func_extended)
+			header += "#extension GL_ARB_blend_func_extended : require\n";
 
 		if (m_features.framebuffer_fetch)
 		{
@@ -1432,40 +1582,44 @@ std::string GSDeviceOGL::GenGlslHeader(const std::string_view entry, GLenum type
 				header += "#extension GL_EXT_shader_pixel_local_storage : require\n";
 		}
 
-        header += "precision highp float;\n";
-        header += "precision highp int;\n";
-        header += "precision highp sampler2D;\n";
-        if (GLAD_GL_ES_VERSION_3_1)
-            header += "precision highp sampler2DMS;\n";
-        if (GLAD_GL_ES_VERSION_3_2)
-            header += "precision highp usamplerBuffer;\n";
+		header += "precision highp float;\n";
+		header += "precision highp int;\n";
+		header += "precision highp sampler2D;\n";
+		if (GLAD_GL_ES_VERSION_3_1)
+			header += "precision highp sampler2DMS;\n";
+		if (GLAD_GL_ES_VERSION_3_2)
+			header += "precision highp usamplerBuffer;\n";
 
-        if (!GLAD_GL_EXT_blend_func_extended && !GLAD_GL_ARB_blend_func_extended)
-        {
-            if (!GLAD_GL_ARM_shader_framebuffer_fetch)
-                fprintf(stderr, "Dual source blending is not supported\n");
+		if (!GLAD_GL_EXT_blend_func_extended && !GLAD_GL_ARB_blend_func_extended)
+		{
+			if (!GLAD_GL_ARM_shader_framebuffer_fetch)
+				fprintf(stderr, "Dual source blending is not supported\n");
 
-            header += "#define DISABLE_DUAL_SOURCE\n";
-        }
-    }
-    else {
-        // Intel's GL driver doesn't like the readonly qualifier with 3.3 GLSL.
-        if (m_features.vs_expand && GLAD_GL_VERSION_4_3) {
-            header = "#version 430 core\n";
-        } else {
-            header = "#version 330 core\n";
-            header += "#extension GL_ARB_shading_language_420pack : require\n";
-            if (GLAD_GL_ARB_gpu_shader5)
-                header += "#extension GL_ARB_gpu_shader5 : require\n";
-            if (m_features.vs_expand)
-                header += "#extension GL_ARB_shader_storage_buffer_object: require\n";
-        }
+			header += "#define DISABLE_DUAL_SOURCE\n";
+		}
+	}
+	else
+	{
+		// Intel's GL driver doesn't like the readonly qualifier with 3.3 GLSL.
+		if (m_features.vs_expand && GLAD_GL_VERSION_4_3)
+		{
+			header = "#version 430 core\n";
+		}
+		else
+		{
+			header = "#version 330 core\n";
+			header += "#extension GL_ARB_shading_language_420pack : require\n";
+			if (GLAD_GL_ARB_gpu_shader5)
+				header += "#extension GL_ARB_gpu_shader5 : require\n";
+			if (m_features.vs_expand)
+				header += "#extension GL_ARB_shader_storage_buffer_object: require\n";
+		}
 
-        if (GLAD_GL_ARB_shader_draw_parameters)
-            header += "#extension GL_ARB_shader_draw_parameters : require\n";
-        if (m_features.framebuffer_fetch && GLAD_GL_EXT_shader_framebuffer_fetch)
-            header += "#extension GL_EXT_shader_framebuffer_fetch : require\n";
-    }
+		if (GLAD_GL_ARB_shader_draw_parameters)
+			header += "#extension GL_ARB_shader_draw_parameters : require\n";
+		if (m_features.framebuffer_fetch && GLAD_GL_EXT_shader_framebuffer_fetch)
+			header += "#extension GL_EXT_shader_framebuffer_fetch : require\n";
+	}
 
 	if (m_features.framebuffer_fetch)
 		header += "#define HAS_FRAMEBUFFER_FETCH 1\n";
@@ -1477,10 +1631,10 @@ std::string GSDeviceOGL::GenGlslHeader(const std::string_view entry, GLenum type
 	header += fmt::format("#define GPU_PROFILE_MALI {}\n", IsMaliGPUProfile() ? 1 : 0);
 	header += fmt::format("#define GPU_PROFILE_ADRENO {}\n", IsAdrenoGPUProfile() ? 1 : 0);
 
-    if (GLAD_GL_ARB_clip_control)
-        header += "#define HAS_CLIP_CONTROL 1\n";
-    else
-        header += "#define HAS_CLIP_CONTROL 0\n";
+	if (GLAD_GL_ARB_clip_control)
+		header += "#define HAS_CLIP_CONTROL 1\n";
+	else
+		header += "#define HAS_CLIP_CONTROL 0\n";
 
 	// Allow to puts several shader in 1 files
 	switch (type)
@@ -1523,6 +1677,8 @@ std::string GSDeviceOGL::GetVSSource(VSSelector sel)
 
 	std::string src = GenGlslHeader("vs_main", GL_VERTEX_SHADER, macro);
 	src += m_shader_tfx_vgs;
+	if (m_is_gles)
+		AdaptGLESShaderSource(src);
 	return src;
 }
 
@@ -1589,6 +1745,8 @@ std::string GSDeviceOGL::GetPSSource(const PSSelector& sel)
 
 	std::string src = GenGlslHeader("ps_main", GL_FRAGMENT_SHADER, macro);
 	src += m_shader_tfx_fs;
+	if (m_is_gles)
+		AdaptGLESShaderSource(src);
 	return src;
 }
 
@@ -2057,7 +2215,9 @@ bool GSDeviceOGL::CompileShadeBoostProgram()
 
 	const std::string ps(GetShaderSource("ps_main", GL_FRAGMENT_SHADER, *shader));
 	if (!m_shader_cache.GetProgram(&m_shadeboost.ps, m_convert.vs, ps))
+	{
 		return false;
+	}
 	m_shadeboost.ps.RegisterUniform("params");
 	m_shadeboost.ps.SetName("Shadeboost pipe");
 	return true;
@@ -2203,6 +2363,8 @@ bool GSDeviceOGL::CreateCASPrograms()
             header = "#version 320 es\n";
         else if (GLAD_GL_ES_VERSION_3_1)
             header = "#version 310 es\n";
+        else if (GLAD_GL_ES_VERSION_3_0)
+            header = "#version 300 es\n";
         else
         {
             m_features.cas_sharpening = false;
@@ -2369,7 +2531,7 @@ void GSDeviceOGL::RenderImGui()
 				glBindTextureUnit(0, texture_id);
 			}
 
-			glDrawElementsBaseVertex(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, GL_UNSIGNED_SHORT,
+			DrawElementsBaseVertexCompat(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, GL_UNSIGNED_SHORT,
 				(void*)(intptr_t)((pcmd->IdxOffset + m_index.start) * sizeof(ImDrawIdx)), pcmd->VtxOffset + vertex_start);
 		}
 
@@ -2382,13 +2544,18 @@ void GSDeviceOGL::RenderImGui()
 
 void GSDeviceOGL::RenderBlankFrame()
 {
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GetWindowFramebuffer());
 	glDisable(GL_SCISSOR_TEST);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 	m_gl_context->SwapBuffers();
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLState::fbo);
 	glEnable(GL_SCISSOR_TEST);
+}
+
+GLuint GSDeviceOGL::GetWindowFramebuffer() const
+{
+	return m_gl_context ? static_cast<GLuint>(m_gl_context->GetDefaultFramebuffer()) : 0;
 }
 
 void GSDeviceOGL::OMAttachRt(GSTexture* rt)
@@ -2432,7 +2599,10 @@ void GSDeviceOGL::OMSetColorMaskState(OMColorMaskSelector sel)
 	{
 		GLState::wrgba = sel.wrgba;
 
-		glColorMaski(0, sel.wr, sel.wg, sel.wb, sel.wa);
+		if (glColorMaski)
+			glColorMaski(0, sel.wr, sel.wg, sel.wb, sel.wa);
+		else
+			glColorMask(sel.wr, sel.wg, sel.wb, sel.wa);
 	}
 }
 
@@ -2562,7 +2732,12 @@ void GSDeviceOGL::SetupPipeline(const ProgramSelector& psel)
 	const std::string ps(GetPSSource(psel.ps));
 
 	GLProgram prog;
-	m_shader_cache.GetProgram(&prog, vs, ps);
+	if (!m_shader_cache.GetProgram(&prog, vs, ps))
+	{
+		return;
+	}
+	prog.BindUniformBlock("cb20", g_vs_cb_index);
+	prog.BindUniformBlock("cb21", g_ps_cb_index);
 	it = m_programs.emplace(psel, std::move(prog)).first;
 	it->second.Bind();
 }

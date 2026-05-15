@@ -833,7 +833,7 @@ public:
 protected:
 	std::string m_name = "Unknown";
 	FeatureSupport m_features;
-	RuntimeGpuProfile m_runtime_gpu_profile = RuntimeGpuProfile::Adreno;
+	RuntimeGpuProfile m_runtime_gpu_profile = RuntimeGpuProfile::Generic;
 	u32 m_max_texture_size = 0;
 
 	struct

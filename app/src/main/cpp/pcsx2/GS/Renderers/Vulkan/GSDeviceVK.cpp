@@ -2604,7 +2604,8 @@ bool GSDeviceVK::CreateDeviceAndSwapChain()
 		DevCon.WriteLn("VK: GPU profile hints: %s", profile_selection.hints.c_str());
 	}
 #else
-	SetRuntimeGPUProfile((m_device_properties.vendorID == 0x13B5u) ? RuntimeGpuProfile::Mali : RuntimeGpuProfile::Adreno);
+	SetRuntimeGPUProfile((m_device_properties.vendorID == 0x13B5u) ? RuntimeGpuProfile::Mali :
+		((m_device_properties.vendorID == 0x5143u) ? RuntimeGpuProfile::Adreno : RuntimeGpuProfile::Generic));
 #endif
 
 	// We need this to be at least 32 byte aligned for AVX2 stores.

@@ -16,8 +16,11 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "common/FileSystem.h"
 #include "common/Path.h"
 
+#include <cstdio>
+
 // Access the global settings interface from ios_main.mm
 extern INISettingsInterface* g_p44_settings_interface;
+extern "C" void ARMSX2_PrepareGameRenderViewForCurrentRenderer(const char* reason);
 
 static NSDate* s_lastNVMSaveDate = nil;
 
@@ -26,6 +29,10 @@ static NSDate* s_lastNVMSaveDate = nil;
 + (UIView *)gameRenderView {
     extern UIView* g_gameRenderView;
     return g_gameRenderView;
+}
+
++ (void)prepareGameRenderViewForCurrentRenderer {
+    ARMSX2_PrepareGameRenderViewForCurrentRenderer("swift_preboot");
 }
 
 + (void)saveNVRAM {
@@ -400,7 +407,6 @@ static NSDate* s_lastNVMSaveDate = nil;
 }
 
 + (void)requestVMBoot {
-    // Post notification that ios_main.mm will observe to start VM
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSRequestVMBoot" object:nil];
 }
 

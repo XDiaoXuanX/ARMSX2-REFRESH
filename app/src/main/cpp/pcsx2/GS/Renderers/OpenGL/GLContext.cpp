@@ -3,10 +3,14 @@
 
 #include "GS/Renderers/OpenGL/GLContext.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #if defined(_WIN32)
 #include "GS/Renderers/OpenGL/GLContextWGL.h"
-#elif defined(__APPLE__)
-#include "GS/Renderers/OpenGL/GLContextAGL.h"
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+#include "GS/Renderers/OpenGL/GLContextEAGL.h"
 #else // Linux
 #ifdef X11_API
 #include "GS/Renderers/OpenGL/GLContextEGLX11.h"
@@ -19,7 +23,9 @@
 #include "common/Console.h"
 
 #include "glad.h"
+#if defined(__ANDROID__)
 #include "GS/Renderers/OpenGL/GLContextEGLAndroid.h"
+#endif
 
 static bool ShouldPreferESContext()
 {
@@ -60,7 +66,7 @@ std::vector<GLContext::FullscreenModeInfo> GLContext::EnumerateFullscreenModes()
 std::unique_ptr<GLContext> GLContext::Create(const WindowInfo& wi, const Version* versions_to_try,
 											 size_t num_versions_to_try)
 {
-	const bool prefer_es = (wi.type == WindowInfo::Type::Android) || ShouldPreferESContext();
+	const bool prefer_es = (wi.type == WindowInfo::Type::Android) || (wi.type == WindowInfo::Type::iOS) || ShouldPreferESContext();
 	if (prefer_es)
 	{
 		// Move ES profiles to the front so EGL negotiates a GLES context first on Android/mobile.
@@ -82,8 +88,17 @@ std::unique_ptr<GLContext> GLContext::Create(const WindowInfo& wi, const Version
 	}
 
 	std::unique_ptr<GLContext> context;
+#if defined(__ANDROID__)
 	if(wi.type == WindowInfo::Type::Android)
 		context = GLContextEGLAndroid::Create(wi, versions_to_try, num_versions_to_try);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	else if (wi.type == WindowInfo::Type::iOS)
+		context = GLContextEAGL::Create(wi, versions_to_try, num_versions_to_try);
+#endif
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+	if (wi.type == WindowInfo::Type::iOS)
+		context = GLContextEAGL::Create(wi, versions_to_try, num_versions_to_try);
+#endif
 	if (!context)
 		return nullptr;
 
@@ -108,6 +123,14 @@ std::unique_ptr<GLContext> GLContext::Create(const WindowInfo& wi, const Version
 			return nullptr;
 		}
 	}
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	if (wi.type == WindowInfo::Type::iOS && !static_cast<GLContextEAGL*>(context.get())->CreateSurface())
+	{
+		Console.Error("Failed to create iOS GLES drawable surface");
+		return nullptr;
+	}
+#endif
 
 	context_being_created = nullptr;
 
