@@ -59,6 +59,7 @@ struct rc_client_t;
 
 // iOS specific headers
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #include <mach-o/dyld.h>
 #include "common/Darwin/DarwinMisc.h" // For ARMSX2_CRASH_DIAG
 
@@ -81,15 +82,23 @@ extern void GSResizeDisplayWindow(int width, int height, float scale);
 
 @interface ARMSX2GameView : UIView
 @end
+static int g_iosRendererForView = static_cast<int>(GSRendererType::Metal);
 @implementation ARMSX2GameView
-+ (Class)layerClass { return [CAMetalLayer class]; }
++ (Class)layerClass {
+    return (g_iosRendererForView == static_cast<int>(GSRendererType::OGL)) ? [CAEAGLLayer class] : [CAMetalLayer class];
+}
 - (void)layoutSubviews {
     [super layoutSubviews];
-    // Frame is set by SwiftUI — only update Metal drawable size
     CGFloat scale = self.contentScaleFactor;
-    CAMetalLayer *mtl = (CAMetalLayer *)self.layer;
-    mtl.drawableSize = CGSizeMake(self.bounds.size.width * scale,
-                                   self.bounds.size.height * scale);
+    if ([self.layer isKindOfClass:[CAMetalLayer class]]) {
+        CAMetalLayer *mtl = (CAMetalLayer *)self.layer;
+        mtl.drawableSize = CGSizeMake(self.bounds.size.width * scale,
+                                      self.bounds.size.height * scale);
+    } else if ([self.layer isKindOfClass:[CAEAGLLayer class]]) {
+        CAEAGLLayer *eagl = (CAEAGLLayer *)self.layer;
+        eagl.contentsScale = scale;
+        eagl.opaque = YES;
+    }
     int w = (int)(self.bounds.size.width * scale);
     int h = (int)(self.bounds.size.height * scale);
     float s = (float)scale;
@@ -613,6 +622,65 @@ static INISettingsInterface* s_settings_interface = nullptr;
 // Expose to ARMSX2Bridge.mm via extern
 INISettingsInterface* g_p44_settings_interface = nullptr;
 
+static int ARMSX2GetConfiguredRendererForView()
+{
+    const int fallback = static_cast<int>(GSRendererType::Metal);
+    const int renderer = s_settings_interface ?
+        s_settings_interface->GetIntValue("EmuCore/GS", "Renderer", fallback) :
+        fallback;
+
+    switch (static_cast<GSRendererType>(renderer)) {
+        case GSRendererType::Metal:
+        case GSRendererType::OGL:
+        case GSRendererType::SW:
+        case GSRendererType::Null:
+            return renderer;
+        default:
+            return fallback;
+    }
+}
+
+static void ARMSX2PrepareGameRenderViewForRendererOnMain(int renderer, const char* reason)
+{
+    (void)reason;
+    g_iosRendererForView = renderer;
+
+    Class expectedLayer = (renderer == static_cast<int>(GSRendererType::OGL)) ? [CAEAGLLayer class] : [CAMetalLayer class];
+    if (g_gameRenderView && [g_gameRenderView.layer isKindOfClass:expectedLayer]) {
+        return;
+    }
+
+    UIView* oldView = g_gameRenderView;
+    CGRect frame = oldView ? oldView.frame : CGRectZero;
+    if (oldView.superview)
+        [oldView removeFromSuperview];
+
+    g_gameRenderView = [[ARMSX2GameView alloc] initWithFrame:frame];
+    g_gameRenderView.backgroundColor = [UIColor blackColor];
+    g_gameRenderView.clipsToBounds = YES;
+    [g_gameRenderView setNeedsLayout];
+}
+
+static void ARMSX2PrepareGameRenderViewForRenderer(int renderer, const char* reason)
+{
+    if ([NSThread isMainThread])
+        ARMSX2PrepareGameRenderViewForRendererOnMain(renderer, reason);
+    else
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            ARMSX2PrepareGameRenderViewForRendererOnMain(renderer, reason);
+        });
+}
+
+static void ARMSX2PrepareGameRenderViewForCurrentRenderer(const char* reason)
+{
+    ARMSX2PrepareGameRenderViewForRenderer(ARMSX2GetConfiguredRendererForView(), reason);
+}
+
+extern "C" void ARMSX2_PrepareGameRenderViewForCurrentRenderer(const char* reason)
+{
+    ARMSX2PrepareGameRenderViewForCurrentRenderer(reason);
+}
+
 static int ARMSX2ClampINIInt(INISettingsInterface* si, const char* section, const char* key, int default_value, int min_value, int max_value)
 {
     const int value = si->GetIntValue(section, key, default_value);
@@ -692,7 +760,18 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
     si->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
 
     si->SetStringValue("SPU2/Output", "Backend", "SDL");
-    si->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
+    const int configured_renderer = si->GetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
+    switch (static_cast<GSRendererType>(configured_renderer)) {
+        case GSRendererType::Metal:
+        case GSRendererType::OGL:
+        case GSRendererType::SW:
+        case GSRendererType::Null:
+            si->SetIntValue("EmuCore/GS", "Renderer", configured_renderer);
+            break;
+        default:
+            si->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
+            break;
+    }
     si->SetStringValue("EmuCore/GS", "AspectRatio", "Auto 4:3/3:2");
     si->SetStringValue("EmuCore/GS", "FMVAspectRatioSwitch", "Off");
     ARMSX2ClampINIInt(si, "EmuCore/GS", "VsyncQueueSize", 2, 0, 8);
@@ -794,7 +873,6 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     s_settings_interface->Save();
     [self checkAndConfigureBIOS];
 
-    // GS Renderer: Metal fixed on iOS. Only override if not already Metal.
 #if DEBUG
     if (const char* null_gs_env = getenv("ARMSX2_NULL_GS"); null_gs_env && atoi(null_gs_env)) {
         EmuConfig.GS.Renderer = GSRendererType::Null;
@@ -802,8 +880,20 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     } else
 #endif
     {
-        EmuConfig.GS.Renderer = GSRendererType::Metal;
+        const int renderer_value = s_settings_interface->GetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
+        switch (static_cast<GSRendererType>(renderer_value)) {
+            case GSRendererType::Metal:
+            case GSRendererType::OGL:
+            case GSRendererType::SW:
+            case GSRendererType::Null:
+                EmuConfig.GS.Renderer = static_cast<GSRendererType>(renderer_value);
+                break;
+            default:
+                EmuConfig.GS.Renderer = GSRendererType::Metal;
+                break;
+        }
     }
+    g_iosRendererForView = static_cast<int>(EmuConfig.GS.Renderer);
     s_settings_interface->Save();
 
     @try {
@@ -826,7 +916,10 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     }
 
     // --- Create SDL Window ---
-    Host::g_sdl_window = SDL_CreateWindow("ARMSX2 iOS", 1280, 720, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE);
+    SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE;
+    if (EmuConfig.GS.Renderer != GSRendererType::OGL)
+        window_flags = static_cast<SDL_WindowFlags>(window_flags | SDL_WINDOW_METAL);
+    Host::g_sdl_window = SDL_CreateWindow("ARMSX2 iOS", 1280, 720, window_flags);
     if (!Host::g_sdl_window) {
         Console.Error("Failed to create SDL window: %s", SDL_GetError());
         return;
@@ -842,9 +935,7 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
         [self.window makeKeyAndVisible];
 
 // Create game render view — SwiftUI MetalGameView (UIViewRepresentable) manages placement
-        g_gameRenderView = [[ARMSX2GameView alloc] initWithFrame:CGRectZero];
-        g_gameRenderView.backgroundColor = [UIColor blackColor];
-        g_gameRenderView.clipsToBounds = YES;
+        ARMSX2PrepareGameRenderViewForRenderer(static_cast<int>(EmuConfig.GS.Renderer), "scene_connect");
         // Do NOT addSubview here — SwiftUI's MetalGameView handles view hierarchy
         Console.WriteLn("[Layout] Game render view created (SwiftUI-managed)");
 
@@ -900,10 +991,11 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     // queue:nil = synchronous delivery, so background colors are set BEFORE
     // SwiftUI re-renders the game overlay (avoids gray flash)
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ARMSX2iOSRequestVMBoot"
-                                                      object:nil
-                                                       queue:nil
-                                                  usingBlock:^(NSNotification * _Nonnull note) {
+                                                  object:nil
+                                                   queue:nil
+                                              usingBlock:^(NSNotification * _Nonnull note) {
         Console.WriteLn("[UI] VM boot requested from UI (rootVC=%p)", s_rootVC);
+        ARMSX2PrepareGameRenderViewForCurrentRenderer("vm_boot_request");
         if (s_rootVC) s_rootVC.view.backgroundColor = [UIColor blackColor];
 #if TARGET_OS_SIMULATOR
         [self startVMThread];
@@ -913,9 +1005,9 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     }];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ARMSX2iOSRequestVMShutdown"
-                                                      object:nil
-                                                       queue:nil
-                                                  usingBlock:^(NSNotification * _Nonnull note) {
+                                                  object:nil
+                                                   queue:nil
+                                              usingBlock:^(NSNotification * _Nonnull note) {
         Console.WriteLn("[UI] VM shutdown requested from UI");
         s_requestVMStop.store(true);
     }];
@@ -925,9 +1017,9 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     // rootVC stays black after first boot — eliminates white flash during VM restart.
 
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ARMSX2iOSVMDidShutdown"
-                                                      object:nil
-                                                       queue:nil
-                                                  usingBlock:^(NSNotification * _Nonnull note) {
+                                                  object:nil
+                                                   queue:nil
+                                              usingBlock:^(NSNotification * _Nonnull note) {
         // No rootVC background change — SwiftUI handles menu bg
     }];
 
@@ -1230,7 +1322,6 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
             return;
         }
 
-        // Signal the persistent thread to boot
         s_requestVMBoot.store(true);
         s_requestVMStop.store(false);
 
@@ -1240,14 +1331,12 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
             return;
         }
 
-        // First call: create the persistent thread
         s_vmThreadCreated = true;
     }
 
     Console.WriteLn("[VM] Creating persistent VM thread...");
 
     std::thread vmThread([]() {
-        // === ONE-TIME INIT (runs once per app lifetime) ===
         Console.WriteLn("[VM] VM Thread: CPUThreadInitialize (once)...");
         if (!VMManager::Internal::CPUThreadInitialize()) {
             Console.Error("VM Thread: CPUThreadInitialize failed.");
@@ -1256,15 +1345,12 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
             return;
         }
 
-        // Set ImGui font path (once)
         std::string fontPath = Path::Combine(EmuFolders::Resources, "fonts/Roboto-Regular.ttf");
         ImGuiManager::SetFontPathAndRange(std::move(fontPath), {});
 
-        // === PERSISTENT BOOT LOOP ===
         bool auto_boot_first = (getenv("ARMSX2_AUTO_BOOT") && atoi(getenv("ARMSX2_AUTO_BOOT")) == 1)
                             || (getenv("ARMSX2_BOOT_ELF") != nullptr);
         while (true) {
-            // Wait for boot signal (or auto-boot on first iteration)
             {
                 std::unique_lock<std::mutex> lk(s_vmMutex);
                 if (auto_boot_first) {
@@ -1280,10 +1366,16 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
             Console.WriteLn("[VM] VM Thread: boot signal received, preparing boot params...");
             s_vmThreadActive.store(true);
 
-            // --- Build boot parameters from INI ---
             VMBootParameters boot_params;
             boot_params.fast_boot = false;
             {
+                if (!s_settings_interface) {
+                    s_vmThreadActive.store(false);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
+                    });
+                    continue;
+                }
                 std::string isoDir = EmuFolders::DataRoot + "/iso";
                 std::string defaultISO = "";
                 std::string isoFilename = s_settings_interface->GetStringValue("GameISO", "BootISO", defaultISO.c_str());
@@ -1324,7 +1416,6 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
                 Console.WriteLn("@@AUTO_BOOT_BIOS@@ enabled=1 action=triggered");
                 boot_params.fast_boot = false;
             }
-            // ps2autotests: boot ELF directly via env var
             if (const char* testElf = getenv("ARMSX2_BOOT_ELF")) {
                 boot_params.elf_override = testElf;
                 boot_params.source_type = CDVD_SourceType::NoDisc;
@@ -1332,19 +1423,20 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
                 Console.WriteLn("@@BOOT_ELF@@ elf=%s", testElf);
             }
 
-            // BIOS sanity check
-            if (EmuConfig.BaseFilenames.Bios.empty() || !FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str())) {
+            const std::string bios_path = Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios);
+            if (EmuConfig.BaseFilenames.Bios.empty() || !FileSystem::FileExists(bios_path.c_str())) {
                 Console.Error("CRITICAL: BIOS verification failed inside VM thread.");
                 Host::ReportErrorAsync("BIOS Error", "Validation failed.");
                 s_vmThreadActive.store(false);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
                 });
-                continue; // back to wait loop
+                continue;
             }
 
-            // --- Initialize & Execute VM ---
-            if (VMManager::Initialize(boot_params)) {
+            const bool initialized = VMManager::Initialize(boot_params);
+
+            if (initialized) {
                 Console.WriteLn("[VM] VM initialized successfully");
                 VMManager::SetState(VMState::Running);
 
@@ -1371,17 +1463,13 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
                 Host::ReportErrorAsync("Startup Error", "VM Initialization Failed.");
             }
 
-            // --- Post-shutdown: reset state, notify UI ---
             s_vmThreadActive.store(false);
             s_requestVMStop.store(false);
             Console.WriteLn("[VM] VM Thread: shutdown complete, posting notification");
             dispatch_async(dispatch_get_main_queue(), ^{
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
             });
-        } // end while(true) boot loop
-
-        // Note: CPUThreadShutdown() is never reached because the thread persists.
-        // It would only be needed if we added an app-termination signal.
+        }
     });
     vmThread.detach();
 }

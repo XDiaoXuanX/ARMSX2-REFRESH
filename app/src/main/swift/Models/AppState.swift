@@ -49,16 +49,22 @@ final class AppState: @unchecked Sendable {
 
     func bootGame(isoName: String) {
         ARMSX2Bridge.bootISO(isoName)
-        ARMSX2Bridge.requestVMBoot()
+        ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
         runningGameName = isoName
         currentScreen = .playing
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            ARMSX2Bridge.requestVMBoot()
+        }
     }
 
     func bootBIOSOnly() {
         ARMSX2Bridge.setINIString("GameISO", key: "BootISO", value: "")
-        ARMSX2Bridge.requestVMBoot()
+        ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
         runningGameName = "BIOS"
         currentScreen = .playing
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            ARMSX2Bridge.requestVMBoot()
+        }
     }
 
     func returnToMenu() {

@@ -142,11 +142,14 @@ const char* GpuProfileDetector::RuntimeProfileToString(RuntimeGpuProfile value)
 {
 	switch (value)
 	{
+		case RuntimeGpuProfile::Generic:
+			return "Generic";
 		case RuntimeGpuProfile::Mali:
 			return "Mali";
 		case RuntimeGpuProfile::Adreno:
-		default:
 			return "Adreno";
+		default:
+			return "Generic";
 	}
 }
 
@@ -182,7 +185,7 @@ GpuProfileSelection GpuProfileDetector::Resolve(std::string_view override_value,
 		selection.runtime_profile = RuntimeGpuProfile::Mali;
 	}
 #else
-	selection.runtime_profile = RuntimeGpuProfile::Adreno;
+	selection.runtime_profile = RuntimeGpuProfile::Generic;
 #endif
 
 	return selection;

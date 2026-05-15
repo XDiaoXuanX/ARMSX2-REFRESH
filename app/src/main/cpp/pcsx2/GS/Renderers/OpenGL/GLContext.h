@@ -50,6 +50,7 @@ public:
 	virtual bool DoneCurrent() = 0;
 	virtual bool SetSwapInterval(s32 interval) = 0;
 	virtual std::unique_ptr<GLContext> CreateSharedContext(const WindowInfo& wi) = 0;
+	virtual u32 GetDefaultFramebuffer() const { return 0; }
 
 	virtual std::vector<FullscreenModeInfo> EnumerateFullscreenModes();
 

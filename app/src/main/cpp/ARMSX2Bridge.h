@@ -40,6 +40,7 @@ typedef NS_ENUM(NSInteger, ARMSX2PadButton) {
 
 // Game render view (for UIViewRepresentable)
 + (nonnull UIView *)gameRenderView;
++ (void)prepareGameRenderViewForCurrentRenderer;
 
 // Lifecycle
 + (void)saveNVRAM;

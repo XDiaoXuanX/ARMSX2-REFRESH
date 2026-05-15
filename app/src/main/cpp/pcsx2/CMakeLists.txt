@@ -607,6 +607,14 @@ if(USE_OPENGL)
 		GS/Renderers/OpenGL/GSDeviceOGL.cpp
 		GS/Renderers/OpenGL/GSTextureOGL.cpp
 	)
+	if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		set(IOS_GLAD_SOURCE "${CMAKE_SOURCE_DIR}/3rdparty/glad/src/glad.c")
+		list(APPEND pcsx2GSSources "${IOS_GLAD_SOURCE}")
+		set_source_files_properties("${IOS_GLAD_SOURCE}" PROPERTIES
+			COMPILE_FLAGS "-I${CMAKE_SOURCE_DIR}/3rdparty/glad/include")
+		target_include_directories(PCSX2_FLAGS INTERFACE "${CMAKE_SOURCE_DIR}/3rdparty/glad/include")
+		target_include_directories(PCSX2 PRIVATE "${CMAKE_SOURCE_DIR}/3rdparty/glad/include")
+	endif()
 	list(APPEND pcsx2GSHeaders
 		GS/Renderers/OpenGL/GLContext.h
 		GS/Renderers/OpenGL/GLProgram.h
@@ -616,7 +624,9 @@ if(USE_OPENGL)
 		GS/Renderers/OpenGL/GSDeviceOGL.h
 		GS/Renderers/OpenGL/GSTextureOGL.h
 	)
-	target_link_libraries(PCSX2_FLAGS INTERFACE glad)
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		target_link_libraries(PCSX2_FLAGS INTERFACE glad)
+	endif()
 
 	if(WIN32)
 		list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextWGL.cpp)
@@ -631,6 +641,14 @@ if(USE_OPENGL)
 			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGL.h)
 			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEGLAndroid.cpp)
 			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGLAndroid.h)
+		elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEAGL.mm)
+			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEAGL.h)
+			target_link_libraries(PCSX2_FLAGS INTERFACE
+				"-framework OpenGLES"
+				"-framework QuartzCore"
+				"-framework UIKit"
+			)
 		endif()
 
 		if(X11_API)

@@ -9,6 +9,8 @@ local.properties
 node_modules/
 bun.lockb
 package-lock.json
+build-ios-device/
+build-ios-sim/
 
 # OS junk & editor/files
 .DS_Store

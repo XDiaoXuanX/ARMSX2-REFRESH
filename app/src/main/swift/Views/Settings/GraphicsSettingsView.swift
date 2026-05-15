@@ -11,10 +11,11 @@ struct GraphicsSettingsView: View {
             Section("Renderer") {
                 Picker("Renderer", selection: $settings.renderer) {
                     Text("Metal (Hardware)").tag(17)
+                    Text("OpenGL ES (Experimental)").tag(12)
                     Text("Software").tag(13)
                     Text("Null (No Output)").tag(11)
                 }
-                Text("Metal is recommended. Software is slow but accurate. Null disables rendering (for testing). Requires restart.")
+                Text("Metal is recommended. OpenGL ES is experimental. Software is slow but accurate. Null disables rendering. Requires restart.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
