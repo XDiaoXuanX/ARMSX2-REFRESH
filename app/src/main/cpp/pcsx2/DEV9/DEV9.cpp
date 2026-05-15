@@ -956,6 +956,26 @@ u32 DEV9read32(u32 addr)
 	}
 
 	const u32 hard = dev9Ru32(addr);
+	{
+		static int s_dev9_override_cfg = -1;
+		static u32 s_dev9_override_log_count = 0;
+		if (s_dev9_override_cfg < 0)
+		{
+			const char* env = getenv("ARMSX2_DEV9_READ10000000_OVERRIDE");
+			const bool enabled = (env && env[0] && strcmp(env, "0") != 0);
+			s_dev9_override_cfg = enabled ? 1 : 0;
+			Console.Error("@@CFG@@ ARMSX2_DEV9_READ10000000_OVERRIDE=%d", s_dev9_override_cfg);
+		}
+		if (s_dev9_override_cfg && addr == 0x10000000)
+		{
+			if (s_dev9_override_log_count < 50)
+			{
+				Console.Error("@@DEV9_OVERRIDE@@ addr=%lx hard=%x ret=%x", addr, hard, 1u);
+				s_dev9_override_log_count++;
+			}
+			return 1;
+		}
+	}
 	Console.Error("DEV9: Unknown 32bit read at address %lx value %x", addr, hard);
 	return hard;
 }

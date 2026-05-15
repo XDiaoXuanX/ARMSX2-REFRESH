@@ -55,7 +55,10 @@
 
 thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM] = {XMMT_INT};
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
+
+namespace x86Emitter
+{
 
 const a64::VRegister
     xmm0=a64::QRegister(0), xmm1=a64::QRegister(1),
@@ -90,6 +93,8 @@ const a64::WRegister
     calleeSavedReg1d = a64::WRegister(7),
 //        calleeSavedReg2d = esi;
     calleeSavedReg2d = a64::WRegister(6);
+
+}
 
 #else
 

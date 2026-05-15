@@ -14,6 +14,10 @@
 
 #include "Config.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 enum class CDVD_SourceType : uint8_t;
 
 enum class VMState
@@ -235,7 +239,7 @@ namespace VMManager
 	/// Called when the rich presence string, provided by RetroAchievements, changes.
 	void UpdateDiscordPresence(bool update_session_time);
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 	void AndroidDiscordConfigure(uint64_t app_id, const std::string& custom_scheme, std::string display_name,
 		const std::string& large_image_key);
 	void AndroidDiscordProvideStoredToken(const std::string& access_token, const std::string& refresh_token,

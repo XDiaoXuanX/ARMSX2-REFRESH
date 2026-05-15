@@ -29,6 +29,9 @@ extern thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM];
 
 #if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
 
+namespace x86Emitter
+{
+
 static const int wordsize = sizeof(sptr);
 static constexpr int SHADOW_STACK_SIZE = 0;
 
@@ -48,6 +51,8 @@ extern const a64::WRegister
     arg1regd, arg2regd,
     calleeSavedReg1d,
     calleeSavedReg2d;
+
+}
 
 #else
 

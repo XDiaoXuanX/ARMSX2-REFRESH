@@ -142,6 +142,113 @@ namespace HostSys
 	{
 		Munmap(ptr, size);
 	}
+
+
+    enum class BlockExitReason : u8 {
+        Unknown = 0,
+        Link,
+        Helper,
+        Exception,
+        Fallback,
+        DispatcherExit,
+        BranchTaken,
+        BranchNotTaken,
+    };
+
+    struct BlockTraceEntry {
+        u32 guest_pc;
+        u32 next_guest_pc;
+        u32 block_id;
+        u32 cycle;
+        BlockExitReason exit_reason;
+        u8 exception_code;
+        u32 epc;
+        u8 bd_bit;
+    };
+
+    static constexpr size_t BLOCK_TRACE_SIZE = 256;
+
+    struct JitRuntimeContext {
+        u32 guest_pc;
+        u32 next_guest_pc;
+        u32 block_id;
+
+        u8 pending_exception_code;
+        u32 pending_epc;
+        u8 pending_bd_bit;
+
+        BlockTraceEntry trace_buffer[BLOCK_TRACE_SIZE];
+        u32 trace_index;
+
+        u64 last_trace_update_ms;
+        static constexpr u64 HANG_THRESHOLD_MS = 500;
+
+        u32 last_block_id;
+        u32 repeat_count;
+        static constexpr u32 LOOP_THRESHOLD = 100000;
+
+        void RecordBlockExit(u32 pc, u32 next_pc, u32 id, u32 cyc, BlockExitReason reason,
+                             u8 exc_code = 0, u32 exc_epc = 0, u8 exc_bd = 0) {
+            BlockTraceEntry& entry = trace_buffer[trace_index & (BLOCK_TRACE_SIZE - 1)];
+            entry.guest_pc = pc;
+            entry.next_guest_pc = next_pc;
+            entry.block_id = id;
+            entry.cycle = cyc;
+            entry.exit_reason = reason;
+            entry.exception_code = exc_code;
+            entry.epc = exc_epc;
+            entry.bd_bit = exc_bd;
+            trace_index++;
+
+            last_trace_update_ms++;
+
+            if (id == last_block_id) {
+                repeat_count++;
+            } else {
+                last_block_id = id;
+                repeat_count = 1;
+            }
+        }
+
+        bool IsLinkLoopSuspected() const {
+            return repeat_count >= LOOP_THRESHOLD;
+        }
+
+        void ResetLoopDetection() {
+            repeat_count = 0;
+        }
+
+        bool IsHangSuspected(u64 current_ms) const {
+            return (current_ms - last_trace_update_ms) > HANG_THRESHOLD_MS;
+        }
+    };
+    extern thread_local JitRuntimeContext g_JitContext;
+
+    class AutoCodeWrite
+    {
+    public:
+        AutoCodeWrite(void* ptr = nullptr, size_t size = 0)
+            : m_ptr(ptr), m_size(size)
+        {
+            BeginCodeWrite();
+        }
+
+        ~AutoCodeWrite()
+        {
+            EndCodeWrite();
+            if (m_ptr && m_size > 0) {
+                FlushInstructionCache(m_ptr, static_cast<u32>(m_size));
+            }
+        }
+
+        AutoCodeWrite(const AutoCodeWrite&) = delete;
+        AutoCodeWrite& operator=(const AutoCodeWrite&) = delete;
+
+    private:
+        void* m_ptr;
+        size_t m_size;
+    };
+
 } // namespace HostSys
 
 namespace PageFaultHandler
@@ -154,6 +261,7 @@ namespace PageFaultHandler
 
 	HandlerResult HandlePageFault(void* exception_pc, void* fault_address, bool is_write);
 	bool Install(Error* error = nullptr);
+	bool Install_Fresh(Error* error = nullptr);
 } // namespace PageFaultHandler
 
 class SharedMemoryMappingArea

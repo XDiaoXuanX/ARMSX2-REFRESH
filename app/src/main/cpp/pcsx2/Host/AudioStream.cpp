@@ -27,6 +27,8 @@
 #define LOG_UNDERRUN(...) (void)0
 static constexpr bool LOG_TIMESTRETCH_STATS = false;
 
+static AudioBackend SanitizeAudioBackend(AudioBackend backend);
+
 static constexpr const std::array<std::pair<u8, u8>, static_cast<size_t>(AudioExpansionMode::Count)>
 	s_expansion_channel_count = {{
 		{u8(2), u8(2)}, // Disabled
@@ -107,6 +109,7 @@ std::vector<AudioStream::DeviceInfo> AudioStream::GetOutputDevices(AudioBackend 
 std::unique_ptr<AudioStream> AudioStream::CreateStream(AudioBackend backend, u32 sample_rate, const AudioStreamParameters& parameters,
 	const char* driver_name, const char* device_name, bool stretch_enabled, Error* error)
 {
+	backend = SanitizeAudioBackend(backend);
 	INFO_LOG("Creating {} audio stream, sample rate = {}, expansion = {}, buffer = {}, latency = {}, stretching {}, driver = {}, device = {}",
 		GetBackendName(backend), sample_rate, GetExpansionModeName(parameters.expansion_mode), parameters.buffer_ms, parameters.output_latency_ms,
 		stretch_enabled ? "enabled" : "disabled", driver_name, device_name);
@@ -152,22 +155,60 @@ static constexpr const std::array s_backend_names = {
 	"Null",
 	"Cubeb",
 	"SDL",
+	"Oboe",
+	"Unknown",
 };
 static constexpr const std::array s_backend_display_names = {
 	TRANSLATE_NOOP("AudioStream", "Null (No Output)"),
 	TRANSLATE_NOOP("AudioStream", "Cubeb"),
 	TRANSLATE_NOOP("AudioStream", "SDL"),
+	TRANSLATE_NOOP("AudioStream", "Oboe"),
+	TRANSLATE_NOOP("AudioStream", "Unknown"),
 };
+
+static constexpr AudioBackend GetPlatformFallbackBackend()
+{
+	return AudioBackend::SDL;
+}
+
+static bool IsAudioBackendAvailableOnPlatform(AudioBackend backend)
+{
+	const int index = static_cast<int>(backend);
+	if (index < 0 || index >= static_cast<int>(AudioBackend::Count))
+		return false;
+
+#if !defined(__ANDROID__)
+	if (backend == AudioBackend::Oboe)
+		return false;
+#endif
+
+	return true;
+}
+
+static AudioBackend SanitizeAudioBackend(AudioBackend backend)
+{
+	if (IsAudioBackendAvailableOnPlatform(backend))
+		return backend;
+
+	Console.Warning("Invalid or unavailable audio backend %d, using %s.", static_cast<int>(backend),
+		s_backend_names[static_cast<int>(GetPlatformFallbackBackend())]);
+	return GetPlatformFallbackBackend();
+}
 
 std::optional<AudioBackend> AudioStream::ParseBackendName(const char* str)
 {
-	int index = 0;
-	for (const char* name : s_backend_names)
+	for (int i = 0; i < static_cast<int>(AudioBackend::Count); i++)
 	{
-		if (std::strcmp(name, str) == 0)
-			return static_cast<AudioBackend>(index);
+		if (std::strcmp(s_backend_names[i], str) == 0)
+		{
+			const AudioBackend backend = static_cast<AudioBackend>(i);
+			if (IsAudioBackendAvailableOnPlatform(backend))
+				return backend;
 
-		index++;
+			Console.Warning("Audio backend '%s' is not available on this platform, using %s.", str,
+				s_backend_names[static_cast<int>(GetPlatformFallbackBackend())]);
+			return GetPlatformFallbackBackend();
+		}
 	}
 
 	return std::nullopt;
@@ -175,11 +216,13 @@ std::optional<AudioBackend> AudioStream::ParseBackendName(const char* str)
 
 const char* AudioStream::GetBackendName(AudioBackend backend)
 {
+	backend = SanitizeAudioBackend(backend);
 	return s_backend_names[static_cast<int>(backend)];
 }
 
 const char* AudioStream::GetBackendDisplayName(AudioBackend backend)
 {
+	backend = SanitizeAudioBackend(backend);
 	return Host::TranslateToCString("AudioStream", s_backend_display_names[static_cast<int>(backend)]);
 }
 

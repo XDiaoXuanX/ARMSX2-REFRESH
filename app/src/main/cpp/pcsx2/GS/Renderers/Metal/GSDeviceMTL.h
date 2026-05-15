@@ -17,7 +17,13 @@
 #include "GS/GS.h"
 #include "GSMTLDeviceInfo.h"
 #include "GSMTLSharedHeader.h"
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <UIKit/UIKit.h>
+using NSView = UIView;
+#else
 #include <AppKit/AppKit.h>
+#endif
 #include <Metal/Metal.h>
 #include <QuartzCore/QuartzCore.h>
 #include <atomic>
@@ -436,7 +442,7 @@ public:
 
 	void SetupDestinationAlpha(GSTexture* rt, GSTexture* ds, const GSVector4i& r, SetDATM datm);
 	void RenderHW(GSHWDrawConfig& config) override;
-	void SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder> enc, id<MTLBuffer> buffer, size_t off);
+	void SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder> enc, id<MTLBuffer> buffer, size_t off, bool one_barrier, bool full_barrier);
 
 	// MARK: Debug
 

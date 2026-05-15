@@ -24,6 +24,9 @@
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_IPHONE
 
 // We're using deprecated fields because we're targeting multiple ffmpeg versions.
 #if defined(_MSC_VER)
@@ -1541,3 +1544,29 @@ GSCapture::FormatList GSCapture::GetVideoFormatList(const char* codec)
 
 	return ret;
 }
+
+#else
+
+namespace GSCapture
+{
+	bool BeginCapture(float fps, GSVector2i recommendedResolution, float aspect, std::string filename) { return false; }
+	bool DeliverVideoFrame(GSTexture* stex) { return false; }
+	void DeliverAudioPacket(const s16* frames) {}
+	void EndCapture() {}
+
+	bool IsCapturing() { return false; }
+	bool IsCapturingVideo() { return false; }
+	bool IsCapturingAudio() { return false; }
+	TinyString GetElapsedTime() { return "00:00:00"; }
+	const Threading::ThreadHandle& GetEncoderThreadHandle() { static Threading::ThreadHandle h; return h; }
+	GSVector2i GetSize() { return {0,0}; }
+	std::string GetNextCaptureFileName() { return ""; }
+	void Flush() {}
+
+	CodecList GetVideoCodecList(const char* container) { return {}; }
+	CodecList GetAudioCodecList(const char* container) { return {}; }
+
+	FormatList GetVideoFormatList(const char* codec) { return {}; }
+}
+
+#endif

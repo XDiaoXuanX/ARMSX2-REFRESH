@@ -41,7 +41,15 @@
 #include "fmt/format.h"
 
 #include <csetjmp>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#ifndef TARGET_OS_IPHONE
+#define TARGET_OS_IPHONE 0
+#endif
+#if !TARGET_OS_IPHONE
 #include <png.h>
+#endif
 
 using namespace R5900;
 
@@ -776,6 +784,9 @@ std::unique_ptr<SaveStateScreenshotData> SaveState_SaveScreenshot()
 
 static bool SaveState_CompressScreenshot(SaveStateScreenshotData* data, zip_t* zf)
 {
+#if TARGET_OS_IPHONE
+	return false;
+#else
 	zip_error_t ze = {};
 	zip_source_t* const zs = zip_source_buffer_create(nullptr, 0, 0, &ze);
 	if (!zs)
@@ -839,10 +850,14 @@ static bool SaveState_CompressScreenshot(SaveStateScreenshotData* data, zip_t* z
 	// source is now owned by the zip file for later compression
 	zs_free.Cancel();
 	return true;
+#endif
 }
 
 static bool SaveState_ReadScreenshot(zip_t* zf, u32* out_width, u32* out_height, std::vector<u32>* out_pixels)
 {
+#if TARGET_OS_IPHONE
+	return false;
+#else
 	auto zff = zip_fopen_managed(zf, EntryFilename_Screenshot, 0);
 	if (!zff)
 		return false;
@@ -918,6 +933,7 @@ static bool SaveState_ReadScreenshot(zip_t* zf, u32* out_width, u32* out_height,
 	}
 
 	return true;
+#endif
 }
 
 // --------------------------------------------------------------------------------------
@@ -1147,7 +1163,7 @@ static bool LoadInternalStructuresState(zip_t* zf, s64 index, Error* error)
 	memLoadingState state(buffer);
 	if (!state.FreezeBios())
 		return false;
-	
+
 	if (!state.FreezeInternals(error))
 		return false;
 

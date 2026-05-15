@@ -13,6 +13,8 @@
 #include "cpuinfo.h"
 #include "imgui.h"
 
+extern "C" void LogUnified(const char* fmt, ...);
+
 #ifdef __APPLE__
 #include "GSMTLSharedHeader.h"
 
@@ -34,10 +36,12 @@ std::vector<GSAdapterInfo> GetMetalAdapterList()
 	{
 		GSAdapterInfo ai;
 		ai.name = [[dev name] UTF8String];
-		
+
 		ai.max_texture_size = 8192;
+		#if !TARGET_OS_IPHONE
 		if ([dev supportsFeatureSet:MTLFeatureSet_macOS_GPUFamily1_v1])
 			ai.max_texture_size = 16384;
+#endif
 		if (@available(macOS 10.15, iOS 13.0, *))
 			if ([dev supportsFamily:MTLGPUFamilyApple3])
 				ai.max_texture_size = 16384;
@@ -684,7 +688,14 @@ MRCOwned<id<MTLFunction>> GSDeviceMTL::LoadShader(NSString* name)
 	{
 		NSString* msg = [NSString stringWithFormat:@"Failed to load shader %@: %@", name, [err localizedDescription]];
 		Console.Error("%s", [msg UTF8String]);
+		LogUnified("@@MTL_LIB@@ shader=%s ok=0 err=%s\n", [name UTF8String], [msg UTF8String]);
 		pxFailRel([msg UTF8String]);
+	} else {
+		static int shader_log_cnt = 0;
+		if (shader_log_cnt < 5) {
+			LogUnified("@@MTL_LIB@@ shader=%s ok=1\n", [name UTF8String]);
+			shader_log_cnt++;
+		}
 	}
 	return fn;
 }
@@ -762,19 +773,28 @@ bool GSDeviceMTL::HasSurface()  const { return static_cast<bool>(m_layer);}
 void GSDeviceMTL::AttachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
+	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
+#if TARGET_OS_IPHONE
+	m_layer = MRCRetain((CAMetalLayer*)[m_view layer]);
+	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
+	[m_layer setDevice:m_dev.dev];
+#else
 	m_layer = MRCRetain([CAMetalLayer layer]);
 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
 	[m_layer setDevice:m_dev.dev];
-	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
 	[m_view setWantsLayer:YES];
 	[m_view setLayer:m_layer];
+#endif
 }
 
 void GSDeviceMTL::DetachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
+#if TARGET_OS_IPHONE
+#else
 	[m_view setLayer:nullptr];
 	[m_view setWantsLayer:NO];
+#endif
 	m_view = nullptr;
 	m_layer = nullptr;
 }
@@ -848,8 +868,10 @@ static MRCOwned<id<MTLSamplerState>> CreateSampler(id<MTLDevice> dev, GSHWDrawCo
 
 bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 { @autoreleasepool {
-	if (!GSDevice::Create(vsync_mode, allow_present_throttle))
+	if (!GSDevice::Create(vsync_mode, allow_present_throttle)) {
+		Console.WriteLn("GSDeviceMTL::Create: GSDevice::Create failed");
 		return false;
+	}
 
 	NSString* ns_adapter_name = [NSString stringWithUTF8String:GSConfig.Adapter.c_str()];
 	auto devs = MRCTransfer(MTLCopyAllDevices());
@@ -865,8 +887,10 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		else if (!GSConfig.Adapter.empty())
 			Console.Warning("Metal: Couldn't find adapter %s, using default", GSConfig.Adapter.c_str());
 		m_dev = GSMTLDevice(MRCTransfer(MTLCreateSystemDefaultDevice()));
-		if (!m_dev.dev)
+		if (!m_dev.dev) {
+			Console.WriteLn("GSDeviceMTL::Create: No Metal Devices Available");
 			Host::ReportErrorAsync(TRANSLATE_SV("GSDeviceMTL", "No Metal Devices Available"), TRANSLATE_SV("GSDeviceMTL", "No Metal-supporting GPUs were found.  PCSX2 requires a Metal GPU (available on all Macs from 2012 onwards)."));
+		}
 	}
 
 	m_name = [[m_dev.dev name] UTF8String];
@@ -898,8 +922,10 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	{
 		// This is a little less than ideal, pinging back and forward between threads, but we don't really
 		// have any other option, because Qt uses a blocking queued connection for window acquire.
-		if (!AcquireWindow(true))
+		if (!AcquireWindow(true)) {
+			Console.WriteLn("GSDeviceMTL::Create: AcquireWindow failed");
 			return false;
+		}
 
 		OnMainThread([this]
 		{
@@ -908,10 +934,13 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 		// Metal does not support mailbox.
 		m_vsync_mode = (m_vsync_mode == GSVSyncMode::Mailbox) ? GSVSyncMode::FIFO : m_vsync_mode;
+#if !TARGET_OS_IPHONE
 		[m_layer setDisplaySyncEnabled:m_vsync_mode == GSVSyncMode::FIFO];
+#endif
 	}
 	else
 	{
+		Console.WriteLn("GSDeviceMTL::Create: Device not OK or Queue creation failed. m_dev.IsOk()=%d, m_queue=%p, m_dev.dev=%p, m_dev.shaders=%p", m_dev.IsOk(), m_queue.Get(), m_dev.dev.Get(), m_dev.shaders.Get());
 		return false;
 	}
 
@@ -1305,6 +1334,10 @@ static bool s_capture_next = false;
 
 GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 { @autoreleasepool {
+	static int p_log = 0;
+	if ((p_log % 60) == 0) Console.WriteLn("Debug: BeginPresent called (count: %d, sk: %d)", p_log, frame_skip);
+	p_log++;
+
 	if (m_capture_start_frame && FrameNo() == m_capture_start_frame)
 		s_capture_next = true;
 	if (frame_skip || m_window_info.type == WindowInfo::Type::Surfaceless || !g_gs_device)
@@ -1323,10 +1356,35 @@ GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 		ImGui::EndFrame();
 		return PresentResult::FrameSkipped;
 	}
-	[m_pass_desc colorAttachments][0].texture = [m_current_drawable texture];
+
+	id<MTLTexture> targetTex = [m_current_drawable texture];
+	if (!targetTex) {
+		Console.Error("GSDeviceMTL::BeginPresent: Drawable texture is null!");
+		return PresentResult::FrameSkipped;
+	}
+
+	[m_pass_desc colorAttachments][0].texture = targetTex;
+
+	if (!m_pass_desc) {
+		Console.Error("GSDeviceMTL::BeginPresent: Pass descriptor is null!");
+		return PresentResult::FrameSkipped;
+	}
+
 	id<MTLRenderCommandEncoder> enc = [buf renderCommandEncoderWithDescriptor:m_pass_desc];
+	if (!enc) {
+		Console.Error("GSDeviceMTL::BeginPresent: Failed to create render command encoder!");
+		return PresentResult::FrameSkipped;
+	}
+
 	[enc setLabel:@"Present"];
 	m_current_render.encoder = MRCRetain(enc);
+
+	static bool s_phase_present = false;
+	if (!s_phase_present) {
+		LogUnified("@@PHASE@@ FIRST_GS_PRESENT\n");
+		s_phase_present = true;
+	}
+
 	return PresentResult::OK;
 }}
 
@@ -1364,8 +1422,10 @@ void GSDeviceMTL::EndPresent()
 				{
 					[[MTLCaptureManager sharedCaptureManager] stopCapture];
 					Console.WriteLn("Metal Trace Capture to /tmp/PCSX2MTLCapture.gputrace finished");
+#if !TARGET_OS_IPHONE
 					[[NSWorkspace sharedWorkspace] selectFile:path
 					                 inFileViewerRootedAtPath:@"/tmp/"];
+#endif
 				}
 			}
 			else if (s_capture_next)
@@ -1409,7 +1469,9 @@ void GSDeviceMTL::SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 		return;
 
 	m_vsync_mode = (mode == GSVSyncMode::Mailbox) ? GSVSyncMode::FIFO : mode;
+#if !TARGET_OS_IPHONE
 	[m_layer setDisplaySyncEnabled:m_vsync_mode == GSVSyncMode::FIFO];
+#endif
 }
 
 bool GSDeviceMTL::SetGPUTimingEnabled(bool enabled)
@@ -1944,9 +2006,17 @@ void GSDeviceMTL::MRESetSampler(SamplerSelector sel)
 
 static void textureBarrier(id<MTLRenderCommandEncoder> enc)
 {
+#if TARGET_OS_IPHONE
+#if !TARGET_OS_SIMULATOR
+	[enc memoryBarrierWithScope:MTLBarrierScopeTextures
+	                afterStages:MTLRenderStageFragment
+	               beforeStages:MTLRenderStageFragment];
+#endif
+#else
 	[enc memoryBarrierWithScope:MTLBarrierScopeRenderTargets
 	                afterStages:MTLRenderStageFragment
 	               beforeStages:MTLRenderStageFragment];
+#endif
 }
 
 void GSDeviceMTL::MRESetTexture(GSTexture* tex, int pos)
@@ -2145,7 +2215,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 	GSTexture* primid_tex = nullptr;
 	GSTexture* rt = config.rt;
 	GSTexture* colclip_rt = g_gs_device->GetColorClipTexture();
-	
+
 	if (colclip_rt)
 	{
 		if (config.colclip_mode == GSHWDrawConfig::ColClipMode::EarlyResolve)
@@ -2155,28 +2225,28 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 			g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 
 			Recycle(colclip_rt);
-			
+
 			g_gs_device->SetColorClipTexture(nullptr);
-			
+
 			colclip_rt = nullptr;
 		}
 		else
 			config.ps.colclip_hw = 1;
 	}
-	
+
 	if (config.ps.colclip_hw)
 	{
 		if (!colclip_rt)
 		{
 			config.colclip_update_area = config.drawarea;
-			
+
 			GSVector2i size = config.rt->GetSize();
 			rt = colclip_rt = CreateRenderTarget(size.x, size.y, GSTexture::Format::ColorClip, false);
-			
+
 			g_gs_device->SetColorClipTexture(colclip_rt);
-			
+
 			const GSVector4i copy_rect = (config.colclip_mode == GSHWDrawConfig::ColClipMode::ConvertOnly) ? GSVector4i::loadh(size) : config.drawarea;
-			
+
 			switch (config.rt->GetState())
 			{
 				case GSTexture::State::Dirty:
@@ -2201,7 +2271,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 
 		rt = colclip_rt;
 	}
-	
+
 	switch (config.destination_alpha)
 	{
 		case GSHWDrawConfig::DestinationAlphaMode::Off:
@@ -2225,7 +2295,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 			pxAssert(config.require_full_barrier == false && config.drawlist == nullptr);
 			MRESetHWPipelineState(config.vs, config.ps, {}, {});
 			MREInitHWDraw(config, allocation);
-			SendHWDraw(config, m_current_render.encoder, index_buffer, index_buffer_offset);
+			SendHWDraw(config, m_current_render.encoder, index_buffer, index_buffer_offset, false, false);
 			config.ps.date = 3;
 			break;
 		}
@@ -2272,7 +2342,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 	MRESetHWPipelineState(config.vs, config.ps, config.blend, config.colormask);
 	MRESetDSS(config.depth);
 
-	SendHWDraw(config, mtlenc, index_buffer, index_buffer_offset);
+	SendHWDraw(config, mtlenc, index_buffer, index_buffer_offset, config.require_one_barrier, config.require_full_barrier);
 
 	if (config.alpha_second_pass.enable)
 	{
@@ -2283,7 +2353,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 		}
 		MRESetHWPipelineState(config.vs, config.alpha_second_pass.ps, config.blend, config.alpha_second_pass.colormask);
 		MRESetDSS(config.alpha_second_pass.depth);
-		SendHWDraw(config, mtlenc, index_buffer, index_buffer_offset);
+		SendHWDraw(config, mtlenc, index_buffer, index_buffer_offset, config.alpha_second_pass.require_one_barrier, config.alpha_second_pass.require_full_barrier);
 	}
 
 	if (colclip_rt)
@@ -2297,7 +2367,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 			g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 
 			Recycle(colclip_rt);
-			
+
 			g_gs_device->SetColorClipTexture(nullptr);
 		}
 	}
@@ -2306,8 +2376,42 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 		Recycle(primid_tex);
 }}
 
-void GSDeviceMTL::SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder> enc, id<MTLBuffer> buffer, size_t off)
+void GSDeviceMTL::SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder> enc, id<MTLBuffer> buffer, size_t off, bool one_barrier, bool full_barrier)
 {
+	{
+		static u32 s_prof_vsync = 0;
+		static u32 s_full_cnt = 0, s_one_cnt = 0, s_no_cnt = 0, s_total_draws = 0;
+		static u32 s_full_prims = 0, s_max_drawlist = 0;
+		static u32 s_total_indices = 0;
+
+		const u32 cur_vsync = g_perfmon.GetFrame();
+		if (cur_vsync != s_prof_vsync && (cur_vsync % 600 == 0) && s_prof_vsync != 0)
+		{
+			const float gpu_ms = GetAndResetAccumulatedGPUTime();
+			Console.WriteLn("[TEMP_DIAG] @@GS_DRAW_PROF@@ vsync=%u full=%u one=%u no=%u draws=%u"
+				" full_prims=%u max_dl=%u total_idx=%u gpu_ms=%.1f",
+				s_prof_vsync, s_full_cnt, s_one_cnt, s_no_cnt, s_total_draws,
+				s_full_prims, s_max_drawlist, s_total_indices, gpu_ms);
+			s_full_cnt = s_one_cnt = s_no_cnt = s_total_draws = 0;
+			s_full_prims = s_max_drawlist = s_total_indices = 0;
+		}
+		s_prof_vsync = cur_vsync;
+		s_total_draws++;
+		s_total_indices += config.nindices;
+		if (full_barrier)
+		{
+			s_full_cnt++;
+			if (config.drawlist)
+			{
+				const u32 dl = static_cast<u32>(config.drawlist->size());
+				s_full_prims += config.nindices / config.indices_per_prim;
+				if (dl > s_max_drawlist) s_max_drawlist = dl;
+			}
+		}
+		else if (one_barrier) s_one_cnt++;
+		else s_no_cnt++;
+	}
+
 	MTLPrimitiveType topology;
 	switch (config.topology)
 	{
@@ -2316,9 +2420,24 @@ void GSDeviceMTL::SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder>
 		case GSHWDrawConfig::Topology::Triangle: topology = MTLPrimitiveTypeTriangle; break;
 	}
 
-	if (config.drawlist)
+	if (!m_features.texture_barrier) [[unlikely]]
 	{
-		[enc pushDebugGroup:[NSString stringWithFormat:@"Full barrier split draw (%d sprites in %zu groups)", config.nindices / config.indices_per_prim, config.drawlist->size()]];
+		[enc drawIndexedPrimitives:topology
+		                indexCount:config.nindices
+		                 indexType:MTLIndexTypeUInt16
+		               indexBuffer:buffer
+		         indexBufferOffset:off];
+
+		g_perfmon.Put(GSPerfMon::DrawCalls, 1);
+
+		return;
+	}
+
+	if (full_barrier)
+	{
+		pxAssert(config.drawlist && !config.drawlist->empty());
+
+		[enc pushDebugGroup:[NSString stringWithFormat:@"Full barrier split draw (%d primitives in %zu groups)", config.nindices / config.indices_per_prim, config.drawlist->size()]];
 #if defined(_DEBUG)
 		// Check how draw call is split.
 		std::map<size_t, size_t> frequency;
@@ -2329,7 +2448,7 @@ void GSDeviceMTL::SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder>
 		for (const auto& it : frequency)
 			message += " " + std::to_string(it.first) + "(" + std::to_string(it.second) + ")";
 
-		[enc insertDebugSignpost:[NSString stringWithFormat:@"Split single draw (%d sprites) into %zu draws: consecutive draws(frequency):%s",
+		[enc insertDebugSignpost:[NSString stringWithFormat:@"Split single draw (%d primitives) into %zu draws: consecutive draws(frequency):%s",
 			config.nindices / config.indices_per_prim, config.drawlist->size(), message.c_str()]];
 #endif
 
@@ -2355,28 +2474,7 @@ void GSDeviceMTL::SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder>
 		[enc popDebugGroup];
 		return;
 	}
-	else if (config.require_full_barrier)
-	{
-		const u32 indices_per_prim = config.indices_per_prim;
-		const u32 ndraws = config.nindices / indices_per_prim;
-		g_perfmon.Put(GSPerfMon::DrawCalls, ndraws);
-		g_perfmon.Put(GSPerfMon::Barriers, ndraws);
-		[enc pushDebugGroup:[NSString stringWithFormat:@"Full barrier split draw (%d prims)", ndraws]];
-
-		for (u32 p = 0; p < config.nindices; p += indices_per_prim)
-		{
-			textureBarrier(enc);
-			[enc drawIndexedPrimitives:topology
-			                indexCount:config.indices_per_prim
-			                 indexType:MTLIndexTypeUInt16
-			               indexBuffer:buffer
-			         indexBufferOffset:off + p * sizeof(*config.indices)];
-		}
-
-		[enc popDebugGroup];
-		return;
-	}
-	else if (config.require_one_barrier)
+	else if (one_barrier)
 	{
 		// One barrier needed
 		textureBarrier(enc);

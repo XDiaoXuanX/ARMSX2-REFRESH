@@ -11,7 +11,15 @@
 #include "GS/Renderers/HW/GSTextureReplacements.h"
 
 #include <csetjmp>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#ifndef TARGET_OS_IPHONE
+#define TARGET_OS_IPHONE 0
+#endif
+#if !TARGET_OS_IPHONE
 #include <png.h>
+#endif
 
 struct LoaderDefinition
 {
@@ -23,7 +31,9 @@ static bool PNGLoader(const std::string& filename, GSTextureReplacements::Replac
 static bool DDSLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image);
 
 static constexpr LoaderDefinition s_loaders[] = {
+#if !TARGET_OS_IPHONE
 	{"png", PNGLoader},
+#endif
 	{"dds", DDSLoader},
 };
 
@@ -148,6 +158,9 @@ static void ConvertTexture_R8G8B8(u32 width, u32 height, std::vector<u8>& data, 
 
 bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image)
 {
+#if TARGET_OS_IPHONE
+	return false;
+#else
 	png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
 	if (!png_ptr)
 		return false;
@@ -218,10 +231,14 @@ bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTe
 	}
 
 	return true;
+#endif
 }
 
 bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width, u32 height, const u8* buffer, u32 pitch)
 {
+#if TARGET_OS_IPHONE
+	return false;
+#else
 	const int compression = GSConfig.PNGCompressionLevel;
 
 	png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
@@ -261,6 +278,7 @@ bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width,
 
 	png_write_end(png_ptr, nullptr);
 	return true;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -5,8 +5,17 @@
 #include "GSExtra.h"
 #include "common/FileSystem.h"
 #include <zlib.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#ifndef TARGET_OS_IPHONE
+#define TARGET_OS_IPHONE 0
+#endif
+#if !TARGET_OS_IPHONE
 #include <png.h>
+#endif
 
+#if !TARGET_OS_IPHONE
 struct
 {
 	int type;
@@ -23,10 +32,12 @@ struct
 	{PNG_COLOR_TYPE_GRAY, 2, 2, 16, {"_R16I.png",     nullptr}},         // R16I_PNG
 	{PNG_COLOR_TYPE_GRAY, 4, 2, 16, {"_R32I_lsb.png", "_R32I_msb.png"}}, // R32I_PNG
 };
+#endif
 
 namespace GSPng
 {
 
+#if !TARGET_OS_IPHONE
 	bool SaveFile(const std::string& file, const Format fmt, const u8* const image,
 		u8* const row, const int width, const int height, const int pitch,
 		const int compression, const bool rb_swapped = false, const bool first_image = false)
@@ -87,9 +98,20 @@ namespace GSPng
 
 		return true;
 	}
+#else
+	bool SaveFile(const std::string& file, const Format fmt, const u8* const image,
+		u8* const row, const int width, const int height, const int pitch,
+		const int compression, const bool rb_swapped, const bool first_image)
+	{
+		return false;
+	}
+#endif
 
 	bool Save(GSPng::Format fmt, const std::string& file, const u8* image, int w, int h, int pitch, int compression, bool rb_swapped)
 	{
+#if TARGET_OS_IPHONE
+		return false;
+#else
 		std::string root = file;
 		root.replace(file.length() - 4, 4, "");
 
@@ -110,6 +132,7 @@ namespace GSPng
 
 		filename = root + pixel[fmt].extension[1];
 		return SaveFile(filename, fmt, image, row.get(), w, h, pitch, compression);
+#endif
 	}
 
 	Transaction::Transaction(GSPng::Format fmt, const std::string& file, const u8* image, int w, int h, int pitch, int compression)

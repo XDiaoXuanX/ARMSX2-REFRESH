@@ -6,6 +6,7 @@
 #include "SettingsInterface.h"
 
 #include "common/EnumOps.h"
+#include "common/Console.h"
 #include "common/SmallString.h"
 
 #include <optional>
@@ -46,10 +47,25 @@ public:
 	void EnumEntry(const char* section, const char* var, T& value, std::optional<T> (*parse_function)(const char*),
 		const char*(name_function)(T value), T default_value)
 	{
-		TinyString str_value(name_function(value));
-		Entry(section, var, str_value, name_function(default_value));
+		const char* current_name = name_function(value);
+		const char* default_name = name_function(default_value);
+		TinyString str_value(current_name);
+		Console.WriteLn("@@SETTINGS_ENUM_PRE@@ section=%s key=%s current=%d:%s default=%d:%s loading=%d saving=%d",
+			section, var, static_cast<int>(value), current_name, static_cast<int>(default_value), default_name,
+			IsLoading() ? 1 : 0, IsSaving() ? 1 : 0);
+		Entry(section, var, str_value, default_name);
+		Console.WriteLn("@@SETTINGS_ENUM_RAW@@ section=%s key=%s raw=%s", section, var, str_value.c_str());
 		if (std::optional<T> parsed_value = parse_function(str_value); parsed_value.has_value())
+		{
 			value = parsed_value.value();
+			Console.WriteLn("@@SETTINGS_ENUM_PARSED@@ section=%s key=%s parsed=%d:%s", section, var,
+				static_cast<int>(value), name_function(value));
+		}
+		else
+		{
+			Console.Warning("@@SETTINGS_ENUM_BAD@@ section=%s key=%s raw=%s keeping=%d:%s", section, var,
+				str_value.c_str(), static_cast<int>(value), name_function(value));
+		}
 	}
 
 protected:
@@ -134,4 +150,3 @@ protected:
 #define SettingsWrapEnumEx(varname, textname, names) wrap.EnumEntry(CURRENT_SETTINGS_SECTION, textname, varname, names, varname)
 #define SettingsWrapParsedEnum(varname, textname, parse_func, name_func) wrap.EnumEntry(CURRENT_SETTINGS_SECTION, textname, varname, parse_func, name_func, varname)
 #define SettingsWrapIntEnumEx(varname, textname) varname = static_cast<decltype(varname)>(wrap.EntryBitfield(CURRENT_SETTINGS_SECTION, textname, static_cast<int>(varname), static_cast<int>(varname)))
-

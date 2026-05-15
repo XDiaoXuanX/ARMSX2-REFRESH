@@ -17,6 +17,7 @@
 #include "GameDatabase.h"
 #include "GameList.h"
 #include "Host.h"
+#include "Host/AudioStream.h"
 #include "INISettingsInterface.h"
 #include "ImGui/FullscreenUI.h"
 #include "ImGui/ImGuiOverlays.h"
@@ -70,6 +71,9 @@
 #if defined(__ANDROID__)
 #include <jni.h>
 #include "SDL3/SDL.h"
+#endif
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
 #endif
 
 #include <atomic>
@@ -200,6 +204,65 @@ static float s_target_speed = 0.0f;
 static bool s_target_speed_can_sync_to_host = false;
 static bool s_target_speed_synced_to_host = false;
 static bool s_use_vsync_for_timing = false;
+
+static const char* VMStateToLogString(VMState state)
+{
+	switch (state)
+	{
+		case VMState::Shutdown:
+			return "Shutdown";
+		case VMState::Initializing:
+			return "Initializing";
+		case VMState::Running:
+			return "Running";
+		case VMState::Paused:
+			return "Paused";
+		case VMState::Resetting:
+			return "Resetting";
+		case VMState::Stopping:
+			return "Stopping";
+		default:
+			return "Unknown";
+	}
+}
+
+static void LogVMSettingsSnapshot(const char* tag, SettingsInterface* si = nullptr)
+{
+	std::string raw_audio_backend = "(n/a)";
+	int raw_cpu_core = -999;
+	int raw_gs_renderer = -999;
+	bool raw_arm64_dynarec = false;
+	bool raw_extra_memory = false;
+	if (si)
+	{
+		raw_audio_backend = si->GetStringValue("SPU2/Output", "Backend", "(missing)");
+		raw_cpu_core = si->GetIntValue("EmuCore/CPU", "CoreType", -999);
+		raw_gs_renderer = si->GetIntValue("EmuCore/GS", "Renderer", -999);
+		raw_arm64_dynarec = si->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
+		raw_extra_memory = si->GetBoolValue("EmuCore/CPU", "ExtraMemory", false);
+	}
+
+	Console.WriteLn(
+		"@@VM_SETTINGS@@ tag=%s state=%s valid_vm=%d initializing_or_valid=%d mtgs_open=%d "
+		"raw_spu2_backend=%s raw_cpu_core=%d raw_arm64_dynarec=%d raw_extra_memory=%d raw_gs_renderer=%d "
+		"cpu_core=%d arm64_dynarec=%d extra_memory=%d ee_rec=%d iop_rec=%d vu0_rec=%d vu1_rec=%d "
+		"gs_renderer=%d vsync=%d mailbox_disabled=%d spu2_backend=%d spu2_backend_name=%s vu_thread=%d",
+		tag, VMStateToLogString(VMManager::GetState()), VMManager::HasValidVM() ? 1 : 0,
+		VMManager::HasValidOrInitializingVM() ? 1 : 0, MTGS::IsOpen() ? 1 : 0, raw_audio_backend.c_str(),
+		raw_cpu_core, raw_arm64_dynarec ? 1 : 0, raw_extra_memory ? 1 : 0, raw_gs_renderer,
+		EmuConfig.Cpu.CoreType,
+#ifdef PCSX2_ARM64_DYNAREC
+		EmuConfig.Cpu.UseArm64Dynarec ? 1 : 0,
+#else
+		0,
+#endif
+		EmuConfig.Cpu.ExtraMemory ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0,
+		EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0,
+		EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0, static_cast<int>(EmuConfig.GS.Renderer),
+		EmuConfig.GS.VsyncEnable ? 1 : 0, EmuConfig.GS.DisableMailboxPresentation ? 1 : 0,
+		static_cast<int>(EmuConfig.SPU2.Backend), AudioStream::GetBackendName(EmuConfig.SPU2.Backend),
+		EmuConfig.Speedhacks.vuThread ? 1 : 0);
+}
 
 // Used to track play time. We use a monotonic timer here, in case of clock changes.
 static u64 s_session_resume_timestamp = 0;
@@ -920,18 +983,31 @@ void VMManager::LoadSettings()
 
 	std::unique_lock<std::mutex> lock = Host::GetSettingsLock();
 	SettingsInterface* si = Host::GetSettingsInterface();
+	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=begin si=%p", si);
+	LogVMSettingsSnapshot("load_settings_begin", si);
+	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=LoadCoreSettings begin");
 	LoadCoreSettings(*si);
+	LogVMSettingsSnapshot("after_load_core_settings", si);
+	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=Pad::LoadConfig begin");
 	Pad::LoadConfig(*si);
+	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=Host::LoadSettings begin");
 	Host::LoadSettings(*si, lock);
+	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=InputManager::ReloadSources begin");
 	InputManager::ReloadSources(*si, lock);
+	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=LoadInputBindings begin");
 	LoadInputBindings(*si, lock);
+	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=UpdateLoggingSettings begin");
 	UpdateLoggingSettings(*si);
+	LogVMSettingsSnapshot("load_settings_end", si);
 
 	if (HasValidOrInitializingVM())
 	{
+		Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=WarnAboutUnsafeSettings/ApplyGameFixes begin");
 		WarnAboutUnsafeSettings();
 		ApplyGameFixes();
+		LogVMSettingsSnapshot("after_game_fixes", si);
 	}
+	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=end");
 }
 
 void VMManager::ReloadInputSources()
@@ -1032,10 +1108,12 @@ void VMManager::ApplyGameFixes()
 void VMManager::ApplySettings()
 {
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Applying settings...");
+	LogVMSettingsSnapshot("apply_settings_entry", Host::GetSettingsInterface());
 
 	// If we're running, ensure the threads are synced.
 	if (GetState() == VMState::Running)
 	{
+		Console.WriteLn("@@VM_APPLY_SETTINGS@@ syncing_threads=1 vu1=%d mtgs_open=%d", THREAD_VU1 ? 1 : 0, MTGS::IsOpen() ? 1 : 0);
 		if (THREAD_VU1)
 			vu1Thread.WaitVU();
 		MTGS::WaitGS(false);
@@ -1044,10 +1122,16 @@ void VMManager::ApplySettings()
 	// Reset to a clean Pcsx2Config. Otherwise things which are optional (e.g. gamefixes)
 	// do not use the correct default values when loading.
 	Pcsx2Config old_config(std::move(EmuConfig));
+	Console.WriteLn("@@VM_APPLY_SETTINGS@@ old_config cpu_core=%d gs_renderer=%d spu2_backend=%d:%s",
+		old_config.Cpu.CoreType, static_cast<int>(old_config.GS.Renderer), static_cast<int>(old_config.SPU2.Backend),
+		AudioStream::GetBackendName(old_config.SPU2.Backend));
 	EmuConfig = Pcsx2Config();
 	EmuConfig.CopyRuntimeConfig(old_config);
+	LogVMSettingsSnapshot("after_config_reset", Host::GetSettingsInterface());
 	LoadSettings();
+	LogVMSettingsSnapshot("before_check_config_changes", Host::GetSettingsInterface());
 	CheckForConfigChanges(old_config);
+	LogVMSettingsSnapshot("apply_settings_exit", Host::GetSettingsInterface());
 }
 
 void VMManager::ApplyCoreSettings()
@@ -2898,8 +2982,6 @@ void VMManager::InitializeCPUProviders()
 	psxRec.Reserve();
 
 #ifdef PCSX2_ARM64_DYNAREC
-	// Reserve ARM64 EE dynarec if compiled in
-	jitA64Cpu.Reserve();
 #endif
 
 	CpuMicroVU0.Reserve();
@@ -2926,7 +3008,6 @@ void VMManager::ShutdownCPUProviders()
 	psxRec.Shutdown();
 	recCpu.Shutdown();
 #ifdef PCSX2_ARM64_DYNAREC
-	jitA64Cpu.Shutdown();
 #endif
 //#else
 //	// See the comment in the InitializeCPUProviders for an explaination why we
@@ -2965,7 +3046,7 @@ void VMManager::UpdateCPUImplementations()
         if (core_type == 2 || EmuConfig.Cpu.UseArm64Dynarec)
         {
             Console.WriteLn("CPU: Selecting ARM64 dynarec");
-            Cpu = &jitA64Cpu;
+            Cpu = &recCpu;
         }
         else
         {
@@ -4005,7 +4086,7 @@ void VMManager::ReloadPINE()
 
 void VMManager::InitializeDiscordPresence()
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 #if defined(USE_DISCORD_SDK)
 	std::shared_ptr<discordpp::Client> client;
 	{
@@ -4160,7 +4241,7 @@ void VMManager::InitializeDiscordPresence()
 
 void VMManager::ShutdownDiscordPresence()
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 #if defined(USE_DISCORD_SDK)
 	std::shared_ptr<discordpp::Client> client;
 	{
@@ -4203,7 +4284,7 @@ void VMManager::ShutdownDiscordPresence()
 
 void VMManager::UpdateDiscordPresence(bool update_session_time)
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 #if defined(USE_DISCORD_SDK)
 	std::lock_guard lock(s_discord_mutex);
 	if (!s_discord_presence_active)
@@ -4269,7 +4350,7 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 
 void VMManager::PollDiscordPresence()
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 	#if defined(USE_DISCORD_SDK)
 	{
 		std::lock_guard lock(s_discord_mutex);
@@ -4289,7 +4370,7 @@ void VMManager::PollDiscordPresence()
 #endif
 }
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 #if defined(USE_DISCORD_SDK)
 void VMManager::AndroidDiscordConfigure(uint64_t app_id, std::string custom_scheme, std::string display_name,
 	std::string large_image_key)

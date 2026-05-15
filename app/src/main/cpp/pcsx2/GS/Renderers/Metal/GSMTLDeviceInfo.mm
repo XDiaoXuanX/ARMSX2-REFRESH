@@ -10,30 +10,43 @@
 
 static id<MTLLibrary> loadMainLibrary(id<MTLDevice> dev, NSString* name)
 {
-	NSString* path = [[NSBundle mainBundle] pathForResource:name ofType:@"metallib"];
-	if (!path)
-	{
-		std::string ssname = std::string([name UTF8String]) + ".metallib";
-		std::string sspath = Path::Combine(EmuFolders::Resources, ssname);
-		path = [[NSString alloc] initWithBytes:sspath.data() length:sspath.length() encoding:NSUTF8StringEncoding];
-	}
-	return path ? [dev newLibraryWithFile:path error:nullptr] : nullptr;
+    NSString* path = [[NSBundle mainBundle] pathForResource:name ofType:@"metallib"];
+    NSError *error = nil;
+    id<MTLLibrary> lib = path ? [dev newLibraryWithFile:path error:&error] : nil;
+    if (lib) {
+        Console.WriteLn("Debug: Metal Library '%s' loaded successfully.", [name UTF8String]);
+    } else {
+        Console.Error("Debug: Failed to load Metal Library '%s'. Path: %s", [name UTF8String], path ? [path UTF8String] : "null");
+        if (error) {
+            Console.Error("Debug: Metal Error: %s", [[error localizedDescription] UTF8String]);
+        }
+    }
+    return lib;
 }
 
 static MRCOwned<id<MTLLibrary>> loadMainLibrary(id<MTLDevice> dev)
 {
-	if (@available(macOS 11.0, iOS 14.0, *))
-		if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal23"))
-			return MRCTransfer(lib);
-	if (@available(macOS 10.15, iOS 13.0, *))
-		if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal22"))
-			return MRCTransfer(lib);
-	if (@available(macOS 10.14, iOS 12.0, *))
-		if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal21"))
-			return MRCTransfer(lib);
-	if (id<MTLLibrary> lib = loadMainLibrary(dev, @"default"))
-		return MRCTransfer(lib);
-	return MRCTransfer([dev newDefaultLibrary]);
+    Console.WriteLn("Debug: loadMainLibrary called.");
+    if (@available(macOS 11.0, iOS 14.0, *)) {
+        Console.WriteLn("Debug: Trying Metal23");
+        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal23")) return MRCTransfer(lib);
+    }
+    if (@available(macOS 10.15, iOS 13.0, *)) {
+        Console.WriteLn("Debug: Trying Metal22");
+        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal22")) return MRCTransfer(lib);
+    }
+    if (@available(macOS 10.14, iOS 12.0, *)) {
+        Console.WriteLn("Debug: Trying Metal21");
+        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal21")) return MRCTransfer(lib);
+    }
+    Console.WriteLn("Debug: Trying default");
+    if (id<MTLLibrary> lib = loadMainLibrary(dev, @"default")) return MRCTransfer(lib);
+
+    Console.WriteLn("Debug: Trying newDefaultLibrary");
+    NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"default" ofType:@"metallib"];
+    Console.WriteLn("Debug: default.metallib path: %s", bundlePath ? [bundlePath UTF8String] : "null");
+
+    return MRCTransfer([dev newDefaultLibrary]);
 }
 
 static GSMTLDevice::MetalVersion detectLibraryVersion(id<MTLLibrary> lib)
@@ -55,7 +68,7 @@ static bool detectPrimIDSupport(id<MTLDevice> dev, id<MTLLibrary> lib)
 	[desc setVertexFunction:MRCTransfer([lib newFunctionWithName:@"fs_triangle"])];
 	[desc setFragmentFunction:MRCTransfer([lib newFunctionWithName:@"primid_test"])];
 	[[desc colorAttachments][0] setPixelFormat:MTLPixelFormatR8Uint];
-	NSError* err;
+	NSError* err = nil;
 	[[dev newRenderPipelineStateWithDescriptor:desc error:&err] release];
 	return !err;
 }
@@ -192,8 +205,15 @@ GSMTLDevice::GSMTLDevice(MRCOwned<id<MTLDevice>> dev)
 		features.slow_color_compression = [[dev name] containsString:@"AMD"] || [[dev name] isEqualToString:@"Intel HD Graphics 4000"];
 
 	features.max_texsize = 8192;
+#if TARGET_OS_SIMULATOR
+	features.framebuffer_fetch = false;
+#else
+	features.framebuffer_fetch = [dev supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily1_v1];
+#endif
+#if !TARGET_OS_IPHONE
 	if ([dev supportsFeatureSet:MTLFeatureSet_macOS_GPUFamily1_v1])
 		features.max_texsize = 16384;
+#endif
 	if (@available(macOS 10.15, iOS 13.0, *))
 		if ([dev supportsFamily:MTLGPUFamilyApple3])
 			features.max_texsize = 16384;
@@ -210,6 +230,7 @@ const char* to_string(GSMTLDevice::MetalVersion ver)
 		case GSMTLDevice::MetalVersion::Metal22: return "Metal 2.2";
 		case GSMTLDevice::MetalVersion::Metal23: return "Metal 2.3";
 	}
+	return "Unknown";
 }
 
 #endif // __APPLE__

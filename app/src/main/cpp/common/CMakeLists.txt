@@ -149,18 +149,29 @@ if(WIN32)
 	)
 elseif(APPLE)
 	target_sources(common PRIVATE
-		CocoaTools.mm
-		CocoaTools.h
 		Darwin/DarwinThreads.cpp
 		Darwin/DarwinMisc.cpp
 		Darwin/DarwinMisc.h
 	)
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		target_sources(common PRIVATE
+			CocoaTools.mm
+			CocoaTools.h
+		)
+		target_link_libraries(common PRIVATE
+			"-framework Foundation"
+			"-framework IOKit"
+			"-framework AppKit"
+		)
+	else()
+		target_link_libraries(common PRIVATE
+			"-framework Foundation"
+			"-framework UIKit"
+		)
+	endif()
+
 	target_compile_options(common PRIVATE -fobjc-arc)
 	target_link_options(common PRIVATE -fobjc-link-runtime)
-	target_link_libraries(common PRIVATE
-		"-framework Foundation"
-		"-framework IOKit"
-	)
 else()
 	target_sources(common PRIVATE
 		Linux/LnxHostSys.cpp
@@ -200,16 +211,18 @@ endif()
 
 if(NOT WIN32)
 	# libcurl-based HTTPDownloader
-	target_sources(common PRIVATE
-		HTTPDownloaderCurl.cpp
-		HTTPDownloaderCurl.h
-	)
-	if(ANDROID)
-		target_link_libraries(common PRIVATE curl ssl crypto nghttp2 pcap)
-	else()
-		target_link_libraries(common PRIVATE
-			CURL::libcurl
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		target_sources(common PRIVATE
+			HTTPDownloaderCurl.cpp
+			HTTPDownloaderCurl.h
 		)
+		if(ANDROID)
+			target_link_libraries(common PRIVATE curl ssl crypto nghttp2 pcap)
+		else()
+			target_link_libraries(common PRIVATE
+				CURL::libcurl
+			)
+		endif()
 	endif()
 endif()
 
@@ -223,10 +236,18 @@ if(ANDROID)
 else()
 	target_link_libraries(common PRIVATE
 		${LIBC_LIBRARIES}
-		JPEG::JPEG
-		PNG::PNG
-		WebP::libwebp
 	)
+	if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		target_link_libraries(common PRIVATE
+			webp
+		)
+	else()
+		target_link_libraries(common PRIVATE
+			WebP::libwebp
+			JPEG::JPEG
+			PNG::PNG
+		)
+	endif()
 endif()
 
 if(ANDROID)
@@ -246,6 +267,13 @@ endif()
 fixup_file_properties(common)
 target_compile_features(common PUBLIC cxx_std_20)
 target_include_directories(common PUBLIC ../3rdparty/include ../3rdparty/vixl/include ../)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	target_compile_definitions(common PRIVATE
+		"PCSX2_ARM64_DYNAREC=1"
+		"_M_ARM64=1"
+	)
+endif()
 target_compile_definitions(common PUBLIC "${PCSX2_DEFS}")
 target_compile_options(common PRIVATE "${PCSX2_WARNINGS}")
 
