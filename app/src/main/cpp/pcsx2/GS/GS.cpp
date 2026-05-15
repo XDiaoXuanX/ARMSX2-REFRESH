@@ -943,6 +943,9 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #ifdef __ANDROID__
 #include <android/sharedmem.h>
 #endif
@@ -953,8 +956,33 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 {
 	pxAssert(s_shm_fd == -1);
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	const char* tmpdir = getenv("TMPDIR");
+	if (!tmpdir)
+		tmpdir = "/tmp";
+
+	char tmppath[1024];
+	snprintf(tmppath, sizeof(tmppath), "%s/GS.mem.XXXXXX", tmpdir);
+	s_shm_fd = mkstemp(tmppath);
+	if (s_shm_fd != -1)
+	{
+		unlink(tmppath);
+	}
+	else
+	{
+		Console.Error("@@GS_MMAP_FAIL@@ mkstemp path=%s errno=%d (%s)", tmppath, errno, strerror(errno));
+		return nullptr;
+	}
+
+	if (ftruncate(s_shm_fd, repeat * size) < 0)
+	{
+		Console.Error("@@GS_MMAP_FAIL@@ ftruncate size=0x%zx errno=%d (%s)", repeat * size, errno, strerror(errno));
+		close(s_shm_fd);
+		s_shm_fd = -1;
+		return nullptr;
+	}
+#elif !defined(__ANDROID__)
 	const char* file_name = "/GS.mem";
-#ifndef __ANDROID__
 	s_shm_fd = shm_open(file_name, O_RDWR | O_CREAT | O_EXCL, 0600);
 	if (s_shm_fd != -1)
 	{
@@ -969,6 +997,7 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 	if (ftruncate(s_shm_fd, repeat * size) < 0)
 		fprintf(stderr, "Failed to reserve memory due to %s\n", strerror(errno));
 #else
+	const char* file_name = "/GS.mem";
     s_shm_fd = ASharedMemory_create(file_name, repeat * size);
     if (s_shm_fd < 0)
     {
@@ -977,13 +1006,33 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
     }
 #endif
 	void* fifo = mmap(nullptr, size * repeat, PROT_READ | PROT_WRITE, MAP_SHARED, s_shm_fd, 0);
+	if (fifo == MAP_FAILED)
+	{
+		Console.Error("@@GS_MMAP_FAIL@@ initial size=0x%zx repeat=%zu total=0x%zx fd=%d errno=%d (%s)",
+			size, repeat, size * repeat, s_shm_fd, errno, strerror(errno));
+		close(s_shm_fd);
+		s_shm_fd = -1;
+		return nullptr;
+	}
+
+	Console.WriteLn("@@GS_MMAP@@ fifo=%p size=0x%zx repeat=%zu total=0x%zx fd=%d",
+		fifo, size, repeat, size * repeat, s_shm_fd);
 
 	for (size_t i = 1; i < repeat; i++)
 	{
 		void* base = (u8*)fifo + size * i;
 		u8* next = (u8*)mmap(base, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s_shm_fd, 0);
 		if (next != base)
-			fprintf(stderr, "Fail to mmap contiguous segment\n");
+		{
+			Console.Error("@@GS_MMAP_FAIL@@ repeat=%zu base=%p next=%p errno=%d (%s)",
+				i, base, static_cast<void*>(next), errno, strerror(errno));
+			munmap(fifo, size * repeat);
+			close(s_shm_fd);
+			s_shm_fd = -1;
+			return nullptr;
+		}
+
+		Console.WriteLn("@@GS_MMAP_OK@@ repeat=%zu base=%p", i, base);
 	}
 
 	return fifo;

@@ -81,6 +81,8 @@ struct CPUClass {
     bool FindJitBlock(uintptr_t site, u32* out_guest_pc, void** out_recptr);
 
     bool IsJITAvailable();
+    bool IsNoJitModeActive();
+    void ForceNoJitMode();
 
     enum class JitMode {
         Simulator,

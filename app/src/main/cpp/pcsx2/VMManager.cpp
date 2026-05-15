@@ -264,6 +264,38 @@ static void LogVMSettingsSnapshot(const char* tag, SettingsInterface* si = nullp
 		EmuConfig.Speedhacks.vuThread ? 1 : 0);
 }
 
+static bool ApplyIOSNoJITSettings(const char* tag)
+{
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	const bool requested = DarwinMisc::IsNoJitModeActive() || EmuConfig.Cpu.CoreType == 1;
+	if (!requested)
+		return false;
+
+	DarwinMisc::ForceNoJitMode();
+	EmuConfig.Cpu.CoreType = 1;
+#ifdef PCSX2_ARM64_DYNAREC
+	EmuConfig.Cpu.UseArm64Dynarec = false;
+#endif
+	EmuConfig.Cpu.Recompiler.EnableEE = false;
+	EmuConfig.Cpu.Recompiler.EnableIOP = false;
+	EmuConfig.Cpu.Recompiler.EnableVU0 = false;
+	EmuConfig.Cpu.Recompiler.EnableVU1 = false;
+	EmuConfig.Cpu.Recompiler.EnableFastmem = false;
+	EmuConfig.Cpu.Recompiler.EnableEECache = false;
+	EmuConfig.Speedhacks.vuThread = false;
+	if (EmuConfig.GS.Renderer == GSRendererType::SW)
+		EmuConfig.GS.Renderer = GSRendererType::Metal;
+
+	Console.WriteLn("@@NO_JIT_MODE@@ tag=%s active=1 core_type=%d ee_rec=%d iop_rec=%d vu0_rec=%d vu1_rec=%d fastmem=%d",
+		tag, EmuConfig.Cpu.CoreType, EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0,
+		EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0,
+		EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableFastmem ? 1 : 0);
+	return true;
+#else
+	return false;
+#endif
+}
+
 // Used to track play time. We use a monotonic timer here, in case of clock changes.
 static u64 s_session_resume_timestamp = 0;
 static u64 s_session_accumulated_playtime = 0;
@@ -767,6 +799,8 @@ bool VMManager::Internal::CPUThreadInitialize()
 
 	LogCPUCapabilities();
 
+	ApplyIOSNoJITSettings("pre_memory");
+
 	if (!SysMemory::Allocate())
 	{
 		Host::ReportErrorAsync("Error", "Failed to allocate VM memory.");
@@ -1055,6 +1089,8 @@ void VMManager::LoadCoreSettings(SettingsInterface& si)
 	// MTVU emits illegal instructions on Switch dynarec today, so keep it disabled.
 	EmuConfig.Speedhacks.vuThread = false;
 #endif
+
+	ApplyIOSNoJITSettings("load_core_settings");
 }
 
 void VMManager::LoadInputBindings(SettingsInterface& si, std::unique_lock<std::mutex>& lock)
@@ -2977,6 +3013,13 @@ void VMManager::LogCPUCapabilities()
 
 void VMManager::InitializeCPUProviders()
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	if (DarwinMisc::IsNoJitModeActive())
+	{
+		Console.WriteLn("@@NO_JIT_PROVIDERS@@ skipped=1");
+		return;
+	}
+#endif
 //#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	recCpu.Reserve();
 	psxRec.Reserve();
@@ -3019,44 +3062,63 @@ void VMManager::ShutdownCPUProviders()
 
 void VMManager::UpdateCPUImplementations()
 {
-    if (GSDumpReplayer::IsReplayingDump())
-    {
-        Cpu = &GSDumpReplayerCpu;
-        psxCpu = &psxInt;
-        CpuVU0 = &CpuIntVU0;
-        CpuVU1 = &CpuIntVU1;
-        return;
-    }
+	if (GSDumpReplayer::IsReplayingDump())
+	{
+		Cpu = &GSDumpReplayerCpu;
+		psxCpu = &psxInt;
+		CpuVU0 = &CpuIntVU0;
+		CpuVU1 = &CpuIntVU1;
+		return;
+	}
+
+	if (ApplyIOSNoJITSettings("update_cpu_implementations"))
+	{
+		Cpu = &intCpu;
+		psxCpu = &psxInt;
+		CpuVU0 = &CpuIntVU0;
+		CpuVU1 = &CpuIntVU1;
+		Console.WriteLn("@@CPU_SEL@@ mode=NO_JIT EE=intCpu IOP=psxInt VU0=interp VU1=interp");
+		return;
+	}
 
 //#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
-    // CPU core selection: 0=Translator, 1=Interpreter, 2=ARM64 Dynarec (if available)
-    const s32 core_type = EmuConfig.Cpu.CoreType;
-    if (core_type == 1)
-    {
-        Cpu = &intCpu;
-    }
-    else if (!CHECK_EEREC)
-    {
-        // Recompiler not available, force interpreter
-        Cpu = &intCpu;
-    }
-    else
-    {
+	// CPU core selection: 0=Translator, 1=Interpreter, 2=ARM64 Dynarec (if available)
+	const s32 core_type = EmuConfig.Cpu.CoreType;
+	if (core_type == 1)
+	{
+		Cpu = &intCpu;
+	}
+	else if (!CHECK_EEREC)
+	{
+		// Recompiler not available, force interpreter
+		Cpu = &intCpu;
+	}
+	else
+	{
 #ifdef PCSX2_ARM64_DYNAREC
-        if (core_type == 2 || EmuConfig.Cpu.UseArm64Dynarec)
-        {
-            Console.WriteLn("CPU: Selecting ARM64 dynarec");
-            Cpu = &recCpu;
-        }
-        else
-        {
-            Cpu = &recCpu;
-        }
+		if (core_type == 2 || EmuConfig.Cpu.UseArm64Dynarec)
+		{
+			Console.WriteLn("CPU: Selecting ARM64 dynarec");
+			Cpu = &recCpu;
+		}
+		else
+		{
+			Cpu = &recCpu;
+		}
 #else
-        Cpu = &recCpu;
+		Cpu = &recCpu;
 #endif
-    }
-    psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+	}
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	if (DarwinMisc::ARMSX2_IOP_CORE_TYPE == 0)
+		psxCpu = &psxRec;
+	else if (DarwinMisc::ARMSX2_IOP_CORE_TYPE == 1 || Cpu == &intCpu)
+		psxCpu = &psxInt;
+	else
+		psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+#else
+	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+#endif
 
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
