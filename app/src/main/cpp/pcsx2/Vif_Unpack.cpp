@@ -6,6 +6,9 @@
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
 #include "MTVU.h"
+#ifdef __APPLE__
+#include "common/Darwin/DarwinMisc.h"
+#endif
 
 enum UnpackOffset {
 	OFFSET_X = 0,
@@ -307,7 +310,11 @@ void resetNewVif(int idx)
 	nVif[idx].bSize = 0;
 	std::memset(nVif[idx].buffer, 0, sizeof(nVif[idx].buffer));
 
-	if (newVifDynaRec)
+	if (newVifDynaRec
+#ifdef __APPLE__
+		&& !DarwinMisc::IsNoJitModeActive()
+#endif
+	)
 		dVifReset(idx);
 }
 
@@ -349,7 +356,11 @@ _vifT int nVifUnpack(const u8* data)
 
 		if (!idx || !THREAD_VU1)
 		{
-			if (newVifDynaRec)
+			if (newVifDynaRec
+#ifdef __APPLE__
+				&& !DarwinMisc::IsNoJitModeActive()
+#endif
+			)
 				dVifUnpack<idx>(data, isFill);
 			else
 				_nVifUnpack(idx, data, vifRegs.mode, isFill);
@@ -478,7 +489,11 @@ __ri void _nVifUnpackLoop(const u8* data)
 	{
 		u8* dest = getVUptr(idx, vif.tag.addr);
 
-		if (doMode)
+		if (doMode
+#ifdef __APPLE__
+			|| DarwinMisc::IsNoJitModeActive()
+#endif
+		)
 		{
 			//if (1) {
 			ft(dest, data);
