@@ -12,23 +12,95 @@
 #include "common/WindowInfo.h"
 #include "common/HostSys.h"
 
+#include <dlfcn.h>
 #include <csignal>
+#include <csetjmp>
 #include <cstring>
 #include <cstdlib>
+#include <unistd.h>
 #include <optional>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include <mach-o/dyld.h>
 #include <time.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <execinfo.h>
+#include <glob.h>
+#include <mach/mach.h>
+
+#if defined(__aarch64__) && defined(__APPLE__)
+extern "C" void pthread_jit_write_protect_np(int enabled);
+#endif
+
+
+
 #include <mach/mach_init.h>
 #include <mach/mach_port.h>
 #include <mach/mach_time.h>
-#include <mach/mach_vm.h>
 #include <mach/task.h>
 #include <mach/vm_map.h>
 #include <mutex>
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_IPHONE
+#include <mach/mach_vm.h>
 #include <ApplicationServices/ApplicationServices.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
+#endif
+
+#if TARGET_OS_IPHONE
+extern "C" {
+    kern_return_t mach_vm_map(
+        vm_map_t target_task,
+        mach_vm_address_t *address,
+        mach_vm_size_t size,
+        mach_vm_offset_t mask,
+        int flags,
+        mem_entry_name_port_t object,
+        memory_object_offset_t offset,
+        boolean_t copy,
+        vm_prot_t cur_protection,
+        vm_prot_t max_protection,
+        vm_inherit_t inheritance);
+
+    kern_return_t mach_vm_deallocate(
+        vm_map_t target,
+        mach_vm_address_t address,
+        mach_vm_size_t size);
+
+    kern_return_t mach_vm_protect(
+        vm_map_t target_task,
+        mach_vm_address_t address,
+        mach_vm_size_t size,
+        boolean_t set_maximum,
+        vm_prot_t new_protection);
+
+    kern_return_t mach_make_memory_entry_64(
+        vm_map_t target_task,
+        mach_vm_size_t *size,
+        mach_vm_offset_t offset,
+        vm_prot_t permission,
+        mach_port_t *object_handle,
+        mem_entry_name_port_t parent_entry);
+
+    kern_return_t mach_vm_remap(
+        vm_map_t target_task,
+        mach_vm_address_t *target_address,
+        mach_vm_size_t size,
+        mach_vm_offset_t mask,
+        int flags,
+        vm_map_t src_task,
+        mach_vm_address_t src_address,
+        boolean_t copy,
+        vm_prot_t *cur_protection,
+        vm_prot_t *max_protection,
+        vm_inherit_t inheritance);
+}
+
+static u8* s_ios_shared_data_base = nullptr;
+#endif
 
 // Darwin (OSX) is a bit different from Linux when requesting properties of
 // the OS because of its BSD/Mach heritage. Helpfully, most of this code
@@ -38,10 +110,15 @@
 // For an overview of all of Darwin's sysctls, check:
 // https://developer.apple.com/library/mac/documentation/Darwin/Reference/ManPages/man3/sysctl.3.html
 
+
+
 // Return the total physical memory on the machine, in bytes. Returns 0 on
 // failure (not supported by the operating system).
 u64 GetPhysicalMemory()
 {
+
+	Console.WriteLn("DEBUG: DarwinMisc: TARGET_OS_IPHONE=%d, TARGET_OS_SIMULATOR=%d", TARGET_OS_IPHONE, TARGET_OS_SIMULATOR);
+
 	u64 getmem = 0;
 	size_t len = sizeof(getmem);
 	int mib[] = {CTL_HW, HW_MEMSIZE};
@@ -52,6 +129,7 @@ u64 GetPhysicalMemory()
 
 u64 GetAvailablePhysicalMemory()
 {
+#if !TARGET_OS_IPHONE
 	const mach_port_t host_port = mach_host_self();
 	vm_size_t page_size;
 
@@ -74,6 +152,9 @@ u64 GetAvailablePhysicalMemory()
 	const u64 get_available_mem = (free_pages + inactive_pages) * page_size;
 
 	return get_available_mem;
+#else
+	return GetPhysicalMemory() / 2;
+#endif
 }
 
 static mach_timebase_info_data_t s_timebase_info;
@@ -138,10 +219,13 @@ std::string GetOSVersionString()
 	return type + " " + release + " " + arch;
 }
 
+#if !TARGET_OS_IPHONE
 static IOPMAssertionID s_pm_assertion;
+#endif
 
 bool Common::InhibitScreensaver(bool inhibit)
 {
+#if !TARGET_OS_IPHONE
 	if (s_pm_assertion)
 	{
 		IOPMAssertionRelease(s_pm_assertion);
@@ -150,12 +234,13 @@ bool Common::InhibitScreensaver(bool inhibit)
 
 	if (inhibit)
 		IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep, kIOPMAssertionLevelOn, CFSTR("Playing a game"), &s_pm_assertion);
-
+#endif
 	return true;
 }
 
 void Common::SetMousePosition(int x, int y)
 {
+#if !TARGET_OS_IPHONE
 	// Little bit ugly but;
 	// Creating mouse move events and posting them wasn't very reliable.
 	// Calling CGWarpMouseCursorPosition without CGAssociateMouseAndMouseCursorPosition(false)
@@ -163,9 +248,11 @@ void Common::SetMousePosition(int x, int y)
 	CGAssociateMouseAndMouseCursorPosition(false);
 	CGWarpMouseCursorPosition(CGPointMake(x, y));
 	CGAssociateMouseAndMouseCursorPosition(true); // The default state
+#endif
 	return;
 }
 
+#if !TARGET_OS_IPHONE
 CFMachPortRef mouseEventTap = nullptr;
 CFRunLoopSourceRef mouseRunLoopSource = nullptr;
 
@@ -179,9 +266,11 @@ CGEventRef mouseMoveCallback(CGEventTapProxy, CGEventType type, CGEventRef event
 	}
 	return event;
 }
+#endif
 
 bool Common::AttachMousePositionCb(std::function<void(int, int)> cb)
 {
+#if !TARGET_OS_IPHONE
 	if (!AXIsProcessTrusted())
 	{
 		Console.Warning("Process isn't trusted with accessibility permissions. Mouse tracking will not work!");
@@ -198,12 +287,14 @@ bool Common::AttachMousePositionCb(std::function<void(int, int)> cb)
 
 	mouseRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, mouseEventTap, 0);
 	CFRunLoopAddSource(CFRunLoopGetCurrent(), mouseRunLoopSource, kCFRunLoopCommonModes);
+#endif
 
 	return true;
 }
 
 void Common::DetachMousePositionCb()
 {
+#if !TARGET_OS_IPHONE
 	if (mouseRunLoopSource)
 	{
 		CFRunLoopRemoveSource(CFRunLoopGetCurrent(), mouseRunLoopSource, kCFRunLoopCommonModes);
@@ -215,6 +306,7 @@ void Common::DetachMousePositionCb()
 	}
 	mouseRunLoopSource = nullptr;
 	mouseEventTap = nullptr;
+#endif
 }
 
 void Threading::Sleep(int ms)
@@ -306,20 +398,38 @@ void* HostSys::Mmap(void* base, size_t size, const PageProtectionMode& mode)
 		return nullptr;
 
 #ifdef __aarch64__
-	// We can't allocate executable memory with mach_vm_allocate() on Apple Silicon.
-	// Instead, we need to use MAP_JIT with mmap(), which does not support fixed mappings.
 	if (mode.CanExecute())
 	{
 		if (base)
 			return nullptr;
 
-		const u32 mmap_prot = mode.CanWrite() ? (PROT_READ | PROT_WRITE | PROT_EXEC) : (PROT_READ | PROT_EXEC);
-		const u32 flags = MAP_PRIVATE | MAP_ANON | MAP_JIT;
-		void* const res = mmap(nullptr, size, mmap_prot, flags, -1, 0);
-		return (res == MAP_FAILED) ? nullptr : res;
+		return DarwinMisc::MmapCodeDualMap(size);
 	}
 #endif
 
+#include <TargetConditionals.h>
+
+#if TARGET_OS_SIMULATOR
+	Console.WriteLn("HostSys::Mmap (Simulator): Requesting size 0x%zx, base %p, prot %s%s%s",
+		size, base, mode.CanRead() ? "R" : "", mode.CanWrite() ? "W" : "", mode.CanExecute() ? "X" : "");
+
+	kern_return_t ret = vm_allocate(mach_task_self(), reinterpret_cast<vm_address_t*>(&base), size,
+		base ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE);
+	if (ret != KERN_SUCCESS)
+	{
+		Console.Error("vm_allocate() returned {}", ret);
+		return nullptr;
+	}
+
+	ret = vm_protect(mach_task_self(), reinterpret_cast<vm_address_t>(base), size, false, static_cast<vm_prot_t>(MachProt(mode)));
+	if (ret != KERN_SUCCESS)
+	{
+		Console.Error("vm_protect() returned {}", ret);
+		vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(base), size);
+		return nullptr;
+	}
+	return base;
+#elif !TARGET_OS_IPHONE
 	kern_return_t ret = mach_vm_allocate(mach_task_self(), reinterpret_cast<mach_vm_address_t*>(&base), size,
 		base ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE);
 	if (ret != KERN_SUCCESS)
@@ -335,22 +445,37 @@ void* HostSys::Mmap(void* base, size_t size, const PageProtectionMode& mode)
 		mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(base), size);
 		return nullptr;
 	}
-
 	return base;
+#else
+	int flags = MAP_PRIVATE | MAP_ANON;
+	if (base) flags |= MAP_FIXED;
+	int prot = 0;
+	if (mode.CanRead()) prot |= PROT_READ;
+	if (mode.CanWrite()) prot |= PROT_WRITE;
+	if (mode.CanExecute()) prot |= PROT_EXEC;
+
+	void* res = mmap(base, size, prot, flags, -1, 0);
+	if (res == MAP_FAILED) return nullptr;
+	return res;
+#endif
 }
 
 void HostSys::Munmap(void* base, size_t size)
 {
 	if (!base)
 		return;
-
+#if !TARGET_OS_IPHONE
 	mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(base), size);
+#else
+	munmap(base, size);
+#endif
 }
 
 void HostSys::MemProtect(void* baseaddr, size_t size, const PageProtectionMode& mode)
 {
 	pxAssertMsg((size & (__pagesize - 1)) == 0, "Size is page aligned");
 
+#if !TARGET_OS_IPHONE
 	kern_return_t res = mach_vm_protect(mach_task_self(), reinterpret_cast<mach_vm_address_t>(baseaddr), size, false,
 		MachProt(mode));
 	if (res != KERN_SUCCESS) [[unlikely]]
@@ -358,16 +483,40 @@ void HostSys::MemProtect(void* baseaddr, size_t size, const PageProtectionMode& 
 		ERROR_LOG("mach_vm_protect() failed: {}", res);
 		pxFailRel("mach_vm_protect() failed");
 	}
+#else
+	int prot = 0;
+	if (mode.CanRead()) prot |= PROT_READ;
+	if (mode.CanWrite()) prot |= PROT_WRITE;
+	if (mode.CanExecute()) prot |= PROT_EXEC;
+	int ret = mprotect(baseaddr, size, prot);
+	{
+		uptr addr_val = (uptr)baseaddr;
+		if (prot == (PROT_READ|PROT_WRITE) && addr_val >= 0x300000000ULL && addr_val <= 0x3ffffffffULL)
+		{
+			static u32 s_rw_n = 0;
+			if (s_rw_n < 8)
+			{
+				int saved_errno = (ret != 0) ? errno : 0;
+				char buf[192];
+				int nn = snprintf(buf, sizeof(buf),
+					"@@MPROTECT_RW@@ n=%u addr=%p prot=%d ret=%d err=%d\n",
+					s_rw_n, baseaddr, prot, ret, saved_errno);
+				write(STDERR_FILENO, buf, nn);
+				s_rw_n++;
+			}
+		}
+	}
+#endif
 }
 
 std::string HostSys::GetFileMappingName(const char* prefix)
 {
-	// name actually is not used.
 	return {};
 }
 
 void* HostSys::CreateSharedMemory(const char* name, size_t size)
 {
+#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
 	mach_vm_size_t vm_size = size;
 	mach_port_t port;
 	const kern_return_t res = mach_make_memory_entry_64(
@@ -379,43 +528,313 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
 	}
 
 	return reinterpret_cast<void*>(static_cast<uintptr_t>(port));
+#else
+	return (void*)0xDEADBEEF;
+#endif
 }
 
 void HostSys::DestroySharedMemory(void* ptr)
 {
+#if !TARGET_OS_IPHONE
 	mach_port_deallocate(mach_task_self(), static_cast<mach_port_t>(reinterpret_cast<uintptr_t>(ptr)));
+#endif
 }
 
 void* HostSys::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size_t size, const PageProtectionMode& mode)
 {
+#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+	int flags = baseaddr ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE;
 	mach_vm_address_t ptr = reinterpret_cast<mach_vm_address_t>(baseaddr);
-	const kern_return_t res = mach_vm_map(mach_task_self(), &ptr, size, 0, baseaddr ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE,
+
+	const kern_return_t res = mach_vm_map(mach_task_self(), &ptr, size, 0, flags,
 		static_cast<mach_port_t>(reinterpret_cast<uintptr_t>(handle)), offset, FALSE,
 		MachProt(mode), VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE);
 	if (res != KERN_SUCCESS)
 	{
-		ERROR_LOG("mach_vm_map() failed: {}", res);
+		ERROR_LOG("mach_vm_map() failed: {} (base={} size={})", res, baseaddr, size);
 		return nullptr;
 	}
 
 	return reinterpret_cast<void*>(ptr);
+#else
+    if (handle == (void*)0xDEADBEEF)
+    {
+        void* ptr = Mmap(baseaddr, size, mode);
+        if (ptr && !s_ios_shared_data_base)
+            s_ios_shared_data_base = static_cast<u8*>(ptr);
+        return ptr;
+    }
+	return nullptr;
+#endif
 }
 
 void HostSys::UnmapSharedMemory(void* baseaddr, size_t size)
 {
+#if !TARGET_OS_IPHONE
 	const kern_return_t res = mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(baseaddr), size);
 	if (res != KERN_SUCCESS)
 		pxFailRel("Failed to unmap shared memory");
+#else
+	munmap(baseaddr, size);
+#endif
 }
 
 #ifdef _M_ARM64
 
+#ifdef TARGET_OS_IPHONE
+#include <libkern/OSCacheControl.h>
+#else
+#include <libkern/OSCacheControl.h>
+#endif
+
 void HostSys::FlushInstructionCache(void* address, u32 size)
 {
-	__builtin___clear_cache(reinterpret_cast<char*>(address), reinterpret_cast<char*>(address) + size);
+    sys_icache_invalidate(address, size);
+
+    static int s_ficache_n = 0;
+    if (s_ficache_n++ < 20)
+        Console.WriteLn("DEBUG: FlushInstructionCache(sys_icache_invalidate) Addr=%p Size=0x%x", address, size);
 }
 
 #endif
+
+extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
+
+static DarwinMisc::JitMode s_jit_mode = DarwinMisc::JitMode::Simulator;
+static bool s_jit_mode_detected = false;
+ptrdiff_t DarwinMisc::g_code_rw_offset = 0;
+uintptr_t DarwinMisc::g_code_rw_base = 0;
+size_t    DarwinMisc::g_code_rw_size = 0;
+
+static void* s_legacy_code_base = nullptr;
+static size_t s_legacy_code_size = 0;
+static bool s_legacy_is_writable = true;
+static bool s_legacy_code_dirty = false;
+
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+static bool HasTXM()
+{
+    glob_t g = {};
+    int ret = glob("/System/Volumes/Preboot/*/boot/*/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4",
+                    GLOB_NOSORT, nullptr, &g);
+    bool found = (ret == 0 && g.gl_pathc > 0);
+    globfree(&g);
+    return found;
+}
+#endif
+
+DarwinMisc::JitMode DarwinMisc::DetectJitMode()
+{
+#if TARGET_OS_SIMULATOR
+    s_jit_mode = JitMode::Simulator;
+#elif TARGET_OS_IPHONE
+    {
+        char buf[64] = {};
+        size_t len = sizeof(buf);
+        sysctlbyname("kern.osproductversion", buf, &len, nullptr, 0);
+        int major = atoi(buf);
+        fprintf(stderr, "@@JIT_DETECT@@ kern.osproductversion=%s major=%d\n", buf, major);
+        if (major >= 26) {
+            s_jit_mode = JitMode::LuckTXM;
+        } else {
+            s_jit_mode = JitMode::Legacy;
+        }
+    }
+#else
+    s_jit_mode = JitMode::Simulator;
+#endif
+
+    if (const char* env = getenv("ARMSX2_FORCE_DUAL_MAP")) {
+        if (atoi(env) == 1)
+            s_jit_mode = JitMode::LuckNoTXM;
+    }
+
+    s_jit_mode_detected = true;
+
+    const char* names[] = { "Simulator", "LuckTXM", "LuckNoTXM", "Legacy" };
+    fprintf(stderr, "@@JIT_MODE@@ mode=%s (%d)\n", names[(int)s_jit_mode], (int)s_jit_mode);
+
+    return s_jit_mode;
+}
+
+DarwinMisc::JitMode DarwinMisc::GetJitMode()
+{
+    if (!s_jit_mode_detected)
+        DetectJitMode();
+    return s_jit_mode;
+}
+
+void* DarwinMisc::MmapCodeDualMap(size_t size)
+{
+    JitMode mode = GetJitMode();
+
+
+    if (mode == JitMode::Simulator) {
+        void* res = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                         MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+        if (res == MAP_FAILED) {
+            fprintf(stderr, "@@JIT_ALLOC@@ Simulator MAP_JIT FAIL errno=%d\n", errno);
+            return nullptr;
+        }
+        g_code_rw_offset = 0;
+        fprintf(stderr, "@@JIT_ALLOC@@ Simulator MAP_JIT OK rx=%p size=0x%zx offset=0\n", res, size);
+        return res;
+    }
+
+    if (mode == JitMode::Legacy) {
+        void* jit_ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                             MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+        if (jit_ptr != MAP_FAILED) {
+            g_code_rw_offset = 0;
+            s_jit_mode = JitMode::Simulator;
+            fprintf(stderr, "@@JIT_ALLOC@@ Legacy->Simulator MAP_JIT OK ptr=%p size=0x%zx offset=0\n", jit_ptr, size);
+            return jit_ptr;
+        }
+        fprintf(stderr, "@@JIT_ALLOC@@ MAP_JIT failed errno=%d, falling back to mprotect Legacy\n", errno);
+
+        void* res = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (res == MAP_FAILED) {
+            fprintf(stderr, "@@JIT_ALLOC@@ Legacy mmap(RW) FAIL errno=%d\n", errno);
+            return nullptr;
+        }
+
+        g_code_rw_offset = 0;
+        s_legacy_code_base = res;
+        s_legacy_code_size = size;
+        fprintf(stderr, "@@JIT_ALLOC@@ Legacy mprotect OK ptr=%p size=0x%zx offset=0\n", res, size);
+        return res;
+    }
+
+    if (mode == JitMode::LuckTXM || mode == JitMode::LuckNoTXM) {
+        void* jit_ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                             MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+        if (jit_ptr != MAP_FAILED) {
+            g_code_rw_offset = 0;
+            s_jit_mode = JitMode::Simulator;
+            fprintf(stderr, "@@JIT_ALLOC@@ MAP_JIT OK (debugger mode) ptr=%p size=0x%zx offset=0\n", jit_ptr, size);
+            return jit_ptr;
+        }
+        fprintf(stderr, "@@JIT_ALLOC@@ MAP_JIT errno=%d, falling back to dual-map+brk\n", errno);
+    }
+
+
+    void* rx_ptr = mmap(nullptr, size, PROT_READ | PROT_EXEC,
+                        MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (rx_ptr == MAP_FAILED) {
+        fprintf(stderr, "@@JIT_ALLOC@@ dual-map mmap(RX) FAIL errno=%d\n", errno);
+        return nullptr;
+    }
+    fprintf(stderr, "@@JIT_ALLOC@@ dual-map mmap(RX) OK rx=%p size=0x%zx\n", rx_ptr, size);
+
+    if (mode == JitMode::LuckTXM) {
+        static sigjmp_buf s_alloc_brk_jmp;
+        struct sigaction sa_brk = {}, sa_brk_old = {};
+        sa_brk.sa_handler = +[](int) { siglongjmp(s_alloc_brk_jmp, 1); };
+        sa_brk.sa_flags = 0;
+        sigemptyset(&sa_brk.sa_mask);
+        sigaction(SIGTRAP, &sa_brk, &sa_brk_old);
+
+        bool brk_ok = false;
+        fprintf(stderr, "@@JIT_ALLOC@@ issuing brk #0x69 for TXM registration (x0=%p x1=0x%zx)...\n", rx_ptr, size);
+        if (sigsetjmp(s_alloc_brk_jmp, 1) == 0) {
+            asm volatile("mov x0, %0\n"
+                         "mov x1, %1\n"
+                         "brk #0x69"
+                         :: "r"(rx_ptr), "r"(size) : "x0", "x1");
+            fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 OK (StikDebug handled)\n");
+            brk_ok = true;
+        } else {
+            fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 SIGTRAP — StikDebug not handling brk\n");
+        }
+        sigaction(SIGTRAP, &sa_brk_old, NULL);
+
+        if (!brk_ok) {
+            fprintf(stderr, "@@JIT_ALLOC@@ FATAL: TXM registration failed — ensure StikDebug launched ARMSX2 iOS\n");
+            munmap(rx_ptr, size);
+            return nullptr;
+        }
+    }
+
+    vm_address_t rw_region = 0;
+    vm_address_t target = reinterpret_cast<vm_address_t>(rx_ptr);
+    vm_prot_t cur_protection = 0;
+    vm_prot_t max_protection = 0;
+
+    kern_return_t kr = vm_remap(mach_task_self(), &rw_region, size, 0,
+                                VM_FLAGS_ANYWHERE, mach_task_self(), target, false,
+                                &cur_protection, &max_protection, VM_INHERIT_DEFAULT);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "@@JIT_ALLOC@@ vm_remap FAIL kr=%d\n", kr);
+        munmap(rx_ptr, size);
+        return nullptr;
+    }
+
+    u8* rw_ptr = reinterpret_cast<u8*>(rw_region);
+    fprintf(stderr, "@@JIT_ALLOC@@ vm_remap OK rw=%p\n", rw_ptr);
+
+    if (mprotect(rw_ptr, size, PROT_READ | PROT_WRITE) != 0) {
+        fprintf(stderr, "@@JIT_ALLOC@@ mprotect(RW) FAIL errno=%d\n", errno);
+        vm_deallocate(mach_task_self(), rw_region, size);
+        munmap(rx_ptr, size);
+        return nullptr;
+    }
+
+    g_code_rw_offset = rw_ptr - static_cast<u8*>(rx_ptr);
+    g_code_rw_base = reinterpret_cast<uintptr_t>(rw_ptr);
+    g_code_rw_size = size;
+
+    fprintf(stderr, "@@JIT_ALLOC@@ dual-map COMPLETE rx=%p rw=%p offset=%td size=0x%zx\n",
+            rx_ptr, rw_ptr, g_code_rw_offset, size);
+    return rx_ptr;
+}
+
+void DarwinMisc::MunmapCodeDualMap(void* rx_ptr, size_t size)
+{
+    if (!rx_ptr)
+        return;
+
+    if (g_code_rw_base) {
+        vm_deallocate(mach_task_self(), static_cast<vm_address_t>(g_code_rw_base), g_code_rw_size);
+        g_code_rw_base = 0;
+        g_code_rw_size = 0;
+    }
+
+    if (s_legacy_code_base) {
+        s_legacy_code_base = nullptr;
+        s_legacy_code_size = 0;
+    }
+
+    munmap(rx_ptr, size);
+    g_code_rw_offset = 0;
+}
+
+bool DarwinMisc::IsJITAvailable()
+{
+#if TARGET_OS_SIMULATOR
+    fprintf(stderr, "@@JIT_DETECT@@ simulator=1 result=AVAILABLE\n");
+    return true;
+#elif TARGET_OS_IPHONE
+    uint32_t cs_flags = 0;
+    int rv = csops(getpid(), 0, &cs_flags, sizeof(cs_flags));
+    bool cs_debugged = (rv == 0) && (cs_flags & 0x10000000u);
+
+    fprintf(stderr, "@@JIT_DETECT@@ csops=%d cs_flags=0x%08x CS_DEBUGGED=%d\n",
+            rv, cs_flags, cs_debugged ? 1 : 0);
+
+    if (!cs_debugged) {
+        fprintf(stderr, "@@JIT_DETECT@@ result=UNAVAILABLE (no CS_DEBUGGED — launch via StikDebug)\n");
+        s_jit_mode = JitMode::Legacy;
+        s_jit_mode_detected = true;
+        return false;
+    }
+
+    fprintf(stderr, "@@JIT_DETECT@@ result=AVAILABLE (CS_DEBUGGED set)\n");
+    return true;
+#else
+    return true;
+#endif
+}
 
 SharedMemoryMappingArea::SharedMemoryMappingArea(u8* base_ptr, size_t size, size_t num_pages)
 	: m_base_ptr(base_ptr)
@@ -427,9 +846,12 @@ SharedMemoryMappingArea::SharedMemoryMappingArea(u8* base_ptr, size_t size, size
 SharedMemoryMappingArea::~SharedMemoryMappingArea()
 {
 	pxAssertRel(m_num_mappings == 0, "No mappings left");
-
+#if !TARGET_OS_IPHONE
 	if (mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(m_base_ptr), m_size) != KERN_SUCCESS)
 		pxFailRel("Failed to release shared memory area");
+#else
+	munmap(m_base_ptr, m_size);
+#endif
 }
 
 
@@ -437,10 +859,11 @@ std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t 
 {
 	pxAssertRel(Common::IsAlignedPow2(size, __pagesize), "Size is page aligned");
 
+#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
 	mach_vm_address_t alloc = 0;
 	const kern_return_t res =
 		mach_vm_map(mach_task_self(), &alloc, size, 0, VM_FLAGS_ANYWHERE,
-			MEMORY_OBJECT_NULL, 0, false, VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_NONE);
+			MEMORY_OBJECT_NULL, 0, false, VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_NONE);
 	if (res != KERN_SUCCESS)
 	{
 		ERROR_LOG("mach_vm_map() failed: {}", res);
@@ -448,30 +871,70 @@ std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t 
 	}
 
 	return std::unique_ptr<SharedMemoryMappingArea>(new SharedMemoryMappingArea(reinterpret_cast<u8*>(alloc), size, size / __pagesize));
+#else
+	void* ptr = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (ptr == MAP_FAILED)
+		return {};
+
+	return std::unique_ptr<SharedMemoryMappingArea>(new SharedMemoryMappingArea(static_cast<u8*>(ptr), size, size / __pagesize));
+#endif
 }
 
 u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* map_base, size_t map_size, const PageProtectionMode& mode)
 {
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
 
+#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
 	const kern_return_t res =
 		mach_vm_map(mach_task_self(), reinterpret_cast<mach_vm_address_t*>(&map_base), map_size, 0, VM_FLAGS_OVERWRITE,
 			static_cast<mach_port_t>(reinterpret_cast<uintptr_t>(file_handle)), file_offset, false,
 			MachProt(mode), VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE);
 	if (res != KERN_SUCCESS) [[unlikely]]
 	{
-		ERROR_LOG("mach_vm_map() failed: {}", res);
+		ERROR_LOG("mach_vm_map() failed in Map: {}", res);
 		return nullptr;
 	}
 
 	m_num_mappings++;
 	return static_cast<u8*>(map_base);
+#else
+	if (s_ios_shared_data_base)
+	{
+		mach_vm_address_t target = (mach_vm_address_t)map_base;
+		mach_vm_address_t source = (mach_vm_address_t)(s_ios_shared_data_base + file_offset);
+		vm_prot_t cur_prot, max_prot;
+		kern_return_t kr = mach_vm_remap(
+			mach_task_self(), &target, map_size, 0,
+			VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+			mach_task_self(), source,
+			FALSE,
+			&cur_prot, &max_prot, VM_INHERIT_NONE);
+		if (kr == KERN_SUCCESS)
+		{
+			m_num_mappings++;
+			return static_cast<u8*>(map_base);
+		}
+		ERROR_LOG("mach_vm_remap() failed: {} (target={} source={} size={})",
+			kr, (void*)target, (void*)source, map_size);
+	}
+
+	int prot = 0;
+	if (mode.CanRead())  prot |= PROT_READ;
+	if (mode.CanWrite()) prot |= PROT_WRITE;
+	void* res = mmap(map_base, map_size, prot, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+	if (res == MAP_FAILED) [[unlikely]]
+		return nullptr;
+
+	m_num_mappings++;
+	return static_cast<u8*>(res);
+#endif
 }
 
 bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
 {
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
 
+#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
 	const kern_return_t res =
 		mach_vm_map(mach_task_self(), reinterpret_cast<mach_vm_address_t*>(&map_base), map_size, 0, VM_FLAGS_OVERWRITE,
 			MEMORY_OBJECT_NULL, 0, false, VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_NONE);
@@ -483,6 +946,14 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
 
 	m_num_mappings--;
 	return true;
+#else
+	void* res = mmap(map_base, map_size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+	if (res == MAP_FAILED) [[unlikely]]
+		return false;
+
+	m_num_mappings--;
+	return true;
+#endif
 }
 
 #ifdef _M_ARM64
@@ -492,14 +963,87 @@ static thread_local int s_code_write_depth = 0;
 void HostSys::BeginCodeWrite()
 {
 	if ((s_code_write_depth++) == 0)
-		pthread_jit_write_protect_np(0);
+	{
+        if (DarwinMisc::ARMSX2_WX_TRACE) {
+            u32 idx = __atomic_fetch_add(&DarwinMisc::g_wx_idx, 1, __ATOMIC_RELAXED) % 16;
+            DarwinMisc::g_wx_events[idx].tid = (u64)pthread_self();
+            DarwinMisc::g_wx_events[idx].caller = (u64)__builtin_return_address(0);
+            DarwinMisc::g_wx_events[idx].write = 1;
+            DarwinMisc::g_wx_events[idx].depth = s_code_write_depth;
+
+
+             Console.WriteLn("@@WX_TOGGLE@@ tid=%p write=1 depth=%d caller=%p",
+                pthread_self(), s_code_write_depth, __builtin_return_address(0));
+
+            DarwinMisc::g_jit_write_state = 1;
+            DarwinMisc::g_rec_stage = 0;
+        } else {
+             DarwinMisc::g_jit_write_state = 1;
+        }
+
+		if (DarwinMisc::g_code_rw_offset != 0) {
+		} else if (DarwinMisc::GetJitMode() == DarwinMisc::JitMode::Legacy) {
+			if (s_legacy_code_base && !s_legacy_is_writable) {
+				int rv = mprotect(s_legacy_code_base, s_legacy_code_size, PROT_READ | PROT_WRITE);
+				if (rv != 0) {
+					static int s_begin_fail = 0;
+					if (s_begin_fail++ < 5)
+						fprintf(stderr, "@@JIT_ALLOC@@ WARN: mprotect(RW) FAIL errno=%d\n", errno);
+				}
+				s_legacy_is_writable = true;
+			}
+		} else {
+			static auto func = reinterpret_cast<void(*)(int)>(dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+			if (func)
+				func(0);
+		}
+	}
 }
 
 void HostSys::EndCodeWrite()
 {
 	pxAssert(s_code_write_depth > 0);
 	if ((--s_code_write_depth) == 0)
-		pthread_jit_write_protect_np(1);
+	{
+        DarwinMisc::g_jit_write_state = 0;
+
+		if (DarwinMisc::g_code_rw_offset != 0) {
+		} else if (DarwinMisc::GetJitMode() == DarwinMisc::JitMode::Legacy) {
+			if (s_legacy_code_base && s_legacy_is_writable && !DarwinMisc::ARMSX2_FORCE_EE_INTERP) {
+				int rv = mprotect(s_legacy_code_base, s_legacy_code_size, PROT_READ | PROT_EXEC);
+				if (rv != 0) {
+					static int s_mprotect_fail_count = 0;
+					if (s_mprotect_fail_count++ < 5)
+						fprintf(stderr, "@@JIT_ALLOC@@ WARN: mprotect(RX) FAIL errno=%d count=%d\n", errno, s_mprotect_fail_count);
+				}
+				s_legacy_is_writable = false;
+			}
+		} else {
+			static auto func = reinterpret_cast<void(*)(int)>(dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+			if (func)
+				func(1);
+		}
+	}
+}
+
+void DarwinMisc::LegacyEnsureExecutable()
+{
+	if (!s_legacy_code_base || !s_legacy_is_writable)
+		return;
+
+	int rv = mprotect(s_legacy_code_base, s_legacy_code_size, PROT_READ | PROT_EXEC);
+	if (rv != 0) {
+		static int s_fail = 0;
+		if (s_fail++ < 5)
+			fprintf(stderr, "@@JIT_ALLOC@@ WARN: LegacyEnsureExecutable mprotect(RX) FAIL errno=%d\n", errno);
+		return;
+	}
+	s_legacy_is_writable = false;
+
+	if (s_legacy_code_dirty) {
+		sys_icache_invalidate(s_legacy_code_base, s_legacy_code_size);
+		s_legacy_code_dirty = false;
+	}
 }
 
 [[maybe_unused]] static bool IsStoreInstruction(const void* ptr)
@@ -546,7 +1090,226 @@ namespace PageFaultHandler
 	static std::recursive_mutex s_exception_handler_mutex;
 	static bool s_in_exception_handler = false;
 	static bool s_installed = false;
+	static int s_crash_log_fd = -1;
+
+	struct QuarantineEntry {
+		u32 guest_pc;
+		u32 block_id;
+	};
+	static QuarantineEntry s_block_quarantine[16];
+	static std::atomic<u32> s_quarantine_idx{0};
+
+	static void SafeWriteStr(const char* str)
+	{
+		size_t len = 0;
+		while (str[len]) len++;
+		write(STDERR_FILENO, str, len);
+		if (s_crash_log_fd >= 0) {
+			write(s_crash_log_fd, str, len);
+		}
+	}
+
+	static void SafeWriteHex(const char* prefix, u64 val)
+	{
+		SafeWriteStr(prefix);
+		char buf[19];
+		buf[0] = '0'; buf[1] = 'x';
+		const char* hex = "0123456789ABCDEF";
+		for (int i = 0; i < 16; ++i) {
+			buf[17 - i] = hex[val & 0xF];
+			val >>= 4;
+		}
+		buf[18] = 0;
+		SafeWriteStr(buf);
+		SafeWriteStr("\n");
+	}
+
+
+
+static std::atomic<uintptr_t> s_jit_base{0};
+static std::atomic<uintptr_t> s_jit_end{0};
+static std::atomic<u32> s_last_guest_pc{0};
+static std::atomic<uintptr_t> s_last_rec_ptr{0};
+
+    bool Install(Error* error)
+    {
+        return Install_Fresh(error);
+    }
 } // namespace PageFaultHandler
+
+
+int DarwinMisc::ARMSX2_CRASH_DIAG = [](){
+    const char* s = getenv("ARMSX2_CRASH_DIAG");
+    if (s && s[0] == '1') return 1;
+    return 0;
+}();
+
+int DarwinMisc::ARMSX2_WX_TRACE = [](){
+    const char* s = getenv("ARMSX2_WX_TRACE");
+    if (s && s[0] == '1') return 1;
+    return 0;
+}();
+
+int DarwinMisc::ARMSX2_REC_DIAG = [](){
+    const char* s = getenv("ARMSX2_REC_DIAG");
+    if (s && s[0] == '1') return 1;
+    return 0;
+}();
+
+int DarwinMisc::ARMSX2_FORCE_EE_INTERP = [](){
+    const char* s = getenv("ARMSX2_FORCE_EE_INTERP");
+    if (s && s[0] == '1') return 1;
+    return 0;
+}();
+
+int DarwinMisc::ARMSX2_FORCE_JIT_VERIFY = [](){
+    const char* gate = getenv("ARMSX2_ENABLE_DIAG_FLAGS");
+    const bool diag_enabled = (gate && gate[0] == '1' && gate[1] == '\0');
+    const char* s = getenv("ARMSX2_FORCE_JIT_VERIFY");
+    int val = (diag_enabled && s && s[0] == '1') ? 1 : 0;
+    fprintf(stderr, "@@CFG@@ ARMSX2_FORCE_JIT_VERIFY=%d\n", val);
+    return val;
+}();
+
+int DarwinMisc::ARMSX2_CRASH_PACK = [](){
+    const char* s = getenv("ARMSX2_CRASH_PACK");
+    int val = (s && s[0] == '1') ? 1 : 0;
+    fprintf(stderr, "@@CFG@@ ARMSX2_CRASH_PACK=%d\n", val);
+    return val;
+}();
+
+int DarwinMisc::ARMSX2_CALL_TGT_X9 = [](){
+    const char* s = getenv("ARMSX2_CALL_TGT_X9");
+    if (!s) s = getenv("CALL_TGT_X9");
+    int val = (s && s[0] == '1') ? 1 : 0;
+    fprintf(stderr, "@@CFG@@ ARMSX2_CALL_TGT_X9=%d\n", val);
+    return val;
+}();
+
+int DarwinMisc::ARMSX2_CALLPROBE = [](){
+    const char* s = getenv("ARMSX2_CALLPROBE");
+    int val = (s && s[0] == '1') ? 1 : 0;
+    fprintf(stderr, "@@CFG@@ ARMSX2_CALLPROBE=%d\n", val);
+    return val;
+}();
+
+int DarwinMisc::ARMSX2_FORCE_JIT = [](){
+    const char* s = getenv("ARMSX2_FORCE_JIT");
+    int val = (s && s[0] == '0') ? 0 : 1;
+    fprintf(stderr, "@@CFG@@ ARMSX2_FORCE_JIT=%d\n", val);
+    return val;
+}();
+
+int DarwinMisc::ARMSX2_JIT_HLE = [](){
+    const char* s = getenv("ARMSX2_JIT_HLE");
+    int val = (!s || s[0] != '0') ? 1 : 0;
+    fprintf(stderr, "@@CFG@@ ARMSX2_JIT_HLE=%d\n", val);
+    return val;
+}();
+
+int DarwinMisc::ARMSX2_IOP_CORE_TYPE = [](){
+    const char* s = getenv("ARMSX2_IOP_CORE_TYPE");
+    int val = 0;
+    if (s) {
+        if (s[0] == '-' && s[1] == '1') val = -1;
+        else if (s[0] == '0') val = 0;
+        else if (s[0] == '1') val = 1;
+    }
+    fprintf(stderr, "@@CFG@@ ARMSX2_IOP_CORE_TYPE=%d\n", val);
+    return val;
+}();
+
+#if TARGET_OS_SIMULATOR
+static int s_stdout_redirect = [](){
+    freopen("/tmp/pcsx2_stdout.txt", "w", stdout);
+    return 0;
+}();
+#endif
+
+static int s_user_crash_log_fd = -1;
+void DarwinMisc::SetCrashLogFD(int fd) {
+    s_user_crash_log_fd = fd;
+}
+
+static struct { const void* addr; const char* name; } s_dyld_imgs[128];
+static int s_dyld_cnt = 0;
+static void CacheDyldImages() {
+    if (s_dyld_cnt > 0) return;
+    u32 count = _dyld_image_count();
+    for(u32 i=0; i<count && s_dyld_cnt < 128; ++i) {
+        const char* name = _dyld_get_image_name(i);
+        const auto* hdr = _dyld_get_image_header(i);
+        if (hdr) {
+            const char* base = strrchr(name, '/');
+            s_dyld_imgs[s_dyld_cnt++] = {hdr, base ? base+1 : name};
+        }
+    }
+}
+
+void DarwinMisc::SetJitRange(void* base, size_t size) {
+    CacheDyldImages();
+    PageFaultHandler::s_jit_base.store(reinterpret_cast<uintptr_t>(base), std::memory_order_relaxed);
+    PageFaultHandler::s_jit_end.store(reinterpret_cast<uintptr_t>(base) + size, std::memory_order_relaxed);
+
+    if (ARMSX2_CRASH_DIAG) {
+        fprintf(stderr, "@@CFG@@ ARMSX2_CRASH_DIAG=1\n");
+        fprintf(stderr, "@@JIT_RANGE@@ base=%p end=%p\n", base, (void*)((uintptr_t)base + size));
+    }
+
+    const struct mach_header* hdr = _dyld_get_image_header(0);
+    const char* path = _dyld_get_image_name(0);
+    if(hdr) {
+        fprintf(stderr, "@@DYLD_IMG0@@ hdr=%p path=\"%s\"\n", hdr, path ? path : "null");
+    }
+}
+
+void DarwinMisc::SetLastGuestPC(u32 pc) {
+    PageFaultHandler::s_last_guest_pc.store(pc, std::memory_order_relaxed);
+}
+
+void DarwinMisc::SetLastRecPtr(void* ptr) {
+    PageFaultHandler::s_last_rec_ptr.store(reinterpret_cast<uintptr_t>(ptr), std::memory_order_relaxed);
+}
+
+uintptr_t DarwinMisc::GetJitBase() { return PageFaultHandler::s_jit_base.load(std::memory_order_relaxed); }
+uintptr_t DarwinMisc::GetJitEnd() { return PageFaultHandler::s_jit_end.load(std::memory_order_relaxed); }
+u32 DarwinMisc::GetLastGuestPC() { return PageFaultHandler::s_last_guest_pc.load(std::memory_order_relaxed); }
+uintptr_t DarwinMisc::GetLastRecPtr() { return PageFaultHandler::s_last_rec_ptr.load(std::memory_order_relaxed); }
+
+namespace {
+    struct JitBlockEntry {
+        u32 guest_pc;
+        uintptr_t recptr;
+        u32 size;
+    };
+    static JitBlockEntry s_jit_blocks[64];
+    static std::atomic<int> s_jit_block_idx{0};
+}
+
+void DarwinMisc::RecordJitBlock(u32 guest_pc, void* recptr, u32 size) {
+    int idx = s_jit_block_idx.fetch_add(1, std::memory_order_relaxed);
+    int slot = idx % 64;
+    s_jit_blocks[slot].guest_pc = guest_pc;
+    s_jit_blocks[slot].recptr = (uintptr_t)recptr;
+    s_jit_blocks[slot].size = (size == 0) ? 0x4000 : size;
+}
+
+bool DarwinMisc::FindJitBlock(uintptr_t site, u32* out_guest_pc, void** out_recptr) {
+    int idx = s_jit_block_idx.load(std::memory_order_relaxed);
+    for (int i = 0; i < 64; i++) {
+        int slot = (idx - 1 - i) % 64;
+        if (slot < 0) slot += 64;
+
+        uintptr_t r = s_jit_blocks[slot].recptr;
+        u32 sz = s_jit_blocks[slot].size;
+        if (r != 0 && site >= r && site < (r + sz)) {
+            if (out_guest_pc) *out_guest_pc = s_jit_blocks[slot].guest_pc;
+            if (out_recptr) *out_recptr = (void*)r;
+            return true;
+        }
+    }
+    return false;
+}
 
 void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 {
@@ -555,14 +1318,507 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 		reinterpret_cast<void*>(static_cast<ucontext_t*>(ctx)->uc_mcontext->__es.__faultvaddr);
 	void* const exception_pc = reinterpret_cast<void*>(static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__rip);
 	const bool is_write = (static_cast<ucontext_t*>(ctx)->uc_mcontext->__es.__err & 2) != 0;
+    uintptr_t host_sp = static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__rsp;
+    uintptr_t host_lr = 0;
+    uintptr_t reg_x27 = 0;
+    uintptr_t reg_x25 = 0;
+    uintptr_t reg_x4  = 0;
+    uintptr_t reg_x5  = 0;
 #elif defined(_M_ARM64)
 	void* const exception_address = reinterpret_cast<void*>(static_cast<ucontext_t*>(ctx)->uc_mcontext->__es.__far);
 	void* const exception_pc = reinterpret_cast<void*>(static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__pc);
-	const bool is_write = IsStoreInstruction(exception_pc);
+	const uint32_t esr_early = static_cast<ucontext_t*>(ctx)->uc_mcontext->__es.__esr;
+	const uint32_t ec_early = (esr_early >> 26) & 0x3F;
+	bool is_write;
+	if (ec_early == 0x24 || ec_early == 0x25) {
+		is_write = (esr_early & (1u << 6)) != 0;
+	} else {
+		is_write = false;
+	}
+    auto* ss = &static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss;
+    uintptr_t host_sp = ss->__sp;
+    uintptr_t host_lr = ss->__lr;
+    uintptr_t reg_x16 = ss->__x[16];
+    uintptr_t reg_x17 = ss->__x[17];
+    uintptr_t reg_x0  = ss->__x[0];
+    uintptr_t reg_x1  = ss->__x[1];
+    uintptr_t reg_x2  = ss->__x[2];
+    uintptr_t reg_x3  = ss->__x[3];
+    uintptr_t reg_x4  = ss->__x[4];
+    uintptr_t reg_x5  = ss->__x[5];
+    uintptr_t reg_x25 = ss->__x[25];
+    uintptr_t reg_x27 = ss->__x[27];
+    uint32_t esr = static_cast<ucontext_t*>(ctx)->uc_mcontext->__es.__esr;
 #endif
 
-	// Executing the handler concurrently from multiple threads wouldn't go down well.
-	s_exception_handler_mutex.lock();
+    uintptr_t pc_val = reinterpret_cast<uintptr_t>(exception_pc);
+    uintptr_t fault_val = reinterpret_cast<uintptr_t>(exception_address);
+    int si_code = info->si_code;
+
+
+
+	static volatile int s_sigbus_log_count = 0;
+	bool verbose_signal_log = true;
+	if (sig == SIGBUS) {
+		int n = __sync_fetch_and_add(&s_sigbus_log_count, 1);
+		if (n >= 3) verbose_signal_log = false;
+	}
+
+	if (verbose_signal_log)
+	SafeWriteStr("\n!!! SIGNAL CAUGHT !!!\n");
+
+	if (verbose_signal_log) {
+    if (sig == SIGABRT) {
+        SafeWriteStr("@@SIGABRT_BT_START@@\n");
+        void* bt_frames[48];
+        int bt_cnt = backtrace(bt_frames, 48);
+        SafeWriteStr("@@SIGABRT_BT_CNT=");
+        { char nc[4]; int v=bt_cnt; nc[0]='0'+v/10; nc[1]='0'+v%10; nc[2]='\n'; nc[3]=0; SafeWriteStr(nc); }
+        for (int i = 0; i < bt_cnt; i++) {
+            SafeWriteStr("@@BT@@");
+            char b[19]; b[0]='0'; b[1]='x';
+            const char* h="0123456789abcdef"; uintptr_t v=(uintptr_t)bt_frames[i];
+            for(int j=0;j<16;j++){b[17-j]=h[v&0xF];v>>=4;} b[18]=0;
+            SafeWriteStr(b); SafeWriteStr("\n");
+        }
+        SafeWriteStr("@@SIGABRT_BT_END@@\n");
+    }
+
+    auto write_hex_val = [](const char* p, uintptr_t v) {
+        SafeWriteStr(p);
+        char b[17];
+        const char* h = "0123456789abcdef";
+        for(int i=0; i<8; ++i) {
+            b[2*i] = h[(v >> ((7-i)*8 + 4)) & 0xF];
+            b[2*i+1] = h[(v >> ((7-i)*8)) & 0xF];
+        }
+        b[16] = 0;
+        SafeWriteStr(b);
+    };
+
+    auto SafeRead32 = [](uintptr_t addr, uint32_t* out) -> bool {
+        vm_size_t size = 4;
+        vm_address_t data = (vm_address_t)out;
+        kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, 4, data, &size);
+        return (kr == KERN_SUCCESS);
+    };
+    auto SafeRead64 = [](uintptr_t addr, uint64_t* out) -> bool {
+        vm_size_t size = 8;
+        vm_address_t data = (vm_address_t)out;
+        kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, 8, data, &size);
+        return (kr == KERN_SUCCESS);
+    };
+
+    {
+        static u32 s_ser_n = 0;
+        if (sig == SIGBUS && s_ser_n < 4 && reg_x27 != 0) {
+            u32 ee_ra = 0, ee_v1 = 0, ee_sp = 0, ee_pc_v = 0;
+            SafeRead32(reg_x27 + 0x1F0, &ee_ra);
+            SafeRead32(reg_x27 + 0x030, &ee_v1);
+            SafeRead32(reg_x27 + 0x1D0, &ee_sp);
+            SafeRead32(reg_x27 + 0x2A8, &ee_pc_v);
+            char buf[192];
+            int nn = snprintf(buf, sizeof(buf),
+                "@@SIGBUS_EE_REGS@@ n=%u fa=%08lx ra=%08x v1=%08x sp=%08x eepc=%08x\n",
+                s_ser_n, (unsigned long)fault_val, ee_ra, ee_v1, ee_sp, ee_pc_v);
+            SafeWriteStr(buf);
+            u32 arm64_op = 0;
+            SafeRead32(pc_val, &arm64_op);
+            char buf2[256];
+            int nn2 = snprintf(buf2, sizeof(buf2),
+                "@@SIGBUS_ARM64@@ op=%08x x25=%016lx x0=%08lx x1=%08lx x2=%08lx x3=%08lx x4=%08lx x5=%08lx\n",
+                arm64_op, (unsigned long)reg_x25,
+                (unsigned long)reg_x0, (unsigned long)reg_x1,
+                (unsigned long)reg_x2, (unsigned long)reg_x3,
+                (unsigned long)reg_x4, (unsigned long)reg_x5);
+            SafeWriteStr(buf2);
+            s_ser_n++;
+        }
+    }
+
+    SafeWriteStr("@@BUILD_TS@@ 2026-01-18 13:40 RUN_SIGBUS_DEBUG\n");
+    SafeWriteStr("@@SIGBUS_START@@\n");
+    SafeWriteStr("@@SIGBUS@@");
+    write_hex_val(" host_pc=", pc_val);
+    write_hex_val(" host_sp=", (uintptr_t)host_sp);
+    write_hex_val(" host_lr=", host_lr);
+    write_hex_val(" fault=", fault_val);
+    SafeWriteStr("\n");
+    SafeWriteStr("@@TELEM_VER@@ v=2\n");
+
+    SafeWriteStr("@@CheckJIT@@");
+    uintptr_t jbase = s_jit_base.load(std::memory_order_relaxed);
+    uintptr_t jend = s_jit_end.load(std::memory_order_relaxed);
+    write_hex_val(" jbase=", jbase);
+    write_hex_val(" jend=", jend);
+    write_hex_val(" lr=", host_lr);
+    SafeWriteStr("\n");
+
+    {
+         uint32_t val_m4 = 0;
+         uint64_t val_m8 = 0;
+         bool read_ok_m4 = false;
+         bool read_ok_m8 = false;
+
+         if (host_lr > 0x1000) {
+             read_ok_m4 = SafeRead32(host_lr - 4, &val_m4);
+             read_ok_m8 = SafeRead64(host_lr - 8, &val_m8);
+         }
+
+         SafeWriteStr("@@LR_INSN@@");
+         write_hex_val(" lr=0x", host_lr);
+         if (read_ok_m4 && read_ok_m8) {
+             write_hex_val(" w_m8=0x", val_m8);
+             write_hex_val(" w_m4=0x", val_m4);
+             SafeWriteStr(" unreadable=0\n");
+         } else {
+             write_hex_val(" w_m8=0x", val_m8);
+             write_hex_val(" w_m4=0x", val_m4);
+             SafeWriteStr(" unreadable=1\n");
+         }
+    }
+
+    {
+        SafeWriteStr("@@STACK16@@ sp=0x");
+        auto write_hex_raw = [&](uintptr_t v) {
+             char b[17];
+             const char* h = "0123456789abcdef";
+             for(int i=0; i<8; ++i) {
+                 b[2*i] = h[(v >> ((7-i)*8 + 4)) & 0xF];
+                 b[2*i+1] = h[(v >> ((7-i)*8)) & 0xF];
+             }
+             b[16]=0;
+             SafeWriteStr(b);
+        };
+        write_hex_raw((uintptr_t)host_sp);
+
+        uintptr_t* sp_ptr = (uintptr_t*)host_sp;
+        for(int i=0; i<16; ++i) {
+            uint64_t val = 0;
+            if (SafeRead64((uintptr_t)(sp_ptr + i), &val)) {
+                SafeWriteStr(" w");
+                char ib[4];
+                if(i<10) { ib[0]='0'+i; ib[1]=0; }
+                else { ib[0]='1'; ib[1]='0'+(i-10); ib[2]=0; }
+                SafeWriteStr(ib);
+                SafeWriteStr("=0x");
+                write_hex_raw(val);
+            } else {
+                SafeWriteStr(" w");
+                char ib[4];
+                if(i<10) { ib[0]='0'+i; ib[1]=0; }
+                else { ib[0]='1'; ib[1]='0'+(i-10); ib[2]=0; }
+                SafeWriteStr(ib);
+                SafeWriteStr("=UNREAD");
+            }
+        }
+        SafeWriteStr("\n");
+    }
+
+    {
+        auto SymbolizeStrict = [&](const char* tag, uintptr_t addr) {
+            SafeWriteStr(tag);
+            SafeWriteStr(" mod=\"");
+            const char* best_name = "???";
+            uintptr_t best_base = 0;
+            for(int i=0; i<s_dyld_cnt; ++i) {
+                uintptr_t base = (uintptr_t)s_dyld_imgs[i].addr;
+                if (addr >= base && base > best_base) {
+                    best_base = base;
+                    best_name = s_dyld_imgs[i].name;
+                }
+            }
+            SafeWriteStr(best_name);
+            SafeWriteStr("\" off=0x");
+            uintptr_t off = addr - best_base;
+            char b[17];
+            const char* h = "0123456789abcdef";
+            for(int i=0; i<8; ++i) {
+                b[2*i] = h[(off >> ((7-i)*8 + 4)) & 0xF];
+                b[2*i+1] = h[(off >> ((7-i)*8)) & 0xF];
+            }
+            b[16]=0;
+            SafeWriteStr(b);
+            SafeWriteStr(" name=\"?\"\n");
+        };
+        SymbolizeStrict("@@SYM_LR@@", host_lr);
+        SymbolizeStrict("@@SYM_PC@@", pc_val);
+    }
+
+    SafeWriteStr("@@REGS@@");
+    write_hex_val(" x0=", reg_x0);
+    write_hex_val(" x1=", reg_x1);
+    write_hex_val(" x2=", reg_x2);
+    write_hex_val(" x3=", reg_x3);
+    write_hex_val(" x9=", ss->__x[9]);
+    write_hex_val(" x16=", reg_x16);
+    write_hex_val(" x17=", reg_x17);
+    write_hex_val(" x19=", ss->__x[19]);
+    SafeWriteStr("\n");
+
+    {
+        uintptr_t rstate_cpu = ss->__x[27];
+        u32 ee_pc_probe = 0;
+        bool ee_pc_ok = (rstate_cpu > 0x1000) && SafeRead32(rstate_cpu + 0x2A8, &ee_pc_probe);
+        SafeWriteStr("@@EE_PC_CRASH@@");
+        write_hex_val(" x27=", rstate_cpu);
+        write_hex_val(" ee_pc=", (uintptr_t)ee_pc_probe);
+        SafeWriteStr(ee_pc_ok ? " ok=1\n" : " ok=0\n");
+    }
+
+
+
+    write_hex_val(" pc=0x", pc_val);
+    write_hex_val(" lr=0x", host_lr);
+    write_hex_val(" sp=0x", (uintptr_t)host_sp);
+
+#if defined(_M_ARM64)
+    u64 x16_val = reg_x16;
+    u64 x17_val = reg_x17;
+    write_hex_val(" x16=", x16_val);
+    write_hex_val(" x17=", x17_val);
+    write_hex_val(" x28=", ss->__x[28]);
+#else
+    u64 x16_val = 0;
+    u64 x17_val = 0;
+#endif
+
+    if (pc_val && (sig == SIGBUS || sig == SIGSEGV)) {
+        u32 instr = 0;
+        uintptr_t jbase = s_jit_base.load(std::memory_order_relaxed);
+        uintptr_t jend = s_jit_end.load(std::memory_order_relaxed);
+        if (pc_val >= jbase && pc_val < jend) {
+             instr = *(u32*)pc_val;
+             write_hex_val(" Instr=0x", instr);
+        }
+    }
+
+    SafeWriteStr("\n");
+
+    write_hex_val(" sp=0x", host_sp);
+    write_hex_val(" addr=0x", fault_val);
+
+    SafeWriteStr(" code=0x");
+    char code_buf[4];
+    const char* h = "0123456789abcdef";
+    code_buf[0] = h[(si_code >> 4) & 0xF];
+    code_buf[1] = h[si_code & 0xF];
+    code_buf[2] = 0;
+    SafeWriteStr(code_buf);
+
+#if defined(__aarch64__)
+    write_hex_val(" x16=0x", reg_x16);
+    write_hex_val(" x17=0x", reg_x17);
+    write_hex_val(" x29=0x",  ss->__fp);
+    write_hex_val(" x30=0x",  ss->__lr);
+    write_hex_val(" x0=0x", reg_x0);
+    write_hex_val(" x1=0x", reg_x1);
+    write_hex_val(" x2=0x", reg_x2);
+    write_hex_val(" x3=0x", reg_x3);
+    write_hex_val(" esr=0x", esr);
+
+    u32 ec = (esr >> 26) & 0x3F;
+    if (ec == 0x20 || ec == 0x21) SafeWriteStr(" FAULT=IFETCH");
+    else if (ec == 0x24 || ec == 0x25) SafeWriteStr(" FAULT=DATA");
+    else SafeWriteStr(" FAULT=OTHER");
+
+    if (pc_val >= jbase && pc_val < jend) SafeWriteStr(" in_jit_range=1");
+    else SafeWriteStr(" in_jit_range=0");
+#endif
+    SafeWriteStr("\n");
+
+
+	if (sig == SIGBUS) SafeWriteStr("Signal: SIGBUS\n");
+	else if (sig == SIGSEGV) SafeWriteStr("Signal: SIGSEGV\n");
+	else if (sig == SIGILL) SafeWriteStr("Signal: SIGILL\n");
+	else if (sig == SIGABRT) SafeWriteStr("Signal: SIGABRT\n");
+	else SafeWriteStr("Signal: UNKNOWN\n");
+
+	if (s_crash_log_fd >= 0) {
+		fsync(s_crash_log_fd);
+	}
+
+	if (HostSys::g_JitContext.block_id != 0 && (sig == SIGBUS || sig == SIGSEGV || sig == SIGILL))
+	{
+		SafeWriteStr("\n!!! JIT CRASH DETECTED !!!\n");
+		if (sig == SIGBUS) SafeWriteStr("Signal: SIGBUS (W^X Violation?)\n");
+		if (sig == SIGSEGV) SafeWriteStr("Signal: SIGSEGV (Bad Access)\n");
+		if (sig == SIGILL) SafeWriteStr("Signal: SIGILL (Illegal Instruction)\n");
+
+		SafeWriteHex("Fault Addr: ", reinterpret_cast<uintptr_t>(exception_address));
+		SafeWriteHex("Host PC:    ", reinterpret_cast<uintptr_t>(exception_pc));
+#if defined(_M_ARM64)
+		SafeWriteHex("Host LR:    ", static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__lr);
+		SafeWriteHex("Host SP:    ", static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__sp);
+
+		if (sig == SIGBUS && jbase > 0 && jend > 0) {
+			uintptr_t lr_val = static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__lr;
+            uintptr_t x16_val = static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__x[16];
+            SafeWriteHex("Host X16:   ", x16_val);
+
+			if (lr_val >= jbase && lr_val < jend) {
+				uintptr_t site = lr_val - 4;
+				if (site >= jbase && site < jend) {
+					uint32_t insn = *(uint32_t*)site;
+
+                    auto write_hex_inline = [](const char* p, uintptr_t v) {
+                        SafeWriteStr(p);
+                        char b[17];
+                        const char* h = "0123456789abcdef";
+                        for(int i=0; i<8; ++i) {
+                            b[2*i] = h[(v >> ((7-i)*8 + 4)) & 0xF];
+                            b[2*i+1] = h[(v >> ((7-i)*8)) & 0xF];
+                        }
+                        b[16] = 0;
+                        SafeWriteStr(b);
+                    };
+
+					int reg_n = -1;
+					const char* op_name = "UNK";
+
+
+					if ((insn & 0xFFFFFC1F) == 0xD63F0000) {
+						reg_n = (insn >> 5) & 0x1F;
+						op_name = "BLR";
+					} else if ((insn & 0xFFFFFC1F) == 0xD61F0000) {
+						reg_n = (insn >> 5) & 0x1F;
+						op_name = "BR";
+					}
+
+					SafeWriteStr("@@IFETCH_SITE@@ lr=");
+                    write_hex_inline("", lr_val);
+					write_hex_inline(" site=", site);
+					write_hex_inline(" insn=", insn);
+					SafeWriteStr(" op="); SafeWriteStr(op_name);
+
+					if (reg_n >= 0) {
+						SafeWriteStr(" reg=x");
+						char rbuf[4];
+						if(reg_n < 10) { rbuf[0] = '0'+reg_n; rbuf[1]=0; }
+						else { rbuf[0] = '0'+(reg_n/10); rbuf[1]='0'+(reg_n%10); rbuf[2]=0; }
+						SafeWriteStr(rbuf);
+                        uintptr_t reg_val = static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__x[reg_n];
+						write_hex_inline(" val=", reg_val);
+					}
+                    write_hex_inline(" fault=", reinterpret_cast<uintptr_t>(exception_address));
+					SafeWriteStr("\n");
+				}
+			}
+		}
+
+		if (sig == SIGILL) {
+			SafeWriteStr("ESR Class:  Illegal Instruction (SIGILL)\n");
+			if (exception_pc) {
+				u32 fault_instr = *reinterpret_cast<u32*>(exception_pc);
+				SafeWriteHex("Fault Instr:", fault_instr);
+			}
+		} else if (sig == SIGBUS) {
+			SafeWriteStr("ESR Class:  Data/Instruction Abort (SIGBUS - likely W^X)\n");
+		} else if (sig == SIGSEGV) {
+			SafeWriteStr("ESR Class:  Data Abort (SIGSEGV - unmapped/permission)\n");
+		}
+
+        if (DarwinMisc::ARMSX2_WX_TRACE) {
+             SafeWriteStr("\n--- W^X Ring Buffer --- \n");
+
+             auto WXHexInline = [](const char* p, uintptr_t v) {
+                SafeWriteStr(p);
+                char b[17];
+                const char* h = "0123456789abcdef";
+                for(int i=0; i<8; ++i) {
+                    b[2*i] = h[(v >> ((7-i)*8 + 4)) & 0xF];
+                    b[2*i+1] = h[(v >> ((7-i)*8)) & 0xF];
+                }
+                b[16] = 0;
+                SafeWriteStr(b);
+            };
+
+             for(int i=0; i<16; ++i) {
+                 volatile auto& e = DarwinMisc::g_wx_events[i];
+                 if (e.tid == 0) continue;
+                 SafeWriteStr("@@WX_LAST@@ idx=");
+                 char b[4];
+                 if(i<10) { b[0]='0'+i; b[1]=0; } else { b[0]='1'; b[1]='0'+(i-10); b[2]=0; }
+                 SafeWriteStr(b);
+                 WXHexInline(" tid=", e.tid);
+                 WXHexInline(" caller=", e.caller);
+                 SafeWriteStr(e.write ? " write=1" : " write=0");
+                 SafeWriteStr(e.depth ? " depth=1" : " depth=0");
+                 SafeWriteStr("\n");
+             }
+
+             SafeWriteStr("\n--- JIT Emit Call Ring Buffer --- \n");
+             for(int i=0; i<32; ++i) {
+                 volatile auto& e = DarwinMisc::g_emit_events[i];
+                 if (e.ptr == 0) continue;
+                 SafeWriteStr("@@EMIT_LAST@@ idx=");
+                 char b[4];
+                 if(i<10) { b[0]='0'+i; b[1]=0; } else { b[0]='1'+((i-10)/10); b[1]='0'+((i-10)%10); b[2]=0; }
+                 SafeWriteStr(b);
+                 WXHexInline(" pc=", e.pc);
+                 WXHexInline(" ptr=", e.ptr);
+                 WXHexInline(" sym=", e.sym);
+                 WXHexInline(" tid=", e.tid);
+                 WXHexInline(" caller=", e.caller);
+                 SafeWriteStr("\n");
+             }
+        }
+#endif
+        {
+
+        if (pc_val >= jbase && pc_val < jend) {
+             u32 gpc = 0; void* rxptr = nullptr;
+             if (DarwinMisc::FindJitBlock(pc_val, &gpc, &rxptr)) {
+                  SafeWriteStr("@@JIT_BLOCK@@ source=PC");
+                  char buf[32];
+             }
+        }
+        if (host_lr >= jbase && host_lr < jend) {
+             u32 gpc = 0; void* rxptr = nullptr;
+             if (DarwinMisc::FindJitBlock(host_lr, &gpc, &rxptr)) {
+                  SafeWriteStr("@@JIT_BLOCK@@ source=LR found=1\n");
+             }
+        }
+		SafeWriteHex("Guest PC:   ", HostSys::g_JitContext.guest_pc);
+		SafeWriteHex("Block ID:   ", HostSys::g_JitContext.block_id);
+
+		u32 idx = s_quarantine_idx.fetch_add(1) % 16;
+		s_block_quarantine[idx] = {HostSys::g_JitContext.guest_pc, HostSys::g_JitContext.block_id};
+		SafeWriteStr("Block quarantined.\n");
+
+	}
+	}
+
+	}
+
+	{
+		static u32 s_pm_n = 0;
+		if (s_pm_n < 4)
+		{
+			char buf[64];
+			snprintf(buf, sizeof(buf), "@@PRE_MUTEX@@ n=%u\n", s_pm_n);
+			SafeWriteStr(buf);
+			s_pm_n++;
+		}
+	}
+
+	if (!s_exception_handler_mutex.try_lock())
+	{
+		SafeWriteStr("@@HPF_TRYLOCK_FAIL@@ concurrent page fault, aborting\n");
+		_exit(99);
+	}
+
+	{
+		static u32 s_ml_n = 0;
+		if (s_ml_n < 4)
+		{
+			char buf[80];
+			snprintf(buf, sizeof(buf), "@@MUTEX_LOCKED@@ n=%u in_handler=%d\n",
+				s_ml_n, (int)s_in_exception_handler);
+			SafeWriteStr(buf);
+			s_ml_n++;
+		}
+	}
 
 	// Prevent recursive exception filtering.
 	HandlerResult result = HandlerResult::ExecuteNextHandler;
@@ -570,6 +1826,14 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 	{
 		s_in_exception_handler = true;
 		result = HandlePageFault(exception_pc, exception_address, is_write);
+
+		if (result == HandlerResult::ExecuteNextHandler && HostSys::g_JitContext.block_id != 0)
+		{
+             s_exception_handler_mutex.unlock();
+             SafeWriteStr("Unresolvable JIT Crash. Improved diagnosis above. Aborting safely.\n");
+             abort();
+		}
+
 		s_in_exception_handler = false;
 	}
 
@@ -583,7 +1847,20 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 	CrashHandler::CrashSignalHandler(sig, info, ctx);
 }
 
-bool PageFaultHandler::Install(Error* error)
+void DarwinMisc::LogDyldMain() {
+    static bool logged = false;
+    if (!logged) {
+        const struct mach_header* mh = _dyld_get_image_header(0);
+        if (mh) {
+            Console.WriteLn("@@DYLD_MAIN@@ base=%p", mh);
+        } else {
+            Console.WriteLn("@@DYLD_MAIN@@ base=UNKNOWN");
+        }
+        logged = true;
+    }
+}
+
+bool PageFaultHandler::Install_Fresh(Error* error)
 {
 	std::unique_lock lock(s_exception_handler_mutex);
 	pxAssertRel(!s_installed, "Page fault handler has already been installed.");
@@ -607,11 +1884,44 @@ bool PageFaultHandler::Install(Error* error)
 		Error::SetErrno(error, "sigaction() for SIGSEGV failed: ", errno);
 		return false;
 	}
+
+	if (sigaction(SIGILL, &sa, nullptr) != 0)
+	{
+		Error::SetErrno(error, "sigaction() for SIGILL failed: ", errno);
+		return false;
+	}
+
 #endif
 
 	// Allow us to ignore faults when running under lldb.
 	task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS, MACH_PORT_NULL, EXCEPTION_DEFAULT, 0);
 
+    if (s_user_crash_log_fd >= 0)
+    {
+        s_crash_log_fd = s_user_crash_log_fd;
+    }
+    else
+    {
+        const char* log_file = "/tmp/pcsx2_crash_RUN_124500.log";
+        s_crash_log_fd = open(log_file, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    }
+    if (s_crash_log_fd >= 0)
+        dup2(s_crash_log_fd, STDERR_FILENO);
+
+    Console.WriteLn("@@LOG_TRUNC@@ pid=%d", getpid());
+    Console.WriteLn("@@BOOT_VER@@ v=2 pid=%d", getpid());
+    Console.WriteLn("@@SIG_INSTALLED@@ Signals: SIGBUS SIGSEGV SIGILL. CrashLog: fd=%d",
+        s_crash_log_fd);
+
 	s_installed = true;
 	return true;
 }
+
+volatile DarwinMisc::IndirectEvent DarwinMisc::g_ie[8] = {};
+volatile u32 DarwinMisc::g_ie_idx = 0;
+volatile int DarwinMisc::g_jit_write_state = 0;
+volatile int DarwinMisc::g_rec_stage = 0;
+volatile DarwinMisc::WXTraceEvent DarwinMisc::g_wx_events[16] = {};
+volatile u32 DarwinMisc::g_wx_idx = 0;
+volatile DarwinMisc::EmitEvent DarwinMisc::g_emit_events[32] = {};
+volatile u32 DarwinMisc::g_emit_idx = 0;

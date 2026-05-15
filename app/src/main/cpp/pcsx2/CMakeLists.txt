@@ -20,6 +20,15 @@ target_link_libraries(PCSX2 PRIVATE PCSX2_FLAGS)
 
 target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_20)
 target_compile_definitions(PCSX2_FLAGS INTERFACE "${PCSX2_DEFS}")
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	message(STATUS "Forcing _M_ARM64 for iOS")
+	set(_M_ARM64 TRUE)
+	target_compile_definitions(PCSX2_FLAGS INTERFACE
+		"_M_ARM64=1"
+		"PCSX2_ARM64_DYNAREC=1"
+	)
+endif()
 target_compile_options(PCSX2_FLAGS INTERFACE "${PCSX2_WARNINGS}")
 
 # Check that people use the good file
@@ -81,7 +90,7 @@ set(pcsx2Sources
 	GS.cpp
 	GSDumpReplayer.cpp
 	Host.cpp
-#	Hotkeys.cpp
+	Hotkeys.cpp
 	Hw.cpp
 	HwRead.cpp
 	HwWrite.cpp
@@ -837,8 +846,11 @@ set(pcsx2DebugToolsHeaders
 set(pcsx2HostSources
 	Host/AudioStream.cpp
 	Host/CubebAudioStream.cpp
-	Host/SDLAudioStream.cpp
-	Host/OboeAudioStream.cpp)
+	Host/SDLAudioStream.cpp)
+
+if(ANDROID)
+	list(APPEND pcsx2HostSources Host/OboeAudioStream.cpp)
+endif()
 
 set(pcsx2HostHeaders
 	Host/AudioStream.h
@@ -908,10 +920,14 @@ set(pcsx2LinuxSources
 	CDVD/Linux/IOCtlSrc.cpp
 	)
 
-set(pcsx2OSXSources
-	CDVD/Darwin/DriveUtility.cpp
-	CDVD/Darwin/IOCtlSrc.cpp
-	)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	set(pcsx2OSXSources "")
+else()
+	set(pcsx2OSXSources
+		CDVD/Darwin/DriveUtility.cpp
+		CDVD/Darwin/IOCtlSrc.cpp
+		)
+endif()
 
 set(pcsx2FreeBSDSources
 	CDVD/Darwin/DriveUtility.cpp
@@ -1059,8 +1075,34 @@ set(pcsx2arm64Sources
 	arm64/Vif_Dynarec.cpp
 	arm64/Vif_UnpackNEON.cpp
 	arm64/VixlHelpers.cpp
-#	arm64/RecStubs.cpp
+	arm64/RecStubs.cpp
 	)
+
+set(pcsx2arm64RecSources
+	x86/BaseblockEx.cpp
+	x86/iCOP0.cpp
+	x86/iCore.cpp
+	x86/iFPU.cpp
+	x86/iFPUd.cpp
+	x86/iMMI.cpp
+	x86/iR3000A.cpp
+	x86/iR3000Atables.cpp
+	x86/iR5900Analysis.cpp
+	x86/iR5900Misc.cpp
+	x86/ix86-32/iCore.cpp
+	x86/ix86-32/iR5900.cpp
+	x86/ix86-32/iR5900Arit.cpp
+	x86/ix86-32/iR5900AritImm.cpp
+	x86/ix86-32/iR5900Branch.cpp
+	x86/ix86-32/iR5900Jump.cpp
+	x86/ix86-32/iR5900LoadStore.cpp
+	x86/ix86-32/iR5900Move.cpp
+	x86/ix86-32/iR5900MultDiv.cpp
+	x86/ix86-32/iR5900Shift.cpp
+	x86/ix86-32/iR5900Templates.cpp
+	x86/ix86-32/recVTLB.cpp
+	x86/microVU.cpp
+)
 
 set(pcsx2arm64Headers
 	arm64/VixlHelpers.h
@@ -1078,13 +1120,14 @@ set(pcsx2LTOSources
 	${pcsx2GSHeaders}
 )
 
-#if(_M_X86)
+if(_M_X86)
 	list(APPEND pcsx2LTOSources ${pcsx2x86Sources} ${pcsx2x86Headers})
 #	target_link_libraries(PCSX2_FLAGS INTERFACE zydis)
-#elseif(_M_ARM64)
-	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers})
+elseif(_M_ARM64)
+	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers} ${pcsx2arm64RecSources})
 	target_link_libraries(PCSX2_FLAGS INTERFACE vixl)
-#endif()
+	target_compile_definitions(PCSX2_FLAGS INTERFACE ARMSX2_REAL_REC=1)
+endif()
 
 if(LTO_PCSX2_CORE)
 	add_library(PCSX2_LTO ${pcsx2LTOSources})
@@ -1159,6 +1202,17 @@ if(APPLE OR BSD)
 		${pcsx2LinuxHeaders})
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	set(ZLIB_LINK "z")
+	set(BZIP2_LINK "bz2")
+	set(LIBC_LIBRARIES "m")
+	set(PNG_LINK "")
+else()
+	set(ZLIB_LINK ZLIB::ZLIB)
+	set(BZIP2_LINK "")
+	set(PNG_LINK "")
+endif()
+
 target_link_libraries(PCSX2_FLAGS INTERFACE
 	common
 	imgui
@@ -1172,7 +1226,9 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 	simpleini
 	freesurround
 	SDL3::SDL3
-	ZLIB::ZLIB
+	${ZLIB_LINK}
+	${PNG_LINK}
+	${BZIP2_LINK}
 	LZ4::LZ4
 	SoundTouch::SoundTouch
 #	PNG::PNG
@@ -1233,9 +1289,11 @@ elseif(ANDROID)
 		${log-lib}
 	)
 else()
-	target_link_libraries(PCSX2_FLAGS INTERFACE
-		PCAP::PCAP
-	)
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		target_link_libraries(PCSX2_FLAGS INTERFACE
+			PCAP::PCAP
+		)
+	endif()
 endif()
 
 # additonal include directories
@@ -1300,15 +1358,27 @@ force_include_last(PCSX2_FLAGS "/(usr|local)/include/?$")
 endif()
 
 if (APPLE)
-	find_library(APPKIT_LIBRARY AppKit)
-	find_library(IOKIT_LIBRARY IOKit)
-	find_library(METAL_LIBRARY Metal)
-	find_library(QUARTZCORE_LIBRARY QuartzCore)
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		find_library(APPKIT_LIBRARY AppKit)
+		find_library(IOKIT_LIBRARY IOKit)
+		target_link_libraries(PCSX2_FLAGS INTERFACE
+			${APPKIT_LIBRARY}
+			${IOKIT_LIBRARY}
+		)
+	else()
+		target_link_libraries(PCSX2_FLAGS INTERFACE
+			"-framework UIKit"
+			"-framework GameController"
+			"-framework CoreHaptics"
+			"-framework AudioToolbox"
+			"-framework AVFoundation"
+			"-framework CoreAudio"
+			"-framework CoreMedia"
+		)
+	endif()
 	target_link_libraries(PCSX2_FLAGS INTERFACE
-		${APPKIT_LIBRARY}
-		${IOKIT_LIBRARY}
-		${METAL_LIBRARY}
-		${QUARTZCORE_LIBRARY}
+		"-framework Metal"
+		"-framework QuartzCore"
 	)
 endif()
 

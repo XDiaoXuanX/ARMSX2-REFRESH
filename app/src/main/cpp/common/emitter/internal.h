@@ -4,6 +4,8 @@
 #pragma once
 
 #include "common/emitter/x86types.h"
+
+#if !(defined(__ANDROID__) || defined(_M_ARM64))
 #include "common/emitter/instructions.h"
 
 namespace x86Emitter
@@ -172,3 +174,5 @@ namespace x86Emitter
 		EmitSibMagic(param1, param3);
 	}
 } // namespace x86Emitter
+
+#endif

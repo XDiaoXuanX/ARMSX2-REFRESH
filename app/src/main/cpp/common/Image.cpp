@@ -9,8 +9,16 @@
 #include "StringUtil.h"
 
 #include <common/FastJmp.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#ifndef TARGET_OS_IPHONE
+#define TARGET_OS_IPHONE 0
+#endif
+#if !TARGET_OS_IPHONE
 #include <jpeglib.h>
 #include <png.h>
+#endif
 #include <webp/decode.h>
 #include <webp/encode.h>
 
@@ -42,9 +50,11 @@ struct FormatHandler
 };
 
 static constexpr FormatHandler s_format_handlers[] = {
+#if !TARGET_OS_IPHONE
 	{"png", PNGBufferLoader, PNGBufferSaver, PNGFileLoader, PNGFileSaver},
 	{"jpg", JPEGBufferLoader, JPEGBufferSaver, JPEGFileLoader, JPEGFileSaver},
 	{"jpeg", JPEGBufferLoader, JPEGBufferSaver, JPEGFileLoader, JPEGFileSaver},
+#endif
 	{"webp", WebPBufferLoader, WebPBufferSaver, WebPFileLoader, WebPFileSaver},
 };
 
@@ -183,6 +193,7 @@ std::optional<std::vector<u8>> RGBA8Image::SaveToBuffer(const char* filename, u8
 	return ret;
 }
 
+#if !TARGET_OS_IPHONE
 static bool PNGCommonLoader(RGBA8Image* image, png_structp png_ptr, png_infop info_ptr, std::vector<u32>& new_data,
 	std::vector<png_bytep>& row_pointers)
 {
@@ -378,7 +389,14 @@ bool PNGBufferSaver(const RGBA8Image& image, std::vector<u8>* buffer, u8 quality
 	PNGSaveCommon(image, png_ptr, info_ptr, quality);
 	return true;
 }
+#else
+bool PNGFileLoader(RGBA8Image* image, const char* filename, std::FILE* fp) { return false; }
+bool PNGBufferLoader(RGBA8Image* image, const void* buffer, size_t buffer_size) { return false; }
+bool PNGFileSaver(const RGBA8Image& image, const char* filename, std::FILE* fp, u8 quality) { return false; }
+bool PNGBufferSaver(const RGBA8Image& image, std::vector<u8>* buffer, u8 quality) { return false; }
+#endif
 
+#if !TARGET_OS_IPHONE
 namespace
 {
 	struct JPEGErrorHandler
@@ -679,6 +697,12 @@ bool JPEGFileSaver(const RGBA8Image& image, const char* filename, std::FILE* fp,
 	return (WrapJPEGCompress(image, quality, [&cb](jpeg_compress_struct& info) { info.dest = &cb.mgr; }) &&
 			!cb.write_error);
 }
+#else
+bool JPEGBufferLoader(RGBA8Image* image, const void* buffer, size_t buffer_size) { return false; }
+bool JPEGFileLoader(RGBA8Image* image, const char* filename, std::FILE* fp) { return false; }
+bool JPEGBufferSaver(const RGBA8Image& image, std::vector<u8>* buffer, u8 quality) { return false; }
+bool JPEGFileSaver(const RGBA8Image& image, const char* filename, std::FILE* fp, u8 quality) { return false; }
+#endif
 
 bool WebPBufferLoader(RGBA8Image* image, const void* buffer, size_t buffer_size)
 {

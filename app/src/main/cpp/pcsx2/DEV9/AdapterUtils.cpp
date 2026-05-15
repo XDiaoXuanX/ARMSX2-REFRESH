@@ -21,7 +21,8 @@
 #include <sys/ioctl.h>
 #include <string.h>
 
-#if defined(__FreeBSD__) || (__APPLE__)
+#include <TargetConditionals.h>
+#if (defined(__FreeBSD__) || (__APPLE__)) && !TARGET_OS_IPHONE
 #include <sys/types.h>
 #include <net/if_dl.h>
 #include <sys/param.h>
@@ -292,7 +293,12 @@ std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter) {
             macAddr.bytes[i] = static_cast<uint8_t>(values[i]);
     }
 
-    return macAddr;
+	return macAddr;
+}
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter)
+{
+	return std::nullopt;
 }
 #else
 std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter)
@@ -475,7 +481,7 @@ std::vector<IP_Address> AdapterUtils::GetGateways(const Adapter* adapter)
 	}
 	return collection;
 }
-#elif defined(__FreeBSD__) || defined(__APPLE__)
+#elif (defined(__FreeBSD__) || defined(__APPLE__)) && !TARGET_OS_IPHONE
 std::vector<IP_Address> AdapterUtils::GetGateways(const Adapter* adapter)
 {
 	if (adapter == nullptr)
@@ -557,7 +563,7 @@ std::vector<IP_Address> AdapterUtils::GetGateways(const Adapter* adapter)
 	return collection;
 }
 #else
-std::vector<IP_Address> AdapterUtils::GetGateways(Adapter* adapter)
+std::vector<IP_Address> AdapterUtils::GetGateways(const Adapter* adapter)
 {
 	Console.Error("DEV9: Unsupported OS, can't find Gateway");
 	return {};

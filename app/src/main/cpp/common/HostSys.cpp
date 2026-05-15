@@ -5,6 +5,10 @@
 #include "Console.h"
 #include "VectorIntrin.h"
 
+namespace HostSys {
+    thread_local JitRuntimeContext g_JitContext = {0, 0};
+}
+
 static u32 PAUSE_TIME = 0;
 
 static void MultiPause()

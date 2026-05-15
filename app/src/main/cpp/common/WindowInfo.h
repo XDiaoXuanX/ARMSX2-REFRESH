@@ -16,7 +16,8 @@ struct WindowInfo
 		X11,
 		Wayland,
 		MacOS,
-        Android
+		Android,
+		iOS
 	};
 
 	/// The type of the surface. Surfaceless indicates it will not be displayed on screen at all.
