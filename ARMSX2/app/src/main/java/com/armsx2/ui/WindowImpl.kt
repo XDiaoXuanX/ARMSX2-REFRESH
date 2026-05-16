@@ -80,6 +80,10 @@ object WindowImpl {
                             }
                         }
                     }
+                    // Touch controls layer — sits between the game surface
+                    // and the pause/library overlays. Self-gates on
+                    // eState + visibility latch, so safe to always invoke.
+                    com.armsx2.ui.touch.TouchControlsOverlay()
                     // In-game overlay paints last so it's on top of both
                     // the surface and any library showing underneath.
                     if (overlayVisible.value) {

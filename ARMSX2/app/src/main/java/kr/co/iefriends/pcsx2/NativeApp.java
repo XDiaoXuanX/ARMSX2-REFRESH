@@ -202,6 +202,17 @@ public class NativeApp {
 	public static native String getGamePathSlot(int slot);
 	public static native byte[] getImageSlot(int slot);
 
+	// Autosave-on-exit slot. Backed by a dedicated `.autosave.p2s` filename
+	// in the savestate folder (see VMManager::SAVESTATE_SLOT_AUTOSAVE) so the
+	// numbered slots 0-9 stay user-controlled. saveAutosaveState is called
+	// from the in-game "Save State And Exit" menu; hasAutosaveState gates
+	// the load picker's autosave tile.
+	public static native boolean saveAutosaveState();
+	public static native boolean loadAutosaveState();
+	public static native boolean hasAutosaveState();
+	public static native byte[] getAutosaveImage();
+	public static native String getAutosaveGamePath();
+
 	public static void vmSetPaused(boolean paused) {
 		if (paused)
 			Main.eState.setValue(EmuState.PAUSED);

@@ -540,6 +540,37 @@ std::string Achievements::GetAchievementsAsJSON()
 						}
 						out += ",\"measuredProgress\":";
 						append_json_string(out, ach->measured_progress);
+						out += ",\"measuredPercent\":";
+						{
+							char buf[32];
+							std::snprintf(buf, sizeof(buf), "%.1f", ach->measured_percent);
+							out += buf;
+						}
+						// Type lets the UI tag MISSABLE / PROGRESSION / WIN
+						// achievements (STANDARD = 0 → no tag). Unlocked is
+						// the SOFTCORE/HARDCORE bitmask — distinguishes how
+						// the user earned it for the HC indicator. unlockTime
+						// is unix-seconds (0 if locked) so the panel can
+						// render a relative timestamp.
+						out += ",\"type\":";
+						out += std::to_string(static_cast<int>(ach->type));
+						out += ",\"unlockedMask\":";
+						out += std::to_string(static_cast<int>(ach->unlocked));
+						out += ",\"unlockTime\":";
+						out += std::to_string(static_cast<long long>(ach->unlock_time));
+						// Badge image URL for the achievement's current state
+						// (unlocked variant vs `_lock` greyscale). Java side
+						// fetches via Coil into the persistent cover_cache —
+						// RA badge URLs are immutable per badge_name so they
+						// cache forever. Empty string on failure → panel
+						// falls back to the glyph placeholder.
+						{
+							char url_buf[256];
+							const int rc = rc_client_achievement_get_image_url(
+								ach, ach->state, url_buf, std::size(url_buf));
+							out += ",\"iconUrl\":";
+							append_json_string(out, rc == RC_OK ? url_buf : "");
+						}
 						out += '}';
 					}
 				}

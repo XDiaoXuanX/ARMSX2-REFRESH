@@ -1015,6 +1015,93 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getImageSlot(JNIEnv *env, jclass clazz, jin
     return retArr;
 }
 
+// =====================  Autosave-on-exit slot  =====================
+// Backed by VMManager::SAVESTATE_SLOT_AUTOSAVE (s32 sentinel = -2),
+// stored as `{serial} (CRC).autosave.p2s`. Lets "Save State And Exit"
+// avoid clobbering user slot 0; the load picker surfaces the autosave
+// tile only when hasAutosaveState() returns true.
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_saveAutosaveState(JNIEnv *env, jclass clazz) {
+    if (!VMManager::HasValidVM())
+        return false;
+    if (VMManager::GetDiscCRC() == 0)
+        return false;
+    VMManager::SaveStateToSlot(VMManager::SAVESTATE_SLOT_AUTOSAVE, /*zip_on_thread=*/false,
+        [](const std::string&) {});
+    return true;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_loadAutosaveState(JNIEnv *env, jclass clazz) {
+    if (!VMManager::HasValidVM())
+        return false;
+    const u32 _crc = VMManager::GetDiscCRC();
+    if (_crc == 0)
+        return false;
+    if (!VMManager::HasSaveStateInSlot(VMManager::GetDiscSerial().c_str(), _crc,
+                                       VMManager::SAVESTATE_SLOT_AUTOSAVE))
+        return false;
+    return VMManager::LoadStateFromSlot(VMManager::SAVESTATE_SLOT_AUTOSAVE);
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_hasAutosaveState(JNIEnv *env, jclass clazz) {
+    if (!VMManager::HasValidVM())
+        return false;
+    const u32 _crc = VMManager::GetDiscCRC();
+    if (_crc == 0)
+        return false;
+    return VMManager::HasSaveStateInSlot(VMManager::GetDiscSerial().c_str(), _crc,
+                                         VMManager::SAVESTATE_SLOT_AUTOSAVE);
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getAutosaveGamePath(JNIEnv *env, jclass clazz) {
+    std::string _filename = VMManager::GetSaveStateFileName(VMManager::GetDiscSerial().c_str(),
+                                                            VMManager::GetDiscCRC(),
+                                                            VMManager::SAVESTATE_SLOT_AUTOSAVE);
+    if (!_filename.empty())
+        return env->NewStringUTF(_filename.c_str());
+    return nullptr;
+}
+
+extern "C"
+JNIEXPORT jbyteArray JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getAutosaveImage(JNIEnv *env, jclass clazz) {
+    jbyteArray retArr = nullptr;
+
+    std::string _filename = VMManager::GetSaveStateFileName(VMManager::GetDiscSerial().c_str(),
+                                                            VMManager::GetDiscCRC(),
+                                                            VMManager::SAVESTATE_SLOT_AUTOSAVE);
+    if (!_filename.empty())
+    {
+        zip_error_t ze = {};
+        auto zf = zip_open_managed(_filename.c_str(), ZIP_RDONLY, &ze);
+        if (zf) {
+            auto zff = zip_fopen_managed(zf.get(), "Screenshot.png", 0);
+            if (zff) {
+                std::optional<std::vector<u8>> optdata(ReadBinaryFileInZip(zff.get()));
+                if (optdata.has_value()) {
+                    std::vector<u8> vec = std::move(optdata.value());
+                    auto length = static_cast<jsize>(vec.size());
+                    retArr = env->NewByteArray(length);
+                    if (retArr != nullptr) {
+                        env->SetByteArrayRegion(retArr, 0, length,
+                                                reinterpret_cast<const jbyte *>(vec.data()));
+                    }
+                }
+            }
+        }
+    }
+
+    return retArr;
+}
+
 
 void Host::CommitBaseSettingChanges()
 {

@@ -1883,7 +1883,9 @@ std::string VMManager::GetSaveStateFileName(const char* game_serial, u32 game_cr
 	std::string filename;
 	if (std::strlen(game_serial) > 0)
 	{
-		if (slot < 0)
+		if (slot == SAVESTATE_SLOT_AUTOSAVE)
+			filename = fmt::format("{} ({:08X}).autosave.p2s", game_serial, game_crc);
+		else if (slot < 0)
 			filename = fmt::format("{} ({:08X}).resume.p2s", game_serial, game_crc);
 		else if (backup)
 			filename = fmt::format("{} ({:08X}).{:02d}.p2s.backup", game_serial, game_crc, slot);

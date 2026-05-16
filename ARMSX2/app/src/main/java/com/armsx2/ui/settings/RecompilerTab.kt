@@ -1,7 +1,9 @@
 package com.armsx2.ui.settings
 
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.verticalScroll
@@ -50,24 +52,33 @@ fun RecompilerTab(state: MutableState<Settings>) {
             fontSize = 11.sp,
             modifier = Modifier.padding(bottom = 8.dp),
         )
-        ToggleRow("EE Recompiler (R5900)", s.recEE) {
-            apply(s.copy(recEE = it))
-        }
-        SettingsDivider()
-        ToggleRow("IOP Recompiler (R3000)", s.recIOP) {
-            apply(s.copy(recIOP = it))
-        }
-        SettingsDivider()
-        ToggleRow("VU0 Recompiler", s.recVU0) {
-            apply(s.copy(recVU0 = it))
-        }
-        SettingsDivider()
-        ToggleRow("VU1 Recompiler", s.recVU1) {
-            apply(s.copy(recVU1 = it))
-        }
-        SettingsDivider()
-        ToggleRow("Fastmem (page-fault backpatch)", s.enableFastmem) {
-            apply(s.copy(enableFastmem = it))
+        // 4-wide toggle grid, matching the Playing-Now + Performance look.
+        // Row 1 groups the four CPU/COP recompilers; Row 2 holds Fastmem
+        // with three trailing spacers so cell widths stay uniform across
+        // both rows.
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            BubbleGridRow {
+                ToggleBubble("EE (R5900)", s.recEE, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(recEE = it))
+                }
+                ToggleBubble("IOP (R3000)", s.recIOP, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(recIOP = it))
+                }
+                ToggleBubble("VU0", s.recVU0, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(recVU0 = it))
+                }
+                ToggleBubble("VU1", s.recVU1, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(recVU1 = it))
+                }
+            }
+            BubbleGridRow {
+                ToggleBubble("Fastmem", s.enableFastmem, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableFastmem = it))
+                }
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.weight(1f))
+            }
         }
     }
 }

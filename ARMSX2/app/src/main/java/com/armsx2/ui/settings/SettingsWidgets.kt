@@ -2,6 +2,7 @@ package com.armsx2.ui.settings
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -9,7 +10,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,6 +31,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.armsx2.ui.Colors
@@ -91,6 +96,70 @@ fun ToggleRow(
             )
         }
     }
+}
+
+/** Compact On/Off bubble — same visual language as the Playing-Now grid
+ *  in [InGameOverlay]. Label on top (1–2 lines), state line ("On"/"Off")
+ *  below. When the toggle is active the surface uses the PS2-blue accent
+ *  treatment; inactive matches the neutral bubble surface. Caller is
+ *  responsible for laying these out in a [BubbleGridRow]. */
+@Composable
+fun ToggleBubble(
+    label: String,
+    value: Boolean,
+    modifier: Modifier = Modifier,
+    onChange: (Boolean) -> Unit,
+) {
+    val bg: Color
+    val border: Color
+    if (value) {
+        bg = Color(0xFF222F40)
+        border = Colors.pasx2_blue.copy(alpha = 0.50f)
+    } else {
+        bg = Color(0xFF1F2123)
+        border = Color.White.copy(alpha = 0.10f)
+    }
+    Column(
+        modifier = modifier
+            .aspectRatio(1.35f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            .border(1.dp, border, RoundedCornerShape(10.dp))
+            .clickable { onChange(!value) }
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            label,
+            color = Color.White,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            if (value) "On" else "Off",
+            color = if (value) Colors.pasx2_blue else Color.White.copy(alpha = 0.6f),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+        )
+    }
+}
+
+/** Even-spaced four-cell row for [ToggleBubble] grids. Mirrors the
+ *  Playing-Now layout so the two surfaces feel like the same component
+ *  family. Use [Modifier.weight] inside `content` on each child. */
+@Composable
+fun BubbleGridRow(content: @Composable RowScope.() -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        content = content,
+    )
 }
 
 /** Integer slider row — label + current value on top line, custom slim

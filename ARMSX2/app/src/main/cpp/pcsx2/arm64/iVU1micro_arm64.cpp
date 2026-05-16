@@ -1388,6 +1388,14 @@ extern bool g_vu1BatchFromPrev;
 // before dispatching emitVU1Upper from Pass 1's `abs_src_known_non_neg`.
 // Consumed by emitAbsFmac to swap Fabs for a direct vfCacheLoadInto into v5.
 extern bool g_vu1AbsSrcKnownNonNeg;
+// vf_read_after_write deferred writeback. CompileBlock sets the flag +
+// resets idx to -1 before the upper emit; the FMAC writeback emit spills
+// v5 to the stash and records idx/xyzw. CompileBlock clears the flag
+// before lower emits, then after lower commits via vfCacheStore.
+extern bool g_vu1DeferVfWriteback;
+extern int  g_vu1DeferredVfIdx;
+extern u8   g_vu1DeferredXyzw;
+extern u8   g_vu1DeferredVfStash[16];
 
 // ============================================================================
 //  Block cache
@@ -3306,6 +3314,34 @@ void emitVu1Call(const void* fn)
 	armEmitCall(fn);
 }
 
+// Specialized BL for helpers that are provably NEON-free leaf functions —
+// i.e., the compiler emitted only x/w GPR instructions, no v/q/d/s ops,
+// no nested BL, no callee-saved spills. For these the BL preserves:
+//   - v17..v24 (VF cache slots) — vfCacheFlushAndInvalidate skipped.
+//   - v1 (broadcast cache reg)  — vu1BroadcastCacheReset skipped.
+//
+// The VI cache tracker IS still invalidated: AAPCS64 caller-saves w9..w15
+// (the VI cache GPR pool), and the helper still clobbers them as scratch
+// registers regardless of NEON usage.
+//
+// Verified-NEON-free callees (objdump 2026-05-16, Debug build, clang 18):
+//   - vu1_TestPipes_VU1     (19.49% of total CPU on GoW2 in-game)
+//   - vu1_TestFMACStallReg  (4.26%)
+//   - vu1_TestFMACStallReg2 (2.50%)
+// All three are leaf, scalar-only, with no FP/NEON instructions.
+//
+// If a future change to any of these helpers introduces NEON usage (e.g.,
+// memcpy of a 16-byte struct, vectorized ring scan, FP arithmetic), THIS
+// PATH MUST BE REVERTED for that callee or VF cache slot values will be
+// silently corrupted. Re-run the objdump filter to verify after any edit:
+//   llvm-objdump -d --disassemble-symbols=<mangled> iVU1micro_arm64.cpp.o
+// and grep for v/q/d/s register operands.
+void emitVu1CallNeonFree(const void* fn)
+{
+	viCacheInvalidateAll();
+	armEmitCall(fn);
+}
+
 // ISTUB helper — emits the full pinned-register flush / interpreter BL /
 // reload dance for ops that routed to the C interpreter via
 // REC_VU1_UPPER_INTERP / REC_VU1_LOWER_INTERP. Keeps the hybrid harness
@@ -3423,7 +3459,8 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 		armAsm->Mov(w5, regs.VFread1);
 		armAsm->Mov(w6, regs.VFr1xyzw);
 		armAsm->Mov(x0, VU1_BASE_REG);
-		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg2));
+		// vu1_TestFMACStallReg2 is NEON-free + writes no memory we cache.
+		emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestFMACStallReg2));
 		armAsm->Mov(VU1_CYCLE_REG, x0);
 	}
 	else
@@ -3435,7 +3472,8 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 			armAsm->Mov(w3, regs.VFread0);
 			armAsm->Mov(w4, regs.VFr0xyzw);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
+			// vu1_TestFMACStallReg is NEON-free + read-only.
+			emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
 			armAsm->Mov(VU1_CYCLE_REG, x0);
 		}
 		if (active1)
@@ -3446,7 +3484,7 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 			armAsm->Mov(w3, regs.VFread1);
 			armAsm->Mov(w4, regs.VFr1xyzw);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
+			emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
 			armAsm->Mov(VU1_CYCLE_REG, x0);
 		}
 	}
@@ -5219,19 +5257,32 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// Guard kept as a static const so the divert can be toggled in one
 		// place if a regression turns up.
 		//
-		// 2026-04-25: REVERTED to false after GoW2 menu showed FMAC pipeline
-		// divergence (rapidly color-changing shoulder armor, vertex meeting
-		// points slightly off — sculpted-looking face). Symptom is the
-		// classic "vertex transform results differ frame-to-frame" sign of
-		// read-after-write divergence affecting transform math. Native
-		// upper-then-lower had lower read upper's just-written vfX lanes
-		// instead of the original — matches old port-in-place behavior in
-		// theory but the games clearly notice. Phase A's XYZW-aware
-		// refinement stays (it's behavior-preserving for true conflicts).
-		static constexpr bool kAllowReadAfterWriteNative = false;
+		// 2026-04-25: was reverted to false after GoW2 menu showed FMAC
+		// pipeline divergence with naive upper-then-lower (lower read
+		// upper's just-written vfX). Re-enabled with the deferred-
+		// writeback path below: upper's FMAC computes v5 + updates pinned
+		// flag regs but SPILLS v5 to g_vu1DeferredVfStash instead of
+		// committing to VF[X]; lower then emits and reads original VF[X]
+		// from memory/broadcast-cache; after lower we reload from stash
+		// and call vfCacheStore — matches interp's save/restore semantics.
+		// Eliminates the BL-into-vu1Exec roundtrip for transform-heavy
+		// pairs (MUL/MADD upper writes vfX, SQ/MTIR/MR32 lower reads vfX).
+		static constexpr bool kAllowReadAfterWriteNative = true;
 		const bool vf_hazard = ir_op.vf_write_collision ||
 			(!kAllowReadAfterWriteNative && ir_op.vf_read_after_write);
 		const bool vi_hazard = ir_op.clip_write_collision || ir_op.clip_read_after_write;
+		// Pair is eligible for the deferred-writeback fast path iff the only
+		// hazard flag set is vf_read_after_write. write_collision still falls
+		// back (lower must NOT write VF[X] — would clobber upper's deferred
+		// result), and CLIP hazards have separate (rarer) semantics.
+		// ACC writers and dead writes don't need deferral (no VF[X] write to
+		// commit) — those follow the naive native path and the writeback emit
+		// itself skips the stash via the ACC/dead-VF early returns.
+		const bool defer_vf_writeback = kAllowReadAfterWriteNative
+			&& ir_op.vf_read_after_write
+			&& !ir_op.vf_write_collision
+			&& !vi_hazard
+			&& !ir_op.isKick;
 
 		if (vf_hazard || vi_hazard)
 		{
@@ -5543,7 +5594,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
 			armAsm->Mov(x2, VU1_CYCLE_REG);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
+			// vu1_TestPipes_VU1 is NEON-free (see emitVu1CallNeonFree
+			// doc). Skipping vfCacheFlushAndInvalidate alone saves 3-6
+			// Strs per call — and this BL fires every pair on transform-
+			// heavy blocks. Was 19.49% of total CPU on GoW2 in-game.
+			emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
 			armAsm->Mov(VU1_FMACCOUNT_REG, w0);
 
 			armAsm->Bind(&skip_helper);
@@ -5626,9 +5681,34 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// FMAC opt #4: ABS-of-known-positive gate.
 		g_vu1AbsSrcKnownNonNeg = ir_op.abs_src_known_non_neg;
 
+		// vf_read_after_write deferred writeback gate. When set, the FMAC
+		// writeback emit spills v5 to g_vu1DeferredVfStash instead of
+		// committing to VF[X] — keeps lower's read of VF[X] pointed at the
+		// original memory value. Cleared immediately after the upper emit
+		// so subsequent emits (lower, step 9 FMAC pipe add, etc.) don't
+		// accidentally trigger the stash path.
+		//
+		// Under batching (opt #17) the writeback already routes through
+		// d10 — disable batching for this pair so the defer path wins.
+		// vf_read_after_write hazards are rare and batching detection
+		// (adjacent X-then-Y to same VF) is unlikely to coexist with a
+		// VF-read-by-lower in the same pair anyway.
+		if (defer_vf_writeback)
+		{
+			g_vu1BatchWithNext      = false;
+			g_vu1BatchFromPrev      = false;
+			g_vu1DeferVfWriteback   = true;
+			g_vu1DeferredVfIdx      = -1;
+		}
+
 		VU1_PERF_BEGIN(_pp_s7);
 		emitVU1Upper(upper); // switch dispatch — emits native ARM64 for this op
 		VU1_PERF_END(_pp_s7, "VU1_U_%02x_0x%04x", upper & 0x3f, pc);
+
+		// Clear defer flag — only the upper writeback above should consult
+		// it. Lower's emit (next) and step 9's FMAC-pipe-add must use the
+		// normal cache-store paths.
+		g_vu1DeferVfWriteback = false;
 
 		// 8. Lower instruction handling.
 		// NOP the lower when this pair is a branch AND the previous pair
@@ -5725,6 +5805,28 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
 				emitReloadFmaccountReg(fmaccount_off);
 			}
+		}
+
+		// vf_read_after_write deferred-writeback commit. Upper spilled v5
+		// to g_vu1DeferredVfStash (idx + xyzw captured by the writeback
+		// emit); lower above ran with the original VF[X] in memory. Now
+		// reload and call vfCacheStore to commit upper's result — same
+		// final-state as the eager writeback path, just sequenced so lower
+		// sees pre-upper VF[X].
+		//
+		// Idx <= 0 means the upper writeback emit hit an early return
+		// (skip_dst_write for VF[0] / to_acc redirect / dead-VF-write
+		// elision) — nothing to commit. The vf_read_after_write hazard
+		// from Pass 1 implies upper.VFwrite != 0, but a covering forward
+		// write can still mark this pair's upper as dead.
+		if (defer_vf_writeback && g_vu1DeferredVfIdx > 0)
+		{
+			armMoveAddressToReg(x4, &g_vu1DeferredVfStash[0]);
+			armAsm->Ldr(v5.Q(), MemOperand(x4));
+			// vfCacheStore already calls vu1BroadcastCacheNoteVfWritten —
+			// no separate invalidate needed.
+			vfCacheStore(g_vu1DeferredVfIdx, v5, g_vu1DeferredXyzw);
+			g_vu1DeferredVfIdx = -1;
 		}
 
 		// 9-11. FMAC clear + AddUpperStalls + AddLowerStalls fused.

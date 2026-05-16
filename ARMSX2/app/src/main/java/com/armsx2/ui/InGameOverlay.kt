@@ -6,14 +6,13 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -49,6 +48,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
@@ -173,7 +174,14 @@ object InGameOverlay {
     private fun closeAndResume() {
         WindowImpl.overlayVisible.value = false
         state.value = State.Root
-        if (pausedByOverlay && Main.eState.value == EmuState.PAUSED) Main.resume()
+        // Always resume if the VM is paused — close-paths that should
+        // preserve a paused VM (Change Disc picker, library, edit mode)
+        // go through closeKeepingState instead. The earlier
+        // pausedByOverlay gate stale-locked the VM after the user
+        // bounced through closeKeepingState (e.g. entered edit mode then
+        // re-opened pause): pausedByOverlay was cleared, so the next
+        // Resume tap did nothing.
+        if (Main.eState.value == EmuState.PAUSED) Main.resume()
         pausedByOverlay = false
     }
 
@@ -291,12 +299,17 @@ object InGameOverlay {
                 // verticalScroll only barely engages. Give the login state
                 // a taller box.
                 val maxFrac = if (state.value is State.AchievementsLogin) 0.92f else 0.75f
+                // Slot pickers (Save/Load) span the full screen width so
+                // the 2-row horizontal grid actually reaches across. Other
+                // states (confirms, login) stay at the 360dp left column.
+                val isSlotPicker = state.value is State.SaveStateSlots
+                    || state.value is State.LoadStateSlots
                 Box(
                     Modifier
                         .align(Alignment.BottomStart)
                         .fillMaxHeight(maxFrac)
-                        .width(360.dp)
-                        .padding(start = 20.dp, bottom = 20.dp, top = 20.dp),
+                        .let { if (isSlotPicker) it.fillMaxWidth() else it.width(360.dp) }
+                        .padding(start = 20.dp, end = if (isSlotPicker) 20.dp else 0.dp, bottom = 20.dp, top = 20.dp),
                     contentAlignment = Alignment.BottomStart,
                 ) {
                     when (state.value) {
@@ -549,94 +562,255 @@ object InGameOverlay {
         }
     }
 
-    /** Playing Now — the original pause-menu actions, rendered as a
-     *  fixed Column of compact rows + fading dividers. No scroll needed
-     *  for these 10 items. Icons mirror PCSX2 ImGui FullscreenUI's
-     *  Font Awesome glyphs for each pause-menu action. */
+    /** Playing Now — pause-menu actions laid out as a 4-wide bubble grid.
+     *  Three rows of four cells; the last row trails with two empty slots
+     *  so cell widths stay constant across all rows. Fits without
+     *  scrolling on phone landscape. Primary (Resume) and Danger (Close)
+     *  accents land the eye on the most common entry and the destructive
+     *  exit. Toggleable bubbles (Renderer, Frame Limit) carry their
+     *  current value on a second line. */
     @Composable
     private fun PlayingNowTab() {
-        val scroll = rememberScrollState()
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(scroll),
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            MenuRow("Resume Game", icon = LineAwesomeIcons.PlaySolid) { closeAndResume() }
-            MenuDivider()
-            MenuRow(
-                "Save State",
-                icon = LineAwesomeIcons.SaveSolid,
-                dim = hardcoreOn.value,
-            ) {
-                state.value = if (hardcoreOn.value)
-                    State.HardcoreSaveStateBlocked else State.SaveStateSlots
-            }
-            MenuDivider()
-            MenuRow(
-                "Load State",
-                icon = LineAwesomeIcons.FolderOpenSolid,
-                dim = hardcoreOn.value,
-            ) {
-                state.value = if (hardcoreOn.value)
-                    State.HardcoreSaveStateBlocked else State.LoadStateSlots
-            }
-            MenuDivider()
-            MenuRow("Change Disc", icon = LineAwesomeIcons.CompactDiscSolid) {
-                val intent = Intent(Intent.ACTION_GET_CONTENT)
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
-                intent.setType("*/*")
-                Main.instance?.openFileAction?.launch(intent)
-                closeKeepingState()
-            }
-            MenuDivider()
-            MenuRow("Open Game Library", icon = LineAwesomeIcons.ThLargeSolid) {
-                if (Main.eState.value == EmuState.PAUSED) Main.resume()
-                WindowImpl.showLibrary.value = true
-                closeKeepingState()
-            }
-            MenuDivider()
-            val rendererLabel = when (currentRenderer.value) {
-                RenderMode.OPENGL -> "Renderer: OpenGL HW"
-                RenderMode.VULKAN_SW -> "Renderer: Software"
-            }
-            MenuRow(rendererLabel, icon = LineAwesomeIcons.CubeSolid) {
-                when (currentRenderer.value) {
-                    RenderMode.OPENGL -> {
-                        currentRenderer.value = RenderMode.VULKAN_SW
-                        Main.renderSoftware()
-                    }
-                    RenderMode.VULKAN_SW -> {
-                        currentRenderer.value = RenderMode.OPENGL
-                        Main.renderOpenGL()
-                    }
+            // Row 1: primary + save/load + change disc.
+            BubbleRow {
+                BubbleButton(
+                    "Resume",
+                    LineAwesomeIcons.PlaySolid,
+                    accent = BubbleAccent.Primary,
+                    modifier = Modifier.weight(1f),
+                ) { closeAndResume() }
+                BubbleButton(
+                    "Save State",
+                    LineAwesomeIcons.SaveSolid,
+                    dim = hardcoreOn.value,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    state.value = if (hardcoreOn.value)
+                        State.HardcoreSaveStateBlocked else State.SaveStateSlots
+                }
+                BubbleButton(
+                    "Load State",
+                    LineAwesomeIcons.FolderOpenSolid,
+                    dim = hardcoreOn.value,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    state.value = if (hardcoreOn.value)
+                        State.HardcoreSaveStateBlocked else State.LoadStateSlots
+                }
+                BubbleButton(
+                    "Change Disc",
+                    LineAwesomeIcons.CompactDiscSolid,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    val intent = Intent(Intent.ACTION_GET_CONTENT)
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
+                    intent.setType("*/*")
+                    Main.instance?.openFileAction?.launch(intent)
+                    closeKeepingState()
                 }
             }
-            MenuDivider()
-            MenuRow(
-                if (frameLimitOn.value) "Frame Limit: On" else "Frame Limit: Off",
-                icon = LineAwesomeIcons.TachometerAltSolid,
-            ) {
-                frameLimitOn.value = !frameLimitOn.value
-                // Update both the BASE layer (so a future VM init / settings
-                // reload sees the new value) and call speedhackLimitermode
-                // for immediate effect on the running VM.
-                NativeApp.setSetting(
-                    "EmuCore/GS", "FrameLimitEnable", "bool",
-                    frameLimitOn.value.toString()
-                )
-                NativeApp.speedhackLimitermode(if (frameLimitOn.value) 0 else 3)
+            // Row 2: library + renderer + frame limit + touch layout.
+            BubbleRow {
+                BubbleButton(
+                    "Library",
+                    LineAwesomeIcons.ThLargeSolid,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (Main.eState.value == EmuState.PAUSED) Main.resume()
+                    WindowImpl.showLibrary.value = true
+                    closeKeepingState()
+                }
+                val rendererState = when (currentRenderer.value) {
+                    RenderMode.OPENGL -> "OpenGL HW"
+                    RenderMode.VULKAN_SW -> "Software"
+                }
+                BubbleButton(
+                    "Renderer",
+                    LineAwesomeIcons.CubeSolid,
+                    stateLine = rendererState,
+                    accent = BubbleAccent.Active,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    when (currentRenderer.value) {
+                        RenderMode.OPENGL -> {
+                            currentRenderer.value = RenderMode.VULKAN_SW
+                            Main.renderSoftware()
+                        }
+                        RenderMode.VULKAN_SW -> {
+                            currentRenderer.value = RenderMode.OPENGL
+                            Main.renderOpenGL()
+                        }
+                    }
+                }
+                BubbleButton(
+                    "Frame Limit",
+                    LineAwesomeIcons.TachometerAltSolid,
+                    stateLine = if (frameLimitOn.value) "On" else "Off",
+                    accent = if (frameLimitOn.value)
+                        BubbleAccent.Active else BubbleAccent.Normal,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    frameLimitOn.value = !frameLimitOn.value
+                    // Update both the BASE layer (so a future VM init /
+                    // settings reload sees the new value) and call
+                    // speedhackLimitermode for immediate effect on the
+                    // running VM.
+                    NativeApp.setSetting(
+                        "EmuCore/GS", "FrameLimitEnable", "bool",
+                        frameLimitOn.value.toString()
+                    )
+                    NativeApp.speedhackLimitermode(if (frameLimitOn.value) 0 else 3)
+                }
+                BubbleButton(
+                    "Touch Layout",
+                    LineAwesomeIcons.ThLargeSolid,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    com.armsx2.ui.touch.TouchControls.ensureLoaded()
+                    com.armsx2.ui.touch.TouchControls.editMode.value = true
+                    // Close the pause overlay so the editor owns the
+                    // screen. closeKeepingState leaves the VM paused — the
+                    // user can resume from the Save / Discard chips in
+                    // the editor.
+                    closeKeepingState()
+                }
             }
-            MenuDivider()
-            MenuRow("Reset System", icon = LineAwesomeIcons.RedoAltSolid) {
-                state.value = State.ResetConfirm
-            }
-            MenuDivider()
-            MenuRow("Close Game", icon = LineAwesomeIcons.PowerOffSolid, danger = true) {
-                state.value = State.ExitConfirm
+            // Row 3: reset + close, two empty slots so cells stay the same
+            // width as rows above. Spacers carry the same weight as a
+            // BubbleButton so the danger accent reads at the row edge
+            // rather than stretching to fill.
+            BubbleRow {
+                BubbleButton(
+                    "Reset",
+                    LineAwesomeIcons.RedoAltSolid,
+                    modifier = Modifier.weight(1f),
+                ) { state.value = State.ResetConfirm }
+                BubbleButton(
+                    "Close Game",
+                    LineAwesomeIcons.PowerOffSolid,
+                    accent = BubbleAccent.Danger,
+                    modifier = Modifier.weight(1f),
+                ) { state.value = State.ExitConfirm }
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.weight(1f))
             }
         }
     }
+
+    /** Even-spaced four-cell row, used by [PlayingNowTab] for grid rows. */
+    @Composable
+    private fun BubbleRow(content: @Composable RowScope.() -> Unit) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            content = content,
+        )
+    }
+
+    /** Visual variants for [BubbleButton]. Normal is the default surface;
+     *  Primary tints the bubble with the PS2-blue accent (Resume); Active
+     *  is a softer accent used for toggleable bubbles whose state is
+     *  currently "on"; Danger paints the bubble red for destructive
+     *  actions. */
+    private enum class BubbleAccent { Normal, Primary, Active, Danger }
+
+    /** Square bubble action. Icon centered on top, label below, optional
+     *  state line under the label (e.g. "On" / "Software") so toggleable
+     *  bubbles communicate their current value without separate text. */
+    @Composable
+    private fun BubbleButton(
+        label: String,
+        icon: ImageVector,
+        modifier: Modifier = Modifier,
+        stateLine: String? = null,
+        accent: BubbleAccent = BubbleAccent.Normal,
+        dim: Boolean = false,
+        onClick: () -> Unit,
+    ) {
+        // Per-variant palette. Dim wins over any accent so a Hardcore-mode
+        // Save State row still reads "blocked".
+        val bg: Color
+        val border: Color
+        val fg: Color
+        when {
+            dim -> {
+                bg = Color(0xFF1F1F1F)
+                border = Color(0xFF2E2E2E)
+                fg = Color(0xFF666666)
+            }
+            accent == BubbleAccent.Primary -> {
+                bg = Colors.pasx2_blue.copy(alpha = 0.22f)
+                border = Colors.pasx2_blue.copy(alpha = 0.65f)
+                fg = Color.White
+            }
+            accent == BubbleAccent.Active -> {
+                bg = Color(0xFF222F40)
+                border = Colors.pasx2_blue.copy(alpha = 0.50f)
+                fg = Color.White
+            }
+            accent == BubbleAccent.Danger -> {
+                bg = Color(0xFF2E1818)
+                border = Color(0xFFFF6B6B).copy(alpha = 0.55f)
+                fg = Color(0xFFFF8B8B)
+            }
+            else -> {
+                bg = Color(0xFF1F2123)
+                border = Color.White.copy(alpha = 0.10f)
+                fg = Color.White
+            }
+        }
+
+        Column(
+            modifier = modifier
+                .aspectRatio(1.35f)
+                .clip(RoundedCornerShape(10.dp))
+                .background(bg)
+                .border(1.dp, border, RoundedCornerShape(10.dp))
+                .clickable(enabled = !dim, onClick = onClick)
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Image(
+                imageVector = icon,
+                contentDescription = null,
+                colorFilter = ColorFilter.tint(fg),
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                label,
+                color = fg,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (stateLine != null) {
+                // Active accent → state line in PS2 blue (matches the
+                // ToggleBubble "On" treatment in the Performance grid).
+                // Other variants keep the muted-fg colour so Normal bubbles
+                // don't accidentally read as active.
+                val stateColor = if (accent == BubbleAccent.Active)
+                    Colors.pasx2_blue else fg.copy(alpha = 0.7f)
+                Text(
+                    stateLine,
+                    color = stateColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+
 
     /**
      * Thin horizontal divider with a left-anchored fade — opaque at the
@@ -672,7 +846,10 @@ object InGameOverlay {
                 modifier = Modifier.padding(bottom = 6.dp),
             )
             MenuRow("Save State And Exit") {
-                NativeApp.saveStateToSlot(0)
+                // Dedicated autosave slot — keeps numbered slots 0-9
+                // user-controlled. SaveStatePicker (Load mode) surfaces
+                // this state via the Autosave tile when present.
+                NativeApp.saveAutosaveState()
                 Main.stop()
                 closeKeepingState()
             }

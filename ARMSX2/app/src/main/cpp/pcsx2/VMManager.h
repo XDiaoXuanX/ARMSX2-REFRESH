@@ -155,6 +155,12 @@ namespace VMManager
 	/// Can be forced to load even when there is not an active virtual machine.
 	void ReloadInputBindings(bool force = false);
 
+	/// Sentinel slot value for the autosave-on-exit state. Routes
+	/// GetSaveStateFileName to a dedicated `.autosave.p2s` filename so the
+	/// "Save State And Exit" overlay action doesn't clobber numbered slot 0.
+	/// The load picker surfaces this slot only when the file exists.
+	static constexpr s32 SAVESTATE_SLOT_AUTOSAVE = -2;
+
 	/// Returns the save state filename for the given game serial/crc.
 	std::string GetSaveStateFileName(const char* game_serial, u32 game_crc, s32 slot, bool backup = false);
 

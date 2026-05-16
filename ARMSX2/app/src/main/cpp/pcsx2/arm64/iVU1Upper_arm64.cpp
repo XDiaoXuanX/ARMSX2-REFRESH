@@ -102,6 +102,49 @@ bool g_vu1BatchFromPrev = false;
 // swap Fabs for a direct slot→v5 load (saves 1 Fabs insn).
 bool g_vu1AbsSrcKnownNonNeg = false;
 
+// ============================================================================
+//  Deferred VF writeback for vf_read_after_write hazard pairs.
+//
+//  PS2 VU pairs run upper/lower simultaneously, so when lower reads VF[X] that
+//  upper writes, lower must see the PRE-upper value. The previous BL-into-
+//  vu1Exec fallback handled this via interp's save/restore semantics — costly:
+//  5 flushes + BL + 5 reloads per hazard pair.
+//
+//  This deferred-writeback path keeps everything native: upper computes into
+//  v5 normally and updates the pinned macflag/statusflag/clipflag regs, but
+//  instead of committing v5 to VF[X] cache + memory, it spills v5 to a 16-byte
+//  scratch and records dst_vf + xyzw. Lower then emits — its VF[X] reads see
+//  the original memory value (broadcast cache holds pre-upper too). After
+//  lower, the caller reloads from scratch and calls vfCacheStore to commit.
+//
+//  Mechanism:
+//    - CompileBlock sets g_vu1DeferVfWriteback = true before the upper emit,
+//      and resets g_vu1DeferredVfIdx = -1 (sentinel).
+//    - emitFmacInlineWriteback / emitFmacStoreMasked / emitNoFlagWriteback
+//      consult the flag in their Step G (after the ACC redirect / dead-write
+//      / fd==0 short circuits). When set, they Str q5 to s_vu1DeferredVfStash,
+//      record idx + mask, and skip the cache store.
+//    - After emitVU1Upper returns, CompileBlock clears g_vu1DeferVfWriteback.
+//    - After emitVU1Lower returns, CompileBlock — if g_vu1DeferredVfIdx > 0 —
+//      reloads q5 from the scratch and calls vfCacheStore + broadcast-cache
+//      invalidate to commit. Idx == -1 means upper wrote ACC / VF[0] /
+//      dead-elided — nothing to commit.
+//
+//  Scratch lives in a static 16-byte buffer addressed via armMoveAddressToReg
+//  rather than a stack slot — avoids resizing the prologue's 96-byte frame.
+//  Single-threaded (VU1 emit runs on one thread at a time, MTVU or EE).
+//
+//  Lower ops in vf_read_after_write hazards are by construction VF-readers
+//  (SQ/SQI/SQD, MFP/MFIR, MTIR-from-VF, MR32-of-VF), never flag-readers
+//  (FSAND/FSEQ/etc. don't have a VFread overlap with upper's VFwrite). So
+//  upper's flag updates running before lower is correct here — flag-reader
+//  lowers can't co-occur with this hazard class.
+// ============================================================================
+bool g_vu1DeferVfWriteback   = false;  // set per-emit by CompileBlock.
+int  g_vu1DeferredVfIdx      = -1;     // -1 = none. Filled by writeback emit.
+u8   g_vu1DeferredXyzw       = 0;      // captured by writeback emit.
+alignas(16) u8 g_vu1DeferredVfStash[16] = {};
+
 namespace
 {
 	bool s_batchPendingActive    = false;
@@ -674,9 +717,24 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 	if (g_vu1DeadVFWrite)
 		return;
 
+	const int dst_vf = vfIndexFromDstOff(dst_off);
+
+	// vf_read_after_write hazard: spill v5 to the deferred-stash scratch
+	// instead of committing to VF[X]. CompileBlock reloads after lower's
+	// emit and calls vfCacheStore to commit. Lower (a VF-reader) sees the
+	// original memory value, matching interp's save/restore semantics
+	// without the BL-into-vu1Exec roundtrip.
+	if (g_vu1DeferVfWriteback && dst_vf > 0)
+	{
+		armMoveAddressToReg(x4, &g_vu1DeferredVfStash[0]);
+		armAsm->Str(v5.Q(), a64::MemOperand(x4));
+		g_vu1DeferredVfIdx = dst_vf;
+		g_vu1DeferredXyzw  = static_cast<u8>(eff_xyzw);
+		return;
+	}
+
 	// Phase 2: defer the VF[fd] Str into the cache slot. The actual memory
 	// store fires at block end / hazard / BL via vfCacheFlushAndInvalidate.
-	const int dst_vf = vfIndexFromDstOff(dst_off);
 	if (dst_vf > 0)
 	{
 		// FMAC opt #17: try the same-VF different-lane batching helper
@@ -732,9 +790,21 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 	if (g_vu1DeadVFWrite)
 		return;
 
+	const int dst_vf = vfIndexFromDstOff(dst_off);
+
+	// vf_read_after_write deferred writeback — see comment on
+	// g_vu1DeferVfWriteback. Spill v5 to the scratch instead of committing.
+	if (g_vu1DeferVfWriteback && dst_vf > 0)
+	{
+		armMoveAddressToReg(x4, &g_vu1DeferredVfStash[0]);
+		armAsm->Str(v5.Q(), a64::MemOperand(x4));
+		g_vu1DeferredVfIdx = dst_vf;
+		g_vu1DeferredXyzw  = static_cast<u8>(xyzw);
+		return;
+	}
+
 	// Phase 2: defer the VF[fd] write into the cache. The Str fires at
 	// block end / hazard / BL via vfCacheFlushAndInvalidate.
-	const int dst_vf = vfIndexFromDstOff(dst_off);
 	if (dst_vf > 0)
 	{
 		// FMAC opt #17: same-VF different-lane batching.
@@ -766,6 +836,15 @@ static void emitNoFlagWriteback(u32 fd, u32 xyzw)
 	// FMAC opt #14: skip dead writes. MAX/MINI/ABS don't touch flags, so
 	// there's nothing else to do — pure cache-store skip.
 	if (g_vu1DeadVFWrite) return;
+	// vf_read_after_write deferred writeback — see g_vu1DeferVfWriteback.
+	if (g_vu1DeferVfWriteback)
+	{
+		armMoveAddressToReg(x4, &g_vu1DeferredVfStash[0]);
+		armAsm->Str(v5.Q(), a64::MemOperand(x4));
+		g_vu1DeferredVfIdx = static_cast<int>(fd);
+		g_vu1DeferredXyzw  = static_cast<u8>(xyzw);
+		return;
+	}
 	// FMAC opt #17: same-VF different-lane batching. MAX/MINI/ABS are
 	// FMAC-pipe ops, so Pass 1 may flag them as a batch endpoint.
 	if (tryBatchedVfCacheStore(static_cast<int>(fd), xyzw))
@@ -1619,6 +1698,17 @@ static void emitFTOI(int fbits)
 	// xyzw mask internally — full-mask path skips the load-merge, partial-
 	// mask path force-loads the slot and Mov-merges. Replaces the prior
 	// hand-rolled Ldr q5 + lane Movs + Str q5 sequence.
+	//
+	// vf_read_after_write deferred writeback: spill v1 to the stash and
+	// record idx + xyzw. Commit lands in CompileBlock after lower's emit.
+	if (g_vu1DeferVfWriteback)
+	{
+		armMoveAddressToReg(x4, &g_vu1DeferredVfStash[0]);
+		armAsm->Str(v1.Q(), a64::MemOperand(x4));
+		g_vu1DeferredVfIdx = static_cast<int>(ft);
+		g_vu1DeferredXyzw  = static_cast<u8>(xyzw);
+		return;
+	}
 	vfCacheStore(static_cast<int>(ft), v1, static_cast<u8>(xyzw));
 }
 
@@ -1635,6 +1725,14 @@ static void emitITOF(int fbits)
 		armAsm->Scvtf(v1.V4S(), v0.V4S(), fbits);
 	else
 		armAsm->Scvtf(v1.V4S(), v0.V4S());
+	if (g_vu1DeferVfWriteback)
+	{
+		armMoveAddressToReg(x4, &g_vu1DeferredVfStash[0]);
+		armAsm->Str(v1.Q(), a64::MemOperand(x4));
+		g_vu1DeferredVfIdx = static_cast<int>(ft);
+		g_vu1DeferredXyzw  = static_cast<u8>(xyzw);
+		return;
+	}
 	vfCacheStore(static_cast<int>(ft), v1, static_cast<u8>(xyzw));
 }
 

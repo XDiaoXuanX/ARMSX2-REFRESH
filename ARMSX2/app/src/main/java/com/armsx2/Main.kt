@@ -79,6 +79,11 @@ class SurfaceCallbacks(context: Context) : SurfaceView(context), SurfaceHolder.C
         // converge on this view as the focus target.
         isFocusable = true
         isFocusableInTouchMode = true
+        // API 26+ draws a built-in semi-transparent focus highlight over
+        // focusable Views on focus. With the SurfaceView focused (D-pad /
+        // gamepad path) that overlay tints the game output grey. Suppress
+        // it — we never paint a "selected" affordance on the surface.
+        defaultFocusHighlightEnabled = false
     }
     override fun surfaceCreated(holder: SurfaceHolder) {
         // Pull focus the moment the surface is ready. Without this the
@@ -585,6 +590,12 @@ class Main: ComponentActivity() {
      *  captures without manually tapping the BIOS card. */
     private var autoBootBiosFired = false
 
+    /** Build-config flag for the auto-boot-to-BIOS path above. Flip to
+     *  true (here, or move to BuildConfig via app/build.gradle.kts if a
+     *  variant-level toggle is wanted) to drop straight into the BIOS
+     *  shell on app launch — useful for perfape captures. */
+    private val AUTO_BOOT_BIOS = false
+
     /**
      * Run the heavy one-shot emucore init (asset copy + EmuFolders +
      * SDL/HID setup + EE/VIF JIT-test prelude). MUST be called only
@@ -646,8 +657,10 @@ class Main: ComponentActivity() {
             // Debug-build auto-boot to BIOS. Lets us drop straight into the
             // BIOS shell on app launch for perfape baseline captures —
             // skips tapping through GamesList. One-shot via latch so
-            // re-entering Setup and back doesn't relaunch.
-            if (BuildConfig.DEBUG && !autoBootBiosFired &&
+            // re-entering Setup and back doesn't relaunch. Currently
+            // gated off via AUTO_BOOT_BIOS — flip to true to re-enable.
+            @Suppress("KotlinConstantConditions")
+            if (AUTO_BOOT_BIOS && BuildConfig.DEBUG && !autoBootBiosFired &&
                 eState.value == EmuState.STOPPED) {
                 autoBootBiosFired = true
                 startBios()
@@ -656,6 +669,10 @@ class Main: ComponentActivity() {
     }
 
     fun sendKeyAction(p_action: KeyEventType, p_keycode: Int) {
+        // Any physical gamepad key event implies the user is on a
+        // controller — latch the on-screen touch controls hidden until a
+        // screen press flips them back on. Idempotent.
+        com.armsx2.ui.touch.TouchControls.onControllerInputDetected()
         if (p_action == KeyEventType.KeyDown) {
             var pad_force = 0
             if (p_keycode >= 110) {
@@ -814,14 +831,27 @@ class Main: ComponentActivity() {
                                 // Reset / Close — see InGameOverlay). Opening
                                 // auto-pauses the VM; close paths inside the
                                 // overlay handle resume themselves.
-                                detectTapGestures(onLongPress = {
-                                    if (eState.value == EmuState.RUNNING ||
-                                        eState.value == EmuState.PAUSED) {
-                                        com.armsx2.ui.InGameOverlay.open()
-                                    } else {
-                                        WindowImpl.toolbarVisible.value = !WindowImpl.toolbarVisible.value
-                                    }
-                                })
+                                //
+                                // onPress fires on every initial pointer down on
+                                // the surface (events that don't land on a touch
+                                // button — the buttons consume their own touches).
+                                // Any such tap means the user is using the screen,
+                                // so unlatch any controller-mode hide so the touch
+                                // controls reappear. onPress doesn't consume the
+                                // gesture; long-press detection continues to run.
+                                detectTapGestures(
+                                    onPress = {
+                                        com.armsx2.ui.touch.TouchControls.onSurfaceTouched()
+                                    },
+                                    onLongPress = {
+                                        if (eState.value == EmuState.RUNNING ||
+                                            eState.value == EmuState.PAUSED) {
+                                            com.armsx2.ui.InGameOverlay.open()
+                                        } else {
+                                            WindowImpl.toolbarVisible.value = !WindowImpl.toolbarVisible.value
+                                        }
+                                    },
+                                )
                             }
                             .onKeyEvent { event ->
                                 if (eState.value != EmuState.RUNNING)
@@ -888,12 +918,28 @@ class Main: ComponentActivity() {
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
         if (eState.value == EmuState.RUNNING) {
+            // SOURCE_TOUCHSCREEN motion events go through dispatchTouchEvent,
+            // not here — generic motion is gamepad / mouse / stylus. So any
+            // event reaching this method means a controller (or similar
+            // pointing device) is being used; latch touch controls off.
+            com.armsx2.ui.touch.TouchControls.onControllerInputDetected()
             sendAxis(ev, MotionEvent.AXIS_X,     posCode = 111, negCode = 113) // L right / left
             sendAxis(ev, MotionEvent.AXIS_Y,     posCode = 112, negCode = 110) // L down  / up
             sendAxis(ev, MotionEvent.AXIS_Z,     posCode = 121, negCode = 123) // R right / left
             sendAxis(ev, MotionEvent.AXIS_RZ,    posCode = 122, negCode = 120) // R down  / up
             sendAxis(ev, MotionEvent.AXIS_HAT_X, posCode = 22,  negCode = 21)  // D right / left
             sendAxis(ev, MotionEvent.AXIS_HAT_Y, posCode = 20,  negCode = 19)  // D down  / up
+            // Analog triggers (L2/R2). Xbox / DualShock / most modern pads
+            // report these as 0..1 motion-axis values, not Key.ButtonL2/R2
+            // key events, so the onKeyEvent path above never sees them.
+            // AXIS_LTRIGGER/RTRIGGER is the modern path; some controllers
+            // (older Moga, certain BT mappings) report via AXIS_BRAKE/GAS
+            // instead — take the max so we handle whichever the device
+            // actually emits without double-driving when both are present.
+            sendTrigger(ev, MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE,
+                KeyEvent.KEYCODE_BUTTON_L2)
+            sendTrigger(ev, MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS,
+                KeyEvent.KEYCODE_BUTTON_R2)
             return true
         }
         return super.dispatchGenericMotionEvent(ev)
@@ -905,6 +951,12 @@ class Main: ComponentActivity() {
         val negVal = if (v < -STICK_DEAD) -v else 0f
         NativeApp.setPadButton(posCode, (posVal * 32767).toInt(), posVal > 0f)
         NativeApp.setPadButton(negCode, (negVal * 32767).toInt(), negVal > 0f)
+    }
+
+    private fun sendTrigger(event: MotionEvent, axisA: Int, axisB: Int, code: Int) {
+        val v = maxOf(event.getAxisValue(axisA), event.getAxisValue(axisB))
+        val clamped = if (v > STICK_DEAD) v.coerceAtMost(1f) else 0f
+        NativeApp.setPadButton(code, (clamped * 32767).toInt(), clamped > 0f)
     }
 
     override fun onPause() {
