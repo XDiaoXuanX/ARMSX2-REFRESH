@@ -3974,6 +3974,32 @@ const std::vector<u32>& VMManager::Internal::GetSoftwareRendererProcessorList()
 	return s_software_renderer_processor_list;
 }
 
+u64 VMManager::Internal::GetPerformanceClusterAffinityMask()
+{
+	// Mirror the perf_mask computation inside SetEmuThreadAffinities so callers
+	// (Oboe audio data callback) can pin onto the same cluster as EE/VU/GS.
+	// Returns 0 when pinning is currently off or cluster info isn't resolvable —
+	// caller leaves the thread on the kernel's default affinity in that case.
+	if (!s_thread_affinities_set)
+		return 0;
+	EnsureCPUInfoInitialized();
+	if (s_processor_list.empty())
+		return 0;
+
+	const bool mtvu = EmuConfig.Speedhacks.vuThread;
+	if (s_processor_list.size() < (mtvu ? 3u : 2u))
+		return 0;
+
+	const u32 ee_index = s_processor_list[0];
+	const u32 vu_index = s_processor_list[1];
+	const u32 gs_index = s_processor_list[mtvu ? 2 : 1];
+	const u64 perf_mask =
+		ClusterAffinityMaskForOSId(ee_index) |
+		ClusterAffinityMaskForOSId(vu_index) |
+		ClusterAffinityMaskForOSId(gs_index);
+	return perf_mask;
+}
+
 void VMManager::ReloadPINE()
 {
 	const bool needs_reinit = (EmuConfig.EnablePINE != PINEServer::IsInitialized() ||

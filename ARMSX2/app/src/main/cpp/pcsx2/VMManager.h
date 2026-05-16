@@ -327,6 +327,15 @@ namespace VMManager
 		/// Returns a list of processors in the system, suitable for pinning for the software renderer.
 		const std::vector<u32>& GetSoftwareRendererProcessorList();
 
+		/// Returns the affinity mask covering the perf-cluster shared by EE/VU/GS
+		/// (the union of those threads' cluster masks built by SetEmuThreadAffinities).
+		/// Threads that want to share the perf cluster (e.g. Oboe audio callback)
+		/// can call sched_setaffinity with this mask. Returns 0 if thread pinning
+		/// is currently disabled, the cluster mask is unresolvable, or processor
+		/// list is empty — callers should treat 0 as "no pinning, leave thread on
+		/// whatever the kernel picks."
+		u64 GetPerformanceClusterAffinityMask();
+
 		const std::string& GetELFOverride();
 		bool IsExecutionInterrupted();
 		void ELFLoadingOnCPUThread(std::string elf_path);

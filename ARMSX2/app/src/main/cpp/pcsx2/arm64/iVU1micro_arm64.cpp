@@ -4147,6 +4147,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		u8 reglower, xyzwlower;
 		int sCycle;
 		bool valid;
+		// Phase 1 (microVU static-stall port): track which VI flag registers
+		// this FMAC slot will commit (mirrors fmacPipe.flagreg in VU.h —
+		// runtime _vuTestPipes commits macflag/statusflag/clipflag based on
+		// these bits).
+		u32 flagreg;
+		// Maturity cycle = sCycle + Cycle. For FMAC slots this is always 4
+		// per VUops.cpp:350 (`VU->fmac[i].Cycle = 4`); kept as a field for
+		// future variant tracking.
+		int Cycle;
 	};
 	CTFmacSlot ct_fmac[4] = {};
 	int ct_fmac_wpos = 0, ct_fmac_rpos = 0, ct_fmac_count = 0;
@@ -4184,6 +4193,47 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		bool skipLowerEFUWait;
 		bool skipLowerALUStall;
 		bool skipTestPipes;
+		// Phase 1 (microVU static-stall port) — compute-only fields filled
+		// in by the per-pair static-stall block after skipTestPipes is set.
+		//
+		// `fmac_stall` = cycles the runtime FMAC stall helpers
+		// (`vu1_TestFMACStallReg{,2}`) would add to VU->cycle on top of the
+		// natural per-pair `cycle++`. Computed from FMAC alias scans only —
+		// these helpers have no side effects beyond the cycle bump, so the
+		// delta can be replaced with a single inline Add at the JIT site
+		// under Phase 2's VU1_STATIC_STALL_EMIT toggle.
+		//
+		// `pipe_stall` = cycles the FDIV/EFU/IALU stall helpers would add on
+		// top of `fmac_stall`. These helpers have side effects
+		// (`vu1_TestEFUPipeWait` decrements `efu.Cycle`) so they CANNOT be
+		// replaced with a bare Add — Phase 2 leaves those BLs in place.
+		//
+		// `static_stall = fmac_stall + pipe_stall`, used to bump our
+		// compile-time `ct_cycle` so subsequent slot adds + retirement
+		// see the same cycle the runtime will at this point in the block.
+		int  fmac_stall;
+		int  pipe_stall;
+		int  static_stall;
+		// True when this pair reads MAC/CLIP/STATUS or REG_Q/REG_P AND
+		// there is an in-flight FMAC slot whose `flagreg` matches the
+		// read (or a pending FDIV/EFU completion). Held here for
+		// diagnostic use; Phase 2 itself doesn't elide TestPipes BLs.
+		bool mustCommitForFlagReader;
+		// Phase 2 (VU1_STATIC_STALL_EMIT) safety gate. True only when
+		// `fmac_carry_safe` is true at this pair (`ct_cycle > 3`), meaning
+		// any cross-block FMAC carry-in slot the CT model can't see is
+		// guaranteed mature at runtime — runtime FMAC stall helper would
+		// `continue` past it without bumping cycle. Within that window,
+		// CT's `fmac_stall` is the authoritative stall value and the
+		// FMAC stall BL can be suppressed in favour of an inline Add.
+		//
+		// Outside that window (carry-unsafe pairs at block entry), the
+		// runtime ring may have non-mature carry-in slots the CT misses.
+		// Suppressing the BL there leads to under-counted stalls — this
+		// was the GoW graphical-glitch root cause. So in carry-unsafe
+		// pairs the BL stays, no inline Add is emitted, and Phase 2
+		// reverts to upstream behaviour for that pair.
+		bool useStaticFmacStall;
 	};
 	PerPairSkip skip_info[VU1_MAX_BLOCK_PAIRS] = {};
 
@@ -4248,6 +4298,52 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 						if (slot.reglower == reg && (slot.xyzwlower & xyzw))
 							return true;
 					}
+					idx = (idx + 1) & 3;
+				}
+				return false;
+			};
+
+			// Phase 1 (microVU static-stall port): find max maturity cycle
+			// (slot.sCycle + slot.Cycle) over all FMAC slots aliased by this
+			// (reg, xyzw) read. Returns 0 if no match. Mirrors the runtime
+			// `vu1_TestFMACStallReg` body, which bumps VU->cycle to
+			// max(cycle, sCycle+Cycle) per match — the max-over-matches is
+			// the post-helper cycle. Caller subtracts the pre-helper cycle
+			// to get the stall delta.
+			auto aliasFmacMaxReady = [&](u8 reg, u8 xyzw) -> int {
+				if (reg == 0)
+					return 0;
+				int max_ready = 0;
+				int idx = ct_fmac_rpos;
+				for (int n = 0; n < ct_fmac_count; n++)
+				{
+					const CTFmacSlot& slot = ct_fmac[idx];
+					if (slot.valid)
+					{
+						const bool hit_upper = (slot.regupper == reg && (slot.xyzwupper & xyzw));
+						const bool hit_lower = (slot.reglower == reg && (slot.xyzwlower & xyzw));
+						if (hit_upper || hit_lower)
+						{
+							const int ready = slot.sCycle + slot.Cycle;
+							if (ready > max_ready)
+								max_ready = ready;
+						}
+					}
+					idx = (idx + 1) & 3;
+				}
+				return max_ready;
+			};
+
+			// True if any in-flight FMAC slot's flagreg bits intersect mask.
+			auto fmacHasPendingFlagBits = [&](u32 mask) -> bool {
+				if (mask == 0)
+					return false;
+				int idx = ct_fmac_rpos;
+				for (int n = 0; n < ct_fmac_count; n++)
+				{
+					const CTFmacSlot& slot = ct_fmac[idx];
+					if (slot.valid && (slot.flagreg & mask) != 0)
+						return true;
 					idx = (idx + 1) & 3;
 				}
 				return false;
@@ -4323,6 +4419,149 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				&& !ct_efu_pending   && efu_carry_safe
 				&& ct_ialu_count == 0 && ialu_carry_safe;
 
+			// ----------------------------------------------------------------
+			// Phase 1 (microVU static-stall port): compute the stall this
+			// pair's runtime stall-checks would add, and split into the
+			// side-effect-free FMAC portion (`fmac_stall`, replaceable with
+			// an inline Add under Phase 2 VU1_STATIC_STALL_EMIT) and the
+			// pipe portion (`pipe_stall`, FDIV/EFU/IALU — BLs kept because
+			// of side effects). Also compute `mustCommitForFlagReader` for
+			// future Phase-3 TestPipes elision decisions (currently held
+			// for diagnostics only).
+			{
+				// FMAC stall scan (no side effects, JIT-inlineable).
+				int fmac_candidate = ct_cycle;
+				if (uregs.pipe == VUPIPE_FMAC)
+				{
+					if (!skip_info[i].skipUpperFMACStall0 && uregs.VFread0 != 0)
+					{
+						const int r = aliasFmacMaxReady(uregs.VFread0, uregs.VFr0xyzw);
+						if (r > fmac_candidate) fmac_candidate = r;
+					}
+					if (!skip_info[i].skipUpperFMACStall1 && uregs.VFread1 != 0)
+					{
+						const int r = aliasFmacMaxReady(uregs.VFread1, uregs.VFr1xyzw);
+						if (r > fmac_candidate) fmac_candidate = r;
+					}
+				}
+				if (!ibit)
+				{
+					const bool lowerDoesFMACCheck =
+						(lregs.pipe == VUPIPE_FMAC) ||
+						(lregs.pipe == VUPIPE_FDIV) ||
+						(lregs.pipe == VUPIPE_EFU);
+					if (lowerDoesFMACCheck)
+					{
+						if (!skip_info[i].skipLowerFMACStall0 && lregs.VFread0 != 0)
+						{
+							const int r = aliasFmacMaxReady(lregs.VFread0, lregs.VFr0xyzw);
+							if (r > fmac_candidate) fmac_candidate = r;
+						}
+						if (!skip_info[i].skipLowerFMACStall1 && lregs.VFread1 != 0)
+						{
+							const int r = aliasFmacMaxReady(lregs.VFread1, lregs.VFr1xyzw);
+							if (r > fmac_candidate) fmac_candidate = r;
+						}
+					}
+				}
+
+				// Pipe stall scan (FDIV/EFU/IALU — BLs kept due to side
+				// effects). Tracked here for CT cycle modelling.
+				int pipe_candidate = fmac_candidate;
+				if (!ibit)
+				{
+					if (lregs.pipe == VUPIPE_FDIV && ct_fdiv_pending
+						&& !skip_info[i].skipLowerFDIVWait)
+					{
+						const int r = ct_fdiv_sCycle + ct_fdiv_cycles;
+						if (r > pipe_candidate) pipe_candidate = r;
+					}
+					if (lregs.pipe == VUPIPE_EFU && ct_efu_pending
+						&& !skip_info[i].skipLowerEFUWait)
+					{
+						// vu1_TestEFUPipeWait does `efu.Cycle -= 1` before
+						// comparing, per VUops.cpp:269.
+						const int r = ct_efu_sCycle + ct_efu_cycles - 1;
+						if (r > pipe_candidate) pipe_candidate = r;
+					}
+					if (lregs.pipe == VUPIPE_BRANCH && lregs.VIread != 0
+						&& !skip_info[i].skipLowerALUStall)
+					{
+						int idx = ct_ialu_rpos;
+						for (int n = 0; n < ct_ialu_count; n++)
+						{
+							const CTIaluSlot& slot = ct_ialu[idx];
+							if (slot.valid && (slot.reg & lregs.VIread))
+							{
+								const int r = slot.sCycle + slot.cycles;
+								if (r > pipe_candidate) pipe_candidate = r;
+							}
+							idx = (idx + 1) & 3;
+						}
+					}
+				}
+
+				const int candidate_cycle = pipe_candidate;
+				skip_info[i].fmac_stall   = fmac_candidate - ct_cycle;
+				skip_info[i].pipe_stall   = pipe_candidate - fmac_candidate;
+				skip_info[i].static_stall = candidate_cycle - ct_cycle;
+
+				// Detect flag-committing sink. Pair reads MAC/CLIP/STATUS or
+				// Q/P AND there's a pending slot/pipe that would commit
+				// that value via vu1_TestPipes_VU1.
+				const u32 STATUS_BIT = 1u << REG_STATUS_FLAG;
+				const u32 MAC_BIT    = 1u << REG_MAC_FLAG;
+				const u32 CLIP_BIT   = 1u << REG_CLIP_FLAG;
+				const u32 Q_BIT      = 1u << REG_Q;
+				const u32 P_BIT      = 1u << REG_P;
+				const u32 flag_mask  = STATUS_BIT | MAC_BIT | CLIP_BIT;
+				const u32 reads_flag = (uregs.VIread | (ibit ? 0 : lregs.VIread))
+					& flag_mask;
+				const u32 reads_qp   = (uregs.VIread | (ibit ? 0 : lregs.VIread))
+					& (Q_BIT | P_BIT);
+				bool must_commit = false;
+				if (reads_flag && fmacHasPendingFlagBits(reads_flag))
+					must_commit = true;
+				if ((reads_qp & Q_BIT) && ct_fdiv_pending)
+					must_commit = true;
+				if ((reads_qp & P_BIT) && ct_efu_pending)
+					must_commit = true;
+				skip_info[i].mustCommitForFlagReader = must_commit;
+
+				// Phase 2 safety gate. The carry-safe gate `ct_cycle > 3`
+				// guarantees any cross-block carry-in FMAC slot the CT
+				// model can't see is mature at runtime (the helper would
+				// `continue` past it). Within that window CT's
+				// `fmac_stall` is sound and we can inline the Add and
+				// suppress the BL. Outside that window the BL stays.
+				skip_info[i].useStaticFmacStall = fmac_carry_safe;
+
+				// Intentionally DO NOT mutate `ct_cycle` here. An earlier
+				// version of this block did `ct_cycle = candidate_cycle` to
+				// keep our CT model "in lockstep with runtime after stall
+				// bumps." That broke the pre-walk's retire/skipTestPipes
+				// soundness: shadow-verify caught a VI[REG_STATUS_FLAG]
+				// divergence at pc=0x0648 (slot at fmac[1] with flagreg &
+				// REG_STATUS_FLAG, statusflag=0xC0). The bumped ct_cycle
+				// caused the retire loop to pop the slot in the CT model
+				// before the runtime had retired it, which made
+				// skipTestPipes evaluate true → BL elided → flagreg never
+				// committed → JIT VI[16] stuck at pre-pair 0x40 while
+				// interp landed on 0xC0.
+				//
+				// fmac_stall is a DELTA (slot.sCycle + 4 − ct_cycle); both
+				// terms are in pair-count space (Phase 1 doesn't bump
+				// either), so the delta is the same as if we'd bumped
+				// both. Phase 2's inline `Add VU1_CYCLE_REG, ..., fmac_stall`
+				// correctly accounts for the stall at runtime. Keeping
+				// ct_cycle in pair-count space leaves the CT retire/
+				// skipTestPipes decisions conservative (slot stays in our
+				// ring until 4 pairs have passed, matching the
+				// pre-Phase-1 strict criterion), which is the soundness
+				// argument the original skipTestPipes design rested on.
+				(void)candidate_cycle; // computed for fmac_stall/pipe_stall above
+			}
+
 			// Retire mature slots in the CT model.
 			while (ct_fmac_count > 0)
 			{
@@ -4359,6 +4598,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 					slot.reglower  = lFMAC ? lregs.VFwrite : 0;
 					slot.xyzwlower = lFMAC ? lregs.VFwxyzw : 0;
 					slot.sCycle    = ct_cycle;
+					slot.Cycle     = 4; // VUops.cpp:350 — FMAC pipe = 4 cycles
+					// flagreg union mirrors VUops.cpp:356/362 layering
+					// (upper VIwrite | lower VIwrite).
+					slot.flagreg   = (uFMAC ? uregs.VIwrite : 0)
+						| (lFMAC ? lregs.VIwrite : 0);
 					slot.valid     = true;
 					ct_fmac_wpos = (ct_fmac_wpos + 1) & 3;
 					if (ct_fmac_count < 4)

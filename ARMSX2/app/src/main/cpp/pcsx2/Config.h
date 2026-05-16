@@ -984,15 +984,18 @@ struct Pcsx2Config
 		static constexpr s32 MAX_VOLUME = 200;
 #ifdef __ANDROID__
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Oboe;
-		// SoundTouch TDStretch::calcCrossCorrAccumulate is the scalar fallback on
-		// arm64 (no NEON impl shipped) and burned 11% of total CPU at BIOS idle
-		// (bios-baseline.txt). Default mobile to Disabled so audio is a direct
-		// passthrough; users can flip back to TimeStretch in the overlay.
-		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::Disabled;
 #else
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Cubeb;
-		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::TimeStretch;
 #endif
+		// Default SyncMode = TimeStretch on all platforms. An earlier Android
+		// override defaulted this to Disabled to skip the SoundTouch scalar
+		// path (`calcCrossCorrAccumulate` was 11% of CPU at BIOS idle), but
+		// that made audio sound bad under load — without time-stretching,
+		// frame-time variation produces audible pitch/clock drift. Reverted
+		// to upstream TimeStretch; the SoundTouch cost is the price of
+		// stable-pitch audio. NEON-porting the inner correlation loop is
+		// the right next play if the cost shows up in profiles again.
+		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::TimeStretch;
 
 		static std::optional<SPU2SyncMode> ParseSyncMode(const char* str);
 		static const char* GetSyncModeName(SPU2SyncMode backend);
