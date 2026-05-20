@@ -191,10 +191,10 @@ Buka nanti dari Pengaturan → Buka direktori ARMSX2.</string>
     <string name="settings_cas_sharpness_value">CAS Sharpness: %1$d%%</string>
     <string name="settings_hardware_mipmapping">Mipmapping Perangkat keras</string>
     <string name="settings_vsync">VSync</string>
-    <string name="settings_auto_flush_software">Auto Flush (Software)</string>
-    <string name="settings_auto_flush_hardware">Auto Flush (Hardware)</string>
+    <string name="settings_auto_flush_software">Membersihkan Otomatis (Perangkat lunak)</string>
+    <string name="settings_auto_flush_hardware">Membersihkan Otomatis (Perangkat keras)</string>
     <string name="settings_cpu_core">CPU Core</string>
-    <string name="settings_hardware_readbacks">Hardware Readbacks</string>
+    <string name="settings_hardware_readbacks">Membaca kembali Perangkat keras</string>
     <string name="settings_skip_duplicate_frames">Skip Duplicate Frames</string>
     <string name="settings_hw_download_mode_default">Hardware Download Mode: 0</string>
     <string name="settings_hw_download_mode_value">Hardware Download Mode: %1$d</string>
