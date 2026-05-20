@@ -110,5 +110,23 @@ fun RendererTab(state: MutableState<Settings>) {
             selectedIndex = anisoIdx,
             onChange = { apply(s.copy(maxAnisotropy = anisoVals[it])) },
         )
+        SettingsDivider()
+        // GPU profile override. Auto resolves at device init via
+        // GpuProfileDetector::Resolve (vendor strings + Android ro.soc.*
+        // hints). Mali uses ARM_shader_framebuffer_fetch over texture
+        // barriers; Adreno uses the EXT fetch / generic path; PowerVR
+        // (Imagination) uses EXT/PLS like Adreno but is its own tile-based
+        // GPU family. Changing requires a renderer restart — CheckFeatures
+        // runs once at device init, so we kick Main.restart() the same way
+        // RestartButton does.
+        SegmentedRow(
+            label = "GPU Profile",
+            options = listOf("Auto", "Mali", "Adreno", "PowerVR"),
+            selectedIndex = s.gpuProfile.coerceIn(0, 3),
+            onChange = {
+                apply(s.copy(gpuProfile = it))
+                Main.restart()
+            },
+        )
     }
 }

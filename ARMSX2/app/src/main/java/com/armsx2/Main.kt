@@ -223,6 +223,13 @@ class Main: ComponentActivity() {
         val renderer = mutableStateOf("auto")
         val upscale = mutableStateOf(1)
 
+        /** Active custom Vulkan driver id (matches `CustomDriver.InstalledDriver.id`).
+         *  Null = system Vulkan loader. Set from the setup wizard's driver
+         *  chip. Applied to native via CustomDriver.applyToNative inside
+         *  applyRendererPrefs BEFORE runVMThread enters MTGS::Open, which
+         *  is when Vulkan::LoadVulkanLibrary reads the pinned path. */
+        val customDriverId = mutableStateOf<String?>(null)
+
         /**
          * Tracks Android 11+ "All files access" (MANAGE_EXTERNAL_STORAGE)
          * grant. Required when the user's `systemDir` points outside the
@@ -412,6 +419,16 @@ class Main: ComponentActivity() {
          *  order: per-game JSON overlay → global → hardcoded defaults. */
         private fun applyRendererPrefs() {
             NativeApp.renderUpscalemultiplier(upscale.value.toFloat())
+            // Pin custom Vulkan driver (if any) BEFORE the renderer write —
+            // the renderer JNI may trigger MTGS::ApplySettings which can
+            // re-open the GS device and run Vulkan::LoadVulkanLibrary. The
+            // VK loader reads the pinned path lazily so the order matters.
+            val ctx = instance?.applicationContext
+            val picked: com.armsx2.CustomDriver.InstalledDriver? =
+                if (ctx != null) customDriverId.value?.let { id ->
+                    com.armsx2.CustomDriver.listInstalled(ctx).firstOrNull { it.id == id }
+                } else null
+            if (ctx != null) com.armsx2.CustomDriver.applyToNative(ctx, picked)
             when (renderer.value) {
                 "vulkan" -> NativeApp.renderVulkan()
                 "opengl" -> NativeApp.renderOpenGL()
@@ -536,7 +553,8 @@ class Main: ComponentActivity() {
                         }
                     }
                 }
-            } catch (ignored: IOException) {
+            } catch (e: IOException) {
+                android.util.Log.e("ARMSX2", "copyAssetAll failed: $srcPath -> $rootDir: ${e.message}")
             }
         }
 
@@ -723,6 +741,7 @@ class Main: ComponentActivity() {
         }
         renderer.value = prefs.getString("renderer", "auto") ?: "auto"
         upscale.value = prefs.getInt("upscale", 1)
+        customDriverId.value = prefs.getString("customDriverId", null)?.takeIf { it.isNotEmpty() }
         allFilesAccessGranted.value = !needsAllFilesAccess()
         surface.value = SurfaceCallbacks(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -962,6 +981,11 @@ class Main: ComponentActivity() {
     override fun onPause() {
         if (eState.value == EmuState.RUNNING)
             NativeApp.pause()
+        // Persist Vulkan pipeline cache before Android can reap the process.
+        // ~VKShaderCache only fires on a clean device teardown, but swipe-kill
+        // / OOM-kill skip that path — every cold launch would otherwise
+        // re-compile every TFX pipeline from scratch. No-op on OpenGL.
+        NativeApp.flushShaderCache()
         super.onPause()
     }
 

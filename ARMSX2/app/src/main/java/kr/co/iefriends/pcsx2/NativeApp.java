@@ -119,6 +119,30 @@ public class NativeApp {
 	 *  achievements panel polls this for the badge / button colour. */
 	public static native boolean isHardcoreMode();
 
+	/** True iff the GS is currently in a HW renderer (OGL/VK), false for
+	 *  SW. Mirrors GSIsHardwareRenderer() from the GS thread. Polled by
+	 *  the in-game overlay's renderer pill so emucore-driven swaps
+	 *  (e.g. SoftwareRendererFMVHack) stay in sync with the UI. */
+	public static native boolean isHardwareRenderer();
+
+	/** Master OSD toggle — flips every OsdShow* bit we enable at first
+	 *  init. Backs the in-game overlay's OSD pill. */
+	public static native void osdShowAll(boolean enabled);
+
+	/** Pin a custom Vulkan driver (e.g. Mesa Turnip) for the next VM
+	 *  start. Must be called BEFORE Main.start() — the first MTGS::Open
+	 *  triggers Vulkan::LoadVulkanLibrary which reads these paths. Pass
+	 *  empty strings to revert to the system loader.
+	 *
+	 *  driverDir:    /data/.../files/drivers/&lt;id&gt;/ (trailing slash required)
+	 *  driverName:   e.g. "libvulkan_freedreno.so"
+	 *  redirectDir:  /data/.../files/drivers/&lt;id&gt;/cache/ — Turnip shader cache target
+	 *  hookLibDir:   ApplicationInfo.nativeLibraryDir — where the adrenotools
+	 *                hook .so's (main_hook etc.) were extracted. */
+	public static native void setCustomVulkanDriver(
+		String driverDir, String driverName,
+		String redirectDir, String hookLibDir);
+
 	public static native void setPadVibration(boolean isonoff);
 	public static native void setPadButton(int index, int range, boolean iskeypressed);
 	public static native void resetKeyStatus();
@@ -145,6 +169,13 @@ public class NativeApp {
 	public static native void pause();
 	public static native void resume();
 	public static native void shutdown();
+
+	/** Persist the Vulkan pipeline cache to disk so cold restarts don't have
+	 *  to recompile every TFX pipeline. No-op for OpenGL (its cache flushes
+	 *  on its own). Called from Main.onPause so backgrounding the app saves
+	 *  the cache before Android can reap the process. Safe to call when no
+	 *  Vulkan device is active (becomes a no-op). */
+	public static native void flushShaderCache();
 
 	/** Runs ARM64 codegen tests and prints PASS/FAIL to logcat (tag: ARM64CodegenTest). */
 	public static native void runCodegenTests();

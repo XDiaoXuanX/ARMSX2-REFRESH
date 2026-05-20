@@ -57,6 +57,12 @@ add_subdirectory(pcsx2)
 # Android JNI shared library
 if(ANDROID)
 	add_subdirectory(3rdparty/googletest EXCLUDE_FROM_ALL)
+	# libadrenotools: custom Vulkan ICD loading for Adreno devices. Provides
+	# the static `adrenotools` library (linked into emucore for the loader
+	# splice) plus four runtime hook .so's (hook_impl/main_hook/
+	# file_redirect_hook/gsl_alloc_hook) that ship in the apk's
+	# lib/<abi>/ and get dlopen'd by the loaded driver.
+	add_subdirectory(3rdparty/adrenotools)
 	add_library(emucore SHARED
 		native-lib.cpp
 		tests/arm64/codegen_tests.cpp
@@ -80,6 +86,7 @@ if(ANDROID)
 		android
 		log
 		vixl
+		adrenotools
 	)
 	target_include_directories(emucore PRIVATE
 		"${CMAKE_SOURCE_DIR}"

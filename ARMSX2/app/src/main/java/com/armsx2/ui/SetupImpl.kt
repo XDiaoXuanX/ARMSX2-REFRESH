@@ -22,6 +22,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
@@ -29,11 +32,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.armsx2.CustomDriver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -112,6 +124,43 @@ object SetupImpl {
      *  to Main.romsDirs (and prefs) on Next at the ROMs step. The user
      *  can add multiple folders + remove individual entries. */
     private val romsDirsState = mutableStateListOf<Uri>()
+
+    // -------- Renderer setup state --------
+    /** Picked renderer backend, as the canonical `Main.renderer` strings
+     *  ("opengl" or "vulkan"). null = nothing picked yet, blocks Next on
+     *  this page. Re-entry pre-loads the existing pref so the user sees
+     *  their current choice highlighted. There is no "auto" choice in the
+     *  wizard — the in-game Renderer pill stays as the override path, but
+     *  the wizard forces an explicit GL/VK decision so the SW path knows
+     *  which display backend to host the software frame on. */
+    private val selectedRenderer = mutableStateOf<String?>(null)
+
+    // -------- Custom Vulkan driver state --------
+    /** Active driver id (matches `CustomDriver.InstalledDriver.id`). null
+     *  = system / default Vulkan loader. Mirrored from / to `Main.customDriverId`
+     *  + prefs on commit. Persisted only when the user advances past the
+     *  renderer page so abandoning the wizard mid-selection doesn't stomp
+     *  a previously-saved pick. */
+    private val selectedDriverId = mutableStateOf<String?>(null)
+
+    /** Live list of `<externalFilesDir>/drivers/[id]/` entries. Refreshed
+     *  on renderer-page enter, after an install, and after a delete. */
+    private val installedDrivers = mutableStateListOf<CustomDriver.InstalledDriver>()
+
+    /** Sheet visibility for the driver browser (the "+ Add" path). */
+    private val showDriverBrowser = mutableStateOf(false)
+
+    /** GitHub releases list. null = not yet fetched / loading; empty
+     *  list = fetch returned nothing (or failed silently). */
+    private val remoteDrivers = mutableStateOf<List<CustomDriver.RemoteDriver>?>(null)
+
+    /** Id of the driver currently downloading + extracting (matches
+     *  `CustomDriver.RemoteDriver.id`). null = no install in flight. */
+    private val installingDriverId = mutableStateOf<String?>(null)
+
+    /** Last fetch error message, surfaced as a banner at the top of the
+     *  driver browser sheet. */
+    private val driverBrowserError = mutableStateOf<String?>(null)
 
     // ---- Persist + advance helpers ----
 
@@ -260,18 +309,22 @@ object SetupImpl {
     private fun refreshAllowNext() {
         allowNext.value = when (setupState.value) {
             0 -> true
+            // Renderer page — Next requires an explicit GL/VK pick. No
+            // default-through; we want every user to have made a conscious
+            // choice so support tickets can rely on the backend string.
+            1 -> selectedRenderer.value != null
             // System dir page — Next when the user has a fresh URI selected,
             // an existing pref to keep (re-entry), or has explicitly opted
             // into the app-private fallback.
-            1 -> systemDirUri.value != null ||
+            2 -> systemDirUri.value != null ||
                  systemDirUseDefault.value ||
                  Main.systemDir.value != null
             // BIOS page — Next when a row is picked, or (fallback for revoked
             // / missing biosDir) an already-configured BIOS we're keeping.
-            2 -> selectedBiosIdx.value != null ||
+            3 -> selectedBiosIdx.value != null ||
                  (biosDirUri.value == null && Main.bios.value != null)
             // ROMs page — Next when at least one folder is selected.
-            3 -> romsDirsState.isNotEmpty()
+            4 -> romsDirsState.isNotEmpty()
             else -> false
         }
     }
@@ -290,6 +343,20 @@ object SetupImpl {
         setupState.value = 0
         allowPrev.value = false
         allowNext.value = true
+        // Pre-load the saved renderer pick so the wizard tile is highlighted
+        // on re-entry. Treat "auto" (the historical default) as "no choice
+        // yet" so re-entry from old installs still forces an explicit pick.
+        selectedRenderer.value = Main.renderer.value.takeIf {
+            it == "opengl" || it == "vulkan"
+        }
+        // Custom driver state mirrors Main.customDriverId (already hydrated
+        // from prefs in onCreate). installedDrivers stays empty here; the
+        // renderer page composable refreshes it on first enter so we don't
+        // hit disk on every wizard reset.
+        selectedDriverId.value = Main.customDriverId.value
+        showDriverBrowser.value = false
+        installingDriverId.value = null
+        driverBrowserError.value = null
         scannedBioses.clear()
         selectedBiosIdx.value = null
         biosScanning.value = false
@@ -341,21 +408,43 @@ object SetupImpl {
     /** Page heading shown in the upper-left of the title row. */
     private fun pageTitle(): String = when (setupState.value) {
         0 -> "Welcome"
-        1 -> "Select system folder"
-        2 -> "Select your BIOS"
-        3 -> "Select ROMs folder"
+        1 -> "Choose renderer"
+        2 -> "Select system folder"
+        3 -> "Select your BIOS"
+        4 -> "Select ROMs folder"
         else -> ""
     }
 
     /** Label for the page-local action button (in the nav row). null = no button. */
     private fun midButtonLabel(): String? = when (setupState.value) {
-        1 -> if (systemDirUri.value == null) "Pick System Folder" else "Pick a different folder"
+        2 -> if (systemDirUri.value == null) "Pick System Folder" else "Pick a different folder"
         // Use the URI presence (not the in-memory list) so the label says
         // "Pick a different folder" immediately on re-entry when we already
         // have a remembered biosDir, even before the auto-rescan finishes.
-        2 -> if (biosDirUri.value == null) "Pick BIOS Folder" else "Pick a different folder"
-        3 -> if (romsDirsState.isEmpty()) "Pick ROMs Folder" else "Add Another Folder"
+        3 -> if (biosDirUri.value == null) "Pick BIOS Folder" else "Pick a different folder"
+        4 -> if (romsDirsState.isEmpty()) "Pick ROMs Folder" else "Add Another Folder"
         else -> null
+    }
+
+    /** Persist the picked renderer to prefs + Main.renderer so applyRendererPrefs
+     *  routes to the right JNI on the next VM start. Returns the canonical
+     *  string on success, null when no choice was made (Next is gated above
+     *  but defensive — re-entry edge cases). */
+    private fun finishRendererStep(): String? {
+        val pick = selectedRenderer.value ?: return null
+        Main.renderer.value = pick
+        // Driver pick is only meaningful for Vulkan; clear it on the OpenGL
+        // path so re-entry from OGL doesn't leave a stale custom driver
+        // pinned (the JNI setter would still fire and adrenotools would
+        // resolve a path that gets ignored by the GL backend, but cleaner
+        // to drop it).
+        val driverId = if (pick == "vulkan") selectedDriverId.value else null
+        Main.customDriverId.value = driverId
+        Main.prefs.edit()
+            .putString("renderer", pick)
+            .putString("customDriverId", driverId.orEmpty())
+            .apply()
+        return pick
     }
 
     /** Reusable PS2-blue button colors. */
@@ -476,9 +565,10 @@ object SetupImpl {
                             allowNext.value = true
                             Welcome()
                         }
-                        1 -> SetupSystemDirContent()
-                        2 -> SetupBiosContent()
-                        3 -> SetupRomsDirContent()
+                        1 -> SetupRendererContent()
+                        2 -> SetupSystemDirContent()
+                        3 -> SetupBiosContent()
+                        4 -> SetupRomsDirContent()
                         else -> {
                             Main.prefs.edit().putBoolean("setupComplete", true).apply()
                             Main.setupComplete.value = true
@@ -509,6 +599,11 @@ object SetupImpl {
                                     allowPrev.value = true
                                     refreshAllowNext()
                                 }
+                                4 -> {
+                                    setupState.value = 3
+                                    allowPrev.value = true
+                                    refreshAllowNext()
+                                }
                             }
                         },
                         enabled = allowPrev.value,
@@ -525,9 +620,9 @@ object SetupImpl {
                         Button(
                             onClick = {
                                 when (setupState.value) {
-                                    1 -> systemLauncher.launch(null)
-                                    2 -> biosLauncher.launch(null)
-                                    3 -> romsLauncher.launch(null)
+                                    2 -> systemLauncher.launch(null)
+                                    3 -> biosLauncher.launch(null)
+                                    4 -> romsLauncher.launch(null)
                                 }
                             },
                             colors = ps2Colors(),
@@ -547,22 +642,29 @@ object SetupImpl {
                                     refreshAllowNext()
                                 }
                                 1 -> {
-                                    if (finishSystemDirStep(context) != null) {
+                                    if (finishRendererStep() != null) {
                                         setupState.value = 2
                                         allowPrev.value = true
                                         refreshAllowNext()
                                     }
                                 }
                                 2 -> {
-                                    if (finishBiosStep(context) != null) {
+                                    if (finishSystemDirStep(context) != null) {
                                         setupState.value = 3
                                         allowPrev.value = true
                                         refreshAllowNext()
                                     }
                                 }
                                 3 -> {
-                                    if (finishRomsStep(context) != null) {
+                                    if (finishBiosStep(context) != null) {
                                         setupState.value = 4
+                                        allowPrev.value = true
+                                        refreshAllowNext()
+                                    }
+                                }
+                                4 -> {
+                                    if (finishRomsStep(context) != null) {
+                                        setupState.value = 5
                                         allowPrev.value = false
                                         allowNext.value = false
                                     }
@@ -574,17 +676,17 @@ object SetupImpl {
                     ) {
                         // Last setup page commits the prefs and dismisses
                         // the wizard, so the action label changes to match.
-                        Text(if (setupState.value == 3) "Finish" else "Next")
+                        Text(if (setupState.value == 4) "Finish" else "Next")
                     }
                 }
             }
         }
     }
 
-    /** First-run welcome page. Renderer backend defaults to Auto and
-     *  upscale defaults to 1x; both are now exposed in the in-game
-     *  overlay's Renderer tab for runtime override, so the wizard
-     *  doesn't ask up front. */
+    /** First-run welcome page. Upscale defaults to 1x and is exposed in the
+     *  in-game overlay's Renderer tab for runtime override. Renderer is
+     *  picked explicitly on the next page so the SW path knows which host
+     *  display backend to host the software frame on. */
     @Composable
     fun Welcome() {
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
@@ -594,6 +696,567 @@ object SetupImpl {
             Text("Hit Next to get started", Modifier.align(Alignment.CenterHorizontally),
                 fontSize = 14.sp, color = Color.LightGray)
         }
+    }
+
+    /** Renderer page — two large tile choices: OpenGL or Vulkan. The pick
+     *  is the host display backend used for BOTH HW (OGL / VK) and SW
+     *  (software GS, presenting via the chosen backend). The in-game
+     *  overlay's Renderer pill still toggles between HW and SW within the
+     *  chosen backend; switching backends after first-run requires
+     *  re-entering setup from the Settings cog. */
+    @Composable
+    private fun SetupRendererContent() {
+        val context = LocalContext.current
+        // First-enter populate of installedDrivers; cheap, only hits disk
+        // once per wizard session. Also re-runs when the Vulkan tile
+        // becomes selected since the user might have just toggled to it.
+        LaunchedEffect(selectedRenderer.value) {
+            if (selectedRenderer.value == "vulkan") {
+                installedDrivers.clear()
+                installedDrivers.addAll(CustomDriver.listInstalled(context))
+            }
+        }
+
+        // The driver browser takes over the page when open — full content
+        // area, mirrors the BIOS-rescan modality.
+        if (showDriverBrowser.value) {
+            DriverBrowserSheet()
+            return
+        }
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                RendererTile(
+                    title = "OpenGL",
+                    selected = selectedRenderer.value == "opengl",
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        selectedRenderer.value = "opengl"
+                        refreshAllowNext()
+                    },
+                )
+                RendererTile(
+                    title = "Vulkan",
+                    selected = selectedRenderer.value == "vulkan",
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        selectedRenderer.value = "vulkan"
+                        refreshAllowNext()
+                    },
+                )
+            }
+
+            if (selectedRenderer.value == "vulkan") {
+                Spacer(Modifier.height(20.dp))
+                GpuDriverSection()
+            }
+        }
+    }
+
+    @Composable
+    private fun RendererTile(
+        title: String,
+        selected: Boolean,
+        modifier: Modifier = Modifier,
+        onClick: () -> Unit,
+    ) {
+        val bg = if (selected) Colors.pasx2_blue.copy(alpha = 0.30f) else Color(0xFF1F2123)
+        val border = if (selected) Colors.pasx2_blue else Color.White.copy(alpha = 0.10f)
+        // Smaller tiles than first-pass — the GPU Driver section needs the
+        // vertical room below, and the title alone reads fine without a
+        // 32dp pad.
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(bg)
+                .border(2.dp, border, RoundedCornerShape(10.dp))
+                .clickable(onClick = onClick)
+                .padding(vertical = 14.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+
+    /** Horizontal scrolling list of driver chips. First chip is "Default
+     *  (system loader)", then each installed driver, then a trailing "+
+     *  Add" chip that opens the driver browser. */
+    @Composable
+    private fun GpuDriverSection() {
+        Text(
+            "GPU Driver",
+            color = Color.White,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Replace the system Vulkan driver with Mesa Turnip or another Adreno driver. Recommended for Adreno-6XX users on stale OEM drivers. Takes effect on the next game launch.",
+            color = Color(0xFFAAAAAA),
+            fontSize = 12.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            item {
+                DriverChip(
+                    label = "Default",
+                    sublabel = "System driver",
+                    detail = "Use the device's stock Vulkan ICD",
+                    selected = selectedDriverId.value == null,
+                    onClick = { selectedDriverId.value = null },
+                )
+            }
+            items(installedDrivers, key = { it.id }) { drv ->
+                // Pack as much as the meta.json offers — name, vendor +
+                // driver version (the differentiator across releases of
+                // the same family), description if any.
+                val sublabel = buildString {
+                    if (drv.vendor.isNotEmpty()) append(drv.vendor)
+                    if (drv.version.isNotEmpty()) {
+                        if (isNotEmpty()) append(" · ")
+                        append(drv.version)
+                    }
+                    if (isEmpty() && drv.author.isNotEmpty()) append(drv.author)
+                    if (isEmpty()) append("Installed")
+                }
+                DriverChip(
+                    label = drv.name,
+                    sublabel = sublabel,
+                    detail = drv.description.ifBlank { drv.author },
+                    selected = selectedDriverId.value == drv.id,
+                    onClick = { selectedDriverId.value = drv.id },
+                    onDelete = {
+                        if (selectedDriverId.value == drv.id) selectedDriverId.value = null
+                        CustomDriver.delete(drv)
+                        installedDrivers.remove(drv)
+                    },
+                )
+            }
+            item {
+                AddDriverChip(onClick = {
+                    showDriverBrowser.value = true
+                    // Kick off the fetch if we haven't already.
+                    if (remoteDrivers.value == null) remoteDrivers.value = emptyList()
+                })
+            }
+        }
+    }
+
+    @Composable
+    private fun DriverChip(
+        label: String,
+        sublabel: String,
+        detail: String,
+        selected: Boolean,
+        onClick: () -> Unit,
+        onDelete: (() -> Unit)? = null,
+    ) {
+        val bg = if (selected) Colors.pasx2_blue.copy(alpha = 0.30f) else Color(0xFF1F2123)
+        val border = if (selected) Colors.pasx2_blue else Color.White.copy(alpha = 0.10f)
+        val labelColor = if (selected) Color.White else Color(0xFFE0E0E0)
+        // 220dp chip is wide enough to surface the differentiator (Mesa
+        // vendor + driverVersion) plus a description preview without
+        // ellipsing the driver name itself. The chip row scrolls
+        // horizontally so width can grow without crowding the page.
+        Box(
+            modifier = Modifier
+                .width(220.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(bg)
+                .border(1.5.dp, border, RoundedCornerShape(10.dp))
+                .clickable(onClick = onClick),
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                Text(
+                    label,
+                    color = labelColor,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    sublabel,
+                    color = Colors.pasx2_blue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                if (detail.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        detail,
+                        color = Color(0xFF999999),
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            // Small corner X for delete, only present on user-installed
+            // chips (Default has no delete). Tap is independent of the chip
+            // body's click handler.
+            if (onDelete != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(20.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF3A1A1A))
+                        .clickable(onClick = onDelete),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("×", color = Color(0xFFFF6B6B), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun AddDriverChip(onClick: () -> Unit) {
+        Box(
+            modifier = Modifier
+                .width(220.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xFF1A1A1A))
+                .border(
+                    1.5.dp,
+                    Colors.pasx2_blue.copy(alpha = 0.5f),
+                    RoundedCornerShape(10.dp))
+                .clickable(onClick = onClick)
+                .padding(vertical = 18.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("+", color = Colors.pasx2_blue, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "Add Driver",
+                    color = Colors.pasx2_blue,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+
+    /** Fullscreen-within-the-content driver browser. Lists releases from
+     *  K11MCH1/AdrenoToolsDrivers. Tapping Install downloads + extracts
+     *  into the drivers dir; on success the chip row picks it up via
+     *  installedDrivers refresh. */
+    @Composable
+    private fun DriverBrowserSheet() {
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+
+        // SAF picker for "pick local .zip" — adrenotools driver packs
+        // from outside the GitHub list (e.g. user pre-downloaded, sideloaded).
+        // MIME filter accepts both application/zip and the catch-all
+        // application/octet-stream because some file providers (Drive,
+        // Files-by-Google) report .zip downloads as octet-stream.
+        val localLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri: Uri? ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            // Mark the sheet as "installing" with a synthetic id so the
+            // existing busy-row indicator surfaces. Using a sentinel that
+            // can't collide with any real remote id.
+            val pendingId = "local-import"
+            installingDriverId.value = pendingId
+            scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    CustomDriver.installFromUri(context, uri)
+                }
+                installingDriverId.value = null
+                if (result != null) {
+                    installedDrivers.clear()
+                    installedDrivers.addAll(CustomDriver.listInstalled(context))
+                    selectedDriverId.value = result.id
+                    driverBrowserError.value = null
+                    showDriverBrowser.value = false
+                } else {
+                    driverBrowserError.value = "Couldn't import that file. It needs to be an AdrenoToolsDrivers-style .zip with meta.json + libvulkan_freedreno.so at the root."
+                }
+            }
+        }
+
+        // Fetch on first entry to the sheet. remoteDrivers stays around
+        // for the wizard session so reopening the sheet is instant.
+        LaunchedEffect(Unit) {
+            if (remoteDrivers.value.isNullOrEmpty()) {
+                driverBrowserError.value = null
+                val fetched = withContext(Dispatchers.IO) { CustomDriver.fetchRemote() }
+                remoteDrivers.value = fetched
+                if (fetched.isEmpty()) {
+                    driverBrowserError.value = "Couldn't reach github.com/K11MCH1/AdrenoToolsDrivers. Check your connection and try again."
+                }
+            }
+        }
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Available drivers",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Colors.pasx2_blue.copy(alpha = 0.30f))
+                        .border(1.dp, Colors.pasx2_blue.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                        .clickable {
+                            localLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        "Pick local .zip",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xFF2A2A2A))
+                        .clickable { showDriverBrowser.value = false }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Text("Close", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Text(
+                "Source: github.com/K11MCH1/AdrenoToolsDrivers — Mesa Turnip and friends. Each driver lands under app-private storage.",
+                color = Color(0xFF888888),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(bottom = 10.dp),
+            )
+
+            val err = driverBrowserError.value
+            if (err != null) {
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF5A1A1A))
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("⚠", fontSize = 18.sp, color = Color(0xFFFF6B6B))
+                    Spacer(Modifier.width(8.dp))
+                    Text(err, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(10.dp))
+            }
+
+            val list = remoteDrivers.value
+            when {
+                list == null -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = Colors.pasx2_blue,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text("Loading driver list…", color = Color.White, fontSize = 13.sp)
+                    }
+                }
+                list.isEmpty() -> {
+                    Text(
+                        "No drivers available right now.",
+                        color = Color.LightGray,
+                    )
+                }
+                else -> {
+                    // 2-column grid mirroring the BIOS picker layout.
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        itemsIndexed(list, key = { _, it -> it.id }) { _, remote ->
+                            val installed = installedDrivers.any { it.id == remote.id }
+                            val installing = installingDriverId.value == remote.id
+                            val active = installed && selectedDriverId.value == remote.id
+                            DriverBrowserRow(
+                                remote = remote,
+                                installed = installed,
+                                installing = installing,
+                                active = active,
+                                onInstall = {
+                                    installingDriverId.value = remote.id
+                                    scope.launch {
+                                        val result = withContext(Dispatchers.IO) {
+                                            CustomDriver.download(context, remote)
+                                        }
+                                        installingDriverId.value = null
+                                        if (result != null) {
+                                            // Install also activates: refresh chips,
+                                            // set this driver as the active pick, and
+                                            // bounce out of the sheet so the user
+                                            // immediately sees their selection.
+                                            installedDrivers.clear()
+                                            installedDrivers.addAll(CustomDriver.listInstalled(context))
+                                            selectedDriverId.value = result.id
+                                            showDriverBrowser.value = false
+                                        } else {
+                                            driverBrowserError.value = "Install failed for ${remote.assetName}. The download or extract step errored — try again."
+                                        }
+                                    }
+                                },
+                                onSelect = {
+                                    selectedDriverId.value = remote.id
+                                    showDriverBrowser.value = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun DriverBrowserRow(
+        remote: CustomDriver.RemoteDriver,
+        installed: Boolean,
+        installing: Boolean,
+        active: Boolean,
+        onInstall: () -> Unit,
+        onSelect: () -> Unit,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF1F2123))
+                .padding(12.dp),
+        ) {
+            Text(
+                remote.releaseName.ifBlank { remote.assetName },
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                remote.assetName,
+                color = Color(0xFFAACCFF),
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                buildString {
+                    if (remote.tagName.isNotEmpty()) append(remote.tagName)
+                    if (remote.sizeBytes > 0) {
+                        if (isNotEmpty()) append(" · ")
+                        append(humanBytes(remote.sizeBytes))
+                    }
+                    if (remote.publishedAt.isNotEmpty()) {
+                        if (isNotEmpty()) append(" · ")
+                        append(remote.publishedAt.substringBefore('T'))
+                    }
+                },
+                color = Color(0xFF888888),
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(10.dp))
+            // Action button fills the cell width — visually tighter in a
+            // 2-column grid than a right-aligned button.
+            when {
+                installing -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF2A2A2A))
+                            .padding(vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = Colors.pasx2_blue,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Installing…", color = Color(0xFFCCCCCC), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                active -> {
+                    // Already the active pick — no-op tile, distinct visual
+                    // so the user can see "yes you're using this one".
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF1F3A1F))
+                            .padding(vertical = 7.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("✓ Active", color = Color(0xFF9ED49E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                installed -> {
+                    // Installed but a different driver is active — Select
+                    // makes this the active pick + closes the sheet.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Colors.pasx2_blue.copy(alpha = 0.30f))
+                            .border(1.dp, Colors.pasx2_blue.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                            .clickable(onClick = onSelect)
+                            .padding(vertical = 7.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("Select", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                else -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Colors.pasx2_blue)
+                            .clickable(onClick = onInstall)
+                            .padding(vertical = 7.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("Install", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun humanBytes(n: Long): String {
+        if (n < 1024) return "${n} B"
+        if (n < 1024 * 1024) return "${n / 1024} KB"
+        return "%.1f MB".format(n / 1024.0 / 1024.0)
     }
 
     /** BIOS page content — single scrollable list. The pick button lives in

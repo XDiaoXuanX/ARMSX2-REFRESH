@@ -20,6 +20,7 @@
 #include "GameList.h"
 #include "GameDatabase.h"
 #include "GS/GSPerfMon.h"
+#include "GS/Renderers/Vulkan/VKShaderCache.h"
 #include "GSDumpReplayer.h"
 #include "ImGui/ImGuiManager.h"
 #include "common/Path.h"
@@ -35,6 +36,7 @@
 #include "ImGui/FullscreenUI.h"
 #include "SIO/Pad/PadDualshock2.h"
 #include "MTGS.h"
+#include "GS/Renderers/Vulkan/VKLoader.h"
 #include "SDL3/SDL.h"
 #include "ps2/BiosTools.h"
 #include "BuildVersion.h"
@@ -210,22 +212,24 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
         // RenderModeButton (cycles VULKAN_SW ↔ OPENGL). VK HW is intentionally
         // not in the cycle while its blending bugs remain unresolved.
 
-        // OpenGL HW: force texture barriers via glMemoryBarrier on mobile.
-        // Default `OverrideTextureBarriers = -1` (auto) leaves barrier behavior
-        // up to extension detection — and on Adreno/Mali, neither
-        // `GL_ARB_texture_barrier` nor `GL_NV_texture_barrier` is present, so
-        // PCSX2 silently installs a no-op `ReplaceGL::TextureBarrier`
-        // (GSDeviceOGL.cpp:55-58) and switches to the multidraw_fb_copy
-        // fallback. That fallback has a suspected coherence bug for SH2
-        // model rendering — geometry pops in/out across feedback-loop draws.
+        // OpenGL HW: leave texture barriers on Auto (-1).
         //
-        // Override to `1` (Force Enabled) to switch the fallback to
-        // `MemoryBarrierAsTextureBarrier` (GSDeviceOGL.cpp:50-53), which
-        // emits `glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)` between
-        // the read+write halves of feedback draws. GLES 3.1+ supports this
-        // unambiguously. Diagnostic experiment for SH2 pop-in (Test 1 from
-        // the OpenGL HW mobile audit, 2026-05-06).
-        si.SetIntValue("EmuCore/GS", "OverrideTextureBarriers", 1);
+        // With the Mali GPU profile restored (see GSGPUProfile + the Mali
+        // block in GSDeviceOGL::CheckFeatures), Auto is the correct default:
+        //   - Mali devices that report GL_ARM_shader_framebuffer_fetch use
+        //     that as the texture-barrier substitute. Forcing `1` here
+        //     skipped the Mali Auto branch and installed
+        //     MemoryBarrierAsTextureBarrier instead, which is the wrong
+        //     path for Mali.
+        //   - Adreno + other GLES devices still fall through to the
+        //     multidraw_fb_copy fallback (or the ARB barrier path on
+        //     desktop) without the override.
+        //
+        // The earlier `= 1` (Force Enabled) was a diagnostic experiment for
+        // SH2 pop-in. If that regression returns under Auto, expose the
+        // override as a per-user toggle in the Renderer tab rather than
+        // forcing it globally.
+        si.SetIntValue("EmuCore/GS", "OverrideTextureBarriers", -1);
 
         // none of the bindings are going to resolve to anything
         Pad::ClearPortBindings(si, 0);
@@ -401,6 +405,33 @@ extern "C"
 JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_isHardcoreMode(JNIEnv *env, jclass clazz) {
     return Achievements::IsHardcoreModeActive() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Live HW/SW state from the GS thread's POV. The in-game overlay's renderer
+// pill mirrors this on every poll so an emucore-driven swap (e.g. SoftwareRendererFMVHack
+// flipping to SW during an FMV) doesn't desync the UI from the actual state.
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_isHardwareRenderer(JNIEnv *env, jclass clazz) {
+    return GSIsHardwareRenderer() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Custom Vulkan driver pin. Called from Main.applyRendererPrefs BEFORE the
+// VM starts so the first MTGS::Open (which triggers Vulkan::LoadVulkanLibrary)
+// picks up the custom driver. Empty strings revert to the system loader.
+// See Vulkan::SetCustomDriverPath in VKLoader.cpp for the splice.
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setCustomVulkanDriver(
+    JNIEnv* env, jclass clazz,
+    jstring driverDir, jstring driverName,
+    jstring redirectDir, jstring hookLibDir) {
+    const std::string dir   = GetJavaString(env, driverDir);
+    const std::string name  = GetJavaString(env, driverName);
+    const std::string redir = GetJavaString(env, redirectDir);
+    const std::string hook  = GetJavaString(env, hookLibDir);
+    Vulkan::SetCustomDriverPath(
+        dir.c_str(), name.c_str(), redir.c_str(), hook.c_str());
 }
 
 extern "C"
@@ -631,9 +662,19 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderPreloading(JNIEnv *env, jclass clazz,
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderSoftware(JNIEnv *env, jclass clazz) {
+    // Don't go through MTGS::ApplySettings → GSUpdateConfig → GSreopen(true,true,SW)
+    // here: GSreopen(recreate_device=true, SW) calls GetAPIForRenderer(SW), which
+    // falls to the default branch and asks GSUtil::GetPreferredRenderer for an API.
+    // On Android that resolves to OpenGL — so going SW after picking Vulkan in the
+    // wizard would silently rebuild GSDeviceOGL and the SW renderer would present
+    // via GL, not VK.
+    //
+    // SetSoftwareRendering preserves the existing GSDevice (VK stays VK, OGL stays
+    // OGL) and only swaps the renderer to SW. The picked backend remains the host
+    // display device.
     EmuConfig.GS.Renderer = GSRendererType::SW;
     if(MTGS::IsOpen()) {
-        MTGS::ApplySettings();
+        MTGS::SetSoftwareRendering(true, EmuConfig.GS.InterlaceMode, false);
     }
 }
 
@@ -660,24 +701,35 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderOpenGL(JNIEnv *env, jclass clazz) {
         static_cast<int>(GSRendererType::OGL));
     EmuConfig.GS.Renderer = GSRendererType::OGL;
     if(MTGS::IsOpen()) {
-        MTGS::ApplySettings();
+        // In-game pill SW→HW: keep the existing OGL device, swap renderer to HW.
+        // ApplySettings would do a full teardown which is fine here (same backend),
+        // but SetSoftwareRendering is cheaper and matches the symmetric path used
+        // by renderSoftware.
+        MTGS::SetSoftwareRendering(false, EmuConfig.GS.InterlaceMode, false);
     }
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderVulkan(JNIEnv *env, jclass clazz) {
-    // VK HW is temporarily disabled due to unresolved blending visual bugs
-    // (BIOS pillars / SCEA text get black boxes when AccBlendLevel = Full).
-    // Coerce VK HW requests to SW so the SW renderer still uses the Vulkan
-    // device as its display backend. Restore the line below once VK HW
-    // blending is fixed.
-    // const auto renderer = GSRendererType::VK;
-    const auto renderer = GSRendererType::SW;
-    Host::SetBaseIntSettingValue("EmuCore/GS", "Renderer", static_cast<int>(renderer));
-    EmuConfig.GS.Renderer = renderer;
+    // Selecting "Vulkan" in the setup wizard means the host display device
+    // is GSDeviceVK. We set Renderer=VK so MTGS::Open creates that device;
+    // a subsequent renderSoftware() call then flips Renderer=SW but keeps
+    // GSDeviceVK as the display, which is how the in-game HW/SW pill cycles
+    // inside the user's chosen backend.
+    //
+    // VK HW had a known blending regression (BIOS pillars / SCEA text get
+    // black boxes when AccBlendLevel = Full) — was masked here by a coerce
+    // to SW. The coerce is removed because (a) the user explicitly picked
+    // Vulkan, (b) without it SW couldn't get the VK display backend, and
+    // (c) the AccBlendLevel default in the wizard is Full and the in-game
+    // overlay has the toggle if the user hits the regression.
+    Host::SetBaseIntSettingValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::VK));
+    EmuConfig.GS.Renderer = GSRendererType::VK;
     if(MTGS::IsOpen()) {
-        MTGS::ApplySettings();
+        // In-game pill SW→HW with Vulkan backend: keep the existing VK device,
+        // swap renderer to HW.
+        MTGS::SetSoftwareRendering(false, EmuConfig.GS.InterlaceMode, false);
     }
 }
 
@@ -916,6 +968,19 @@ Java_kr_co_iefriends_pcsx2_NativeApp_resume(JNIEnv *env, jclass clazz) {
     std::thread([] {
         VMManager::SetPaused(false);
     }).detach();
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_flushShaderCache(JNIEnv *env, jclass clazz) {
+    // Persist the Vulkan pipeline cache so cold restarts don't re-compile every
+    // pipeline. Hooked from onPause so the typical background-then-swipe-kill
+    // sequence on Android still writes the cache. The destructor in
+    // VKShaderCache also flushes, but we can't rely on onDestroy running before
+    // Android reaps the process. No-op for the OpenGL backend (GL backend
+    // manages its own cache via GLShaderCache; this is Vulkan-specific).
+    if (g_vulkan_shader_cache)
+        g_vulkan_shader_cache->FlushPipelineCache();
 }
 
 extern "C"
@@ -1433,6 +1498,41 @@ Java_kr_co_iefriends_pcsx2_NativeApp_osdShowVersion(JNIEnv*, jclass, jboolean en
 extern "C" JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_osdShowFrameTimes(JNIEnv*, jclass, jboolean enabled) {
     EmuConfig.GS.OsdShowFrameTimes = enabled;
+    applyOsdSetting();
+}
+
+// Master OSD toggle — flips every OSD bit we enable at first init in
+// initialize() so the in-game overlay's OSD pill is a single switch.
+// Writes BASE too so the state survives the next ApplySettings reload
+// (live EmuConfig writes get clobbered otherwise — see the EmuConfig vs
+// SettingsInterface gotcha note).
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_osdShowAll(JNIEnv*, jclass, jboolean enabled) {
+    const bool e = enabled;
+    EmuConfig.GS.OsdShowFPS = e;
+    EmuConfig.GS.OsdShowSpeed = e;
+    EmuConfig.GS.OsdShowResolution = e;
+    EmuConfig.GS.OsdShowCPU = e;
+    EmuConfig.GS.OsdShowGPU = e;
+    EmuConfig.GS.OsdShowGSStats = e;
+    EmuConfig.GS.OsdShowFrameTimes = e;
+    EmuConfig.GS.OsdShowHardwareInfo = e;
+    EmuConfig.GS.OsdShowVersion = e;
+    EmuConfig.GS.OsdShowSettings = e;
+    EmuConfig.GS.OsdShowInputs = e;
+
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowFPS", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowSpeed", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowResolution", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowCPU", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowGPU", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowGSStats", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowFrameTimes", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowHardwareInfo", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowVersion", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowSettings", e);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowInputs", e);
+
     applyOsdSetting();
 }
 

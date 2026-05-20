@@ -103,6 +103,14 @@ layout(std140, set = 0, binding = 2) readonly buffer VertexBuffer {
 	RawVertex vertex_buffer[];
 };
 
+layout(push_constant) uniform VSPushConstants
+{
+	uint base_vertex;
+	uint base_index;
+	uint pad0_vs_pc;
+	uint pad1_vs_pc;
+} vs_pc;
+
 struct ProcessedVertex
 {
 	vec4 p;
@@ -113,7 +121,7 @@ struct ProcessedVertex
 
 ProcessedVertex load_vertex(uint index)
 {
-	RawVertex rvtx = vertex_buffer[index];
+	RawVertex rvtx = vertex_buffer[vs_pc.base_vertex + index];
 
 	vec2 a_st = rvtx.ST;
 	uvec4 a_c = uvec4(bitfieldExtract(rvtx.RGBA, 0, 8), bitfieldExtract(rvtx.RGBA, 8, 8),

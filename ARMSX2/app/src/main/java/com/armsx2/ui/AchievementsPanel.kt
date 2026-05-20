@@ -253,6 +253,19 @@ fun AchievementsPanel(
             // that drives Save / Load State row dimming. Doing it here so
             // we don't add a second polling loop.
             InGameOverlay.hardcoreOn.value = s.hardcore
+            // Same idea for the renderer pill — keep the HW/SW label in
+            // sync with the actual GS state (emucore may swap independently,
+            // e.g. SoftwareRendererFMVHack during FMVs). Auto is sticky:
+            // once the user picks Auto, the pill stays "Auto" regardless of
+            // what GS resolved it to underneath.
+            if (InGameOverlay.rendererMode.value != InGameOverlay.RendererMode.Auto) {
+                runCatching {
+                    InGameOverlay.rendererMode.value =
+                        if (NativeApp.isHardwareRenderer())
+                            InGameOverlay.RendererMode.Hardware
+                        else InGameOverlay.RendererMode.Software
+                }
+            }
             delay(4000)
         }
     }

@@ -78,6 +78,11 @@ data class Settings(
     val triFilter: Int = -1,
     /** EmuCore/GS/MaxAnisotropy — 0 Off, else 2/4/8/16. */
     val maxAnisotropy: Int = 0,
+    /** EmuCore/GS/AndroidGpuProfileOverride — 0 Auto · 1 Mali · 2 Adreno · 3 PowerVR.
+     *  Stringified to "auto"/"mali"/"adreno"/"powervr" when written to emucore.
+     *  Picked up in GSDeviceOGL::CheckFeatures at device init; requires
+     *  a renderer restart to take effect. */
+    val gpuProfile: Int = 0,
 ) {
     /** Push every field into emucore via NativeApp.setSetting + commit. */
     fun applyTo() {
@@ -115,6 +120,13 @@ data class Settings(
         NativeApp.setSetting("EmuCore/GS", "UserHacks_HalfPixelOffset", "int", halfPixelOffset.toString())
         NativeApp.setSetting("EmuCore/GS", "TriFilter", "int", triFilter.toString())
         NativeApp.setSetting("EmuCore/GS", "MaxAnisotropy", "int", maxAnisotropy.toString())
+        val gpuProfileStr = when (gpuProfile) {
+            1 -> "mali"
+            2 -> "adreno"
+            3 -> "powervr"
+            else -> "auto"
+        }
+        NativeApp.setSetting("EmuCore/GS", "AndroidGpuProfileOverride", "string", gpuProfileStr)
         NativeApp.commitSettings()
     }
 
@@ -141,6 +153,7 @@ data class Settings(
         put("halfPixelOffset", halfPixelOffset)
         put("triFilter", triFilter)
         put("maxAnisotropy", maxAnisotropy)
+        put("gpuProfile", gpuProfile)
     }
 
     companion object {
@@ -171,6 +184,7 @@ data class Settings(
                 halfPixelOffset = json.optInt("halfPixelOffset", def.halfPixelOffset),
                 triFilter = json.optInt("triFilter", def.triFilter),
                 maxAnisotropy = json.optInt("maxAnisotropy", def.maxAnisotropy),
+                gpuProfile = json.optInt("gpuProfile", def.gpuProfile),
             )
         }
 
@@ -198,6 +212,7 @@ data class Settings(
             halfPixelOffset = if (overrides.has("halfPixelOffset")) overrides.getInt("halfPixelOffset") else base.halfPixelOffset,
             triFilter = if (overrides.has("triFilter")) overrides.getInt("triFilter") else base.triFilter,
             maxAnisotropy = if (overrides.has("maxAnisotropy")) overrides.getInt("maxAnisotropy") else base.maxAnisotropy,
+            gpuProfile = if (overrides.has("gpuProfile")) overrides.getInt("gpuProfile") else base.gpuProfile,
         )
     }
 }

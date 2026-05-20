@@ -83,6 +83,19 @@ android {
         // path. AGP 8 made this opt-in.
         buildConfig = true
     }
+
+    packaging {
+        jniLibs {
+            // libadrenotools requires `useLegacyPackaging = true` so the
+            // hook .so files (hook_impl, main_hook, file_redirect_hook,
+            // gsl_alloc_hook) get extracted to ApplicationInfo.nativeLibraryDir
+            // at install time. Without this, AGP leaves them inside the apk
+            // and adrenotools' linker-namespace bypass can't find them by
+            // path — the custom Vulkan driver load silently falls back to
+            // the system loader.
+            useLegacyPackaging = true
+        }
+    }
 }
 
 // Android Studio's "Build > Clean Project" runs the `clean` task, but AGP

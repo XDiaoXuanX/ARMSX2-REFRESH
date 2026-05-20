@@ -3406,15 +3406,9 @@ void VMManager::WarnAboutUnsafeSettings()
 			append(ICON_FA_TV,
 				TRANSLATE_SV("VMManager", "Integer scaling is enabled. This may shrink the image."));
 		}
-		static bool render_change_warn = false;
-		if (EmuConfig.GS.Renderer != GSRendererType::Auto && EmuConfig.GS.Renderer != GSRendererType::SW && !render_change_warn)
-		{
-			// show messagesbox
-			render_change_warn = true;
-
-			append(ICON_FA_CIRCLE_EXCLAMATION,
-				TRANSLATE_SV("VMManager", "Graphics API is not set to Automatic. This may cause performance problems and graphical issues."));
-		}
+		// The "Graphics API is not set to Automatic" OSD warning was removed:
+		// the setup wizard forces an explicit GL/VK pick by design, so this
+		// banner would fire on every boot regardless of correctness.
 	}
 	if (EmuConfig.GS.DumpGSData)
 	{

@@ -28,6 +28,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import compose.icons.LineAwesomeIcons
 import compose.icons.lineawesomeicons.CompactDiscSolid
 import compose.icons.lineawesomeicons.CubeSolid
+import compose.icons.lineawesomeicons.EyeSlashSolid
+import compose.icons.lineawesomeicons.EyeSolid
 import compose.icons.lineawesomeicons.FolderOpenSolid
 import compose.icons.lineawesomeicons.PlaySolid
 import compose.icons.lineawesomeicons.PowerOffSolid
@@ -57,7 +59,6 @@ import coil.request.ImageRequest
 import com.armsx2.EmuState
 import com.armsx2.Main
 import com.armsx2.R
-import com.armsx2.RenderMode
 import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
 import com.armsx2.ui.settings.PerformanceTab
@@ -138,8 +139,37 @@ object InGameOverlay {
     // the default (ON).
     val frameLimitOn = mutableStateOf(true)
 
-    // Renderer cycle: matches RenderModeButton's OPENGL ↔ VULKAN_SW path.
-    private val currentRenderer = mutableStateOf(RenderMode.OPENGL)
+    /** Renderer pill mode. Cycle: Auto → Hardware → Software → Auto.
+     *
+     *  - Auto = the default. Honours the wizard's backend choice
+     *    (Main.renderer = "opengl" / "vulkan") and uses its HW path, but
+     *    does NOT pin anything — emucore is free to swap to SW for
+     *    things like SoftwareRendererFMVHack during FMVs, and the pill
+     *    sync stays out of the way so the label keeps reading "Auto".
+     *  - Hardware = pin HW on the picked backend.
+     *  - Software = pin SW (display still on the picked backend's device).
+     *
+     *  We do NOT call NativeApp.renderAuto() here because it writes
+     *  GSRendererType::Auto which then asks GSUtil::GetPreferredRenderer
+     *  to pick a backend — on Android that resolves to OpenGL regardless
+     *  of the wizard pick, silently rebuilding the device and (for Vulkan
+     *  users) breaking the user's chosen backend. Auto's HW path is the
+     *  same JNI as Hardware; the difference is purely label + sync. */
+    enum class RendererMode { Auto, Hardware, Software }
+
+    // Mirrored from native via NativeApp.isHardwareRenderer() on open +
+    // on the achievements panel's 4s poll so an emucore-driven swap
+    // (e.g. SoftwareRendererFMVHack flipping to SW during an FMV) doesn't
+    // desync the Hardware / Software label. Sync is suppressed while in
+    // Auto so the label stays "Auto" — the user picked "let it manage".
+    val rendererMode = mutableStateOf(RendererMode.Auto)
+
+    // OSD master toggle. Default ON because native-lib's initialize() turns
+    // every OsdShow* bit on at first init; we only need to mirror the state
+    // here so the pill label is right and re-toggling flips them all back.
+    // Singleton state means the in-session preference persists across game
+    // launches, matching the frame-limit pill pattern.
+    private val osdShown = mutableStateOf(true)
 
     // Tracks whether THIS overlay is the one that paused the VM. If the
     // user already had the VM paused (e.g. via toolbar) before opening
@@ -168,6 +198,16 @@ object InGameOverlay {
         currentTab.value = Tab.PlayingNow
         // Re-hydrate settings from disk in case anything edited out-of-band.
         settingsState.value = ConfigStore.loadGlobal()
+        // Sync pill state from native — covers emucore-driven swaps that
+        // happened while the overlay was closed. Auto is sticky against
+        // the sync (the user picked "let it decide", so we keep showing
+        // Auto even though GS resolved it to HW underneath).
+        if (rendererMode.value != RendererMode.Auto) {
+            runCatching {
+                rendererMode.value = if (NativeApp.isHardwareRenderer())
+                    RendererMode.Hardware else RendererMode.Software
+            }
+        }
         WindowImpl.overlayVisible.value = true
     }
 
@@ -625,25 +665,42 @@ object InGameOverlay {
                     WindowImpl.showLibrary.value = true
                     closeKeepingState()
                 }
-                val rendererState = when (currentRenderer.value) {
-                    RenderMode.OPENGL -> "OpenGL HW"
-                    RenderMode.VULKAN_SW -> "Software"
-                }
                 BubbleButton(
                     "Renderer",
                     LineAwesomeIcons.CubeSolid,
-                    stateLine = rendererState,
+                    stateLine = when (rendererMode.value) {
+                        RendererMode.Auto -> "Auto"
+                        RendererMode.Hardware -> "Hardware"
+                        RendererMode.Software -> "Software"
+                    },
                     accent = BubbleAccent.Active,
                     modifier = Modifier.weight(1f),
                 ) {
-                    when (currentRenderer.value) {
-                        RenderMode.OPENGL -> {
-                            currentRenderer.value = RenderMode.VULKAN_SW
-                            Main.renderSoftware()
+                    val backendHw: () -> Unit = {
+                        if (Main.renderer.value == "vulkan")
+                            Main.renderVulkan() else Main.renderOpenGL()
+                    }
+                    rendererMode.value = when (rendererMode.value) {
+                        // Auto → Hardware: pin HW on the picked backend.
+                        // No JNI needed if we're already in HW (poll-sync
+                        // means the native side is already there); call
+                        // the HW JNI anyway to handle the case where the
+                        // engine had auto-swapped to SW (e.g. FMV) but the
+                        // user wants to lock back to HW.
+                        RendererMode.Auto -> {
+                            backendHw()
+                            RendererMode.Hardware
                         }
-                        RenderMode.VULKAN_SW -> {
-                            currentRenderer.value = RenderMode.OPENGL
-                            Main.renderOpenGL()
+                        RendererMode.Hardware -> {
+                            Main.renderSoftware()
+                            RendererMode.Software
+                        }
+                        // Software → Auto: bring the renderer back to the
+                        // backend's HW default. Same JNI as Hardware; the
+                        // pill label differs and the sync leaves us alone.
+                        RendererMode.Software -> {
+                            backendHw()
+                            RendererMode.Auto
                         }
                     }
                 }
@@ -680,11 +737,20 @@ object InGameOverlay {
                     closeKeepingState()
                 }
             }
-            // Row 3: reset + close, two empty slots so cells stay the same
-            // width as rows above. Spacers carry the same weight as a
-            // BubbleButton so the danger accent reads at the row edge
-            // rather than stretching to fill.
+            // Row 3: OSD master toggle, reset, close, trailing spacer.
             BubbleRow {
+                BubbleButton(
+                    "OSD",
+                    if (osdShown.value) LineAwesomeIcons.EyeSolid
+                    else LineAwesomeIcons.EyeSlashSolid,
+                    stateLine = if (osdShown.value) "On" else "Off",
+                    accent = if (osdShown.value)
+                        BubbleAccent.Active else BubbleAccent.Normal,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    osdShown.value = !osdShown.value
+                    NativeApp.osdShowAll(osdShown.value)
+                }
                 BubbleButton(
                     "Reset",
                     LineAwesomeIcons.RedoAltSolid,
@@ -696,7 +762,6 @@ object InGameOverlay {
                     accent = BubbleAccent.Danger,
                     modifier = Modifier.weight(1f),
                 ) { state.value = State.ExitConfirm }
-                Spacer(Modifier.weight(1f))
                 Spacer(Modifier.weight(1f))
             }
         }

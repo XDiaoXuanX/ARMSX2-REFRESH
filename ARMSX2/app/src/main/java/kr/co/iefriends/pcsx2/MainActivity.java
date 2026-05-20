@@ -8,6 +8,7 @@ import android.content.res.AssetManager;
 import android.content.res.Configuration;
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -200,6 +201,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         NativeApp.pause();
+        NativeApp.flushShaderCache();
         super.onPause();
     }
 
@@ -355,10 +357,22 @@ public class MainActivity extends AppCompatActivity {
 
         InputStream is = null;
         FileOutputStream os = null;
+        final boolean isShader = srcFile.contains("shaders");
         try {
             is = assetMgr.open(srcFile);
-            boolean _exists = new File(destFile).exists();
-            if (srcFile.contains("shaders")) {
+            File destFileObj = new File(destFile);
+            boolean _exists = destFileObj.exists();
+            if (isShader) {
+                // Shader sources MUST always reflect the APK assets, otherwise a
+                // C++ entry-point bump (e.g. adding ps_convert_float32_depth_to_color)
+                // ends up requesting a function the on-disk shader doesn't define and
+                // the GLSL compiler reports "main() function is missing." Forcing
+                // _exists=false alone is not enough — a partial/denied write would
+                // leave the OLD file in place. Delete first so a write failure can't
+                // silently fall back to stale content.
+                if (_exists && !destFileObj.delete()) {
+                    Log.w("ARMSX2", "copyFile: failed to delete stale shader " + destFile);
+                }
                 _exists = false;
             }
             if (!_exists) {
@@ -373,7 +387,10 @@ public class MainActivity extends AppCompatActivity {
                 os.flush();
                 os.close();
             }
-        } catch (IOException ignored) {
+        } catch (IOException e) {
+            Log.e("ARMSX2", "copyFile failed: " + srcFile + " -> " + destFile + ": " + e.getMessage());
+            try { if (is != null) is.close(); } catch (IOException ignored) {}
+            try { if (os != null) os.close(); } catch (IOException ignored) {}
         }
     }
 }

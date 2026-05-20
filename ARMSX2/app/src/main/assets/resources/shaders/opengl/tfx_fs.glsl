@@ -121,17 +121,29 @@ in SHADER
 #define TARGET_0_QUALIFIER out
 
 // Only enable framebuffer fetch when we actually need it.
+// We need to force the colour to be defined here, to read from it.
+// Basically the only scenario where this'll happen is RGBA masked and DATE is active.
+//
+// Mali devices use ARM_shader_framebuffer_fetch even when the EXT extension is
+// also advertised — the EXT inout path is broken on every Mali driver tested
+// and only `gl_LastFragColorARM` reads back the live tile pixel correctly.
+// Selection is driven by GPU_PROFILE_MALI (emitted from the C++ side after
+// the runtime profile is resolved).
 #if HAS_FRAMEBUFFER_FETCH && NEEDS_RT
-	// We need to force the colour to be defined here, to read from it.
-	// Basically the only scenario where this'll happen is RGBA masked and DATE is active.
 	#undef PS_NO_COLOR
 	#define PS_NO_COLOR 0
-	#if defined(GL_EXT_shader_framebuffer_fetch)
-		#undef TARGET_0_QUALIFIER
-		#define TARGET_0_QUALIFIER inout
-		#define LAST_FRAG_COLOR SV_Target0
-	#elif defined(GL_ARM_shader_framebuffer_fetch)
-		#define LAST_FRAG_COLOR gl_LastFragColorARM
+	#if GPU_PROFILE_MALI
+		#if HAS_ARM_SHADER_FRAMEBUFFER_FETCH
+			#define LAST_FRAG_COLOR gl_LastFragColorARM
+		#endif
+	#else
+		#if HAS_EXT_SHADER_FRAMEBUFFER_FETCH || HAS_EXT_SHADER_PIXEL_LOCAL_STORAGE
+			#undef TARGET_0_QUALIFIER
+			#define TARGET_0_QUALIFIER inout
+			#define LAST_FRAG_COLOR SV_Target0
+		#elif HAS_ARM_SHADER_FRAMEBUFFER_FETCH
+			#define LAST_FRAG_COLOR gl_LastFragColorARM
+		#endif
 	#endif
 #endif
 
