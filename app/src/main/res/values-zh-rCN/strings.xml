@@ -18,7 +18,7 @@
     <string name="controller_action_cross">叉</string>
     <string name="controller_action_circle">圆圈</string>
     <string name="controller_action_square">正方形</string>
-    <string name="controller_action_triangle">三角形</string>
+    <string name="controller_action_triangle">△</string>
     <string name="controller_action_l1">左1</string>
     <string name="controller_action_l2">左2</string>
     <string name="controller_action_r1">右1</string>
@@ -347,7 +347,7 @@ Open it later from Settings → Open ARMSX2 directory.</string>
     <string name="gpu_driver_manager_description">Manage custom GPU drivers for improved compatibility and performance. Custom drivers (like Turnip for Adreno GPUs) can be installed here. Drivers must be in ZIP format with a meta.json file.</string>
     <string name="gpu_driver_install_button">Install Driver</string>
     <string name="gpu_driver_install_title">Install GPU Driver</string>
-    <string name="gpu_driver_install_message">Select a driver ZIP file to install. Custom drivers can improve performance and compatibility on some devices.</string>
+    <string name="gpu_driver_install_message">选择要安装的驱动ZIP文件。自定义驱动程序可以提高某些设备的性能和兼容性。</string>
     <string name="gpu_driver_invalid_zip">Invalid driver ZIP file. Missing or invalid meta.json.</string>
     <string name="gpu_driver_api_too_high">Driver requires Android API %1$d or higher. Your device is API %2$d.</string>
     <string name="gpu_driver_install_from_file">Select File</string>
@@ -367,7 +367,7 @@ Open it later from Settings → Open ARMSX2 directory.</string>
     <string name="home_toolbar_toggle_view">Toggle View</string>
     <string name="home_toolbar_search">Search</string>
     <string name="home_toolbar_rn_activity">RN Activity</string>
-    <string name="home_header_image_content_description">Header image</string>
+    <string name="home_header_image_content_description">标题图像</string>
     <string name="home_header_blur_image_content_description">Header blurred image</string>
     <string name="home_game_selector_subtitle">Game Selector</string>
     <string name="home_nav_section_emulation">Emulation</string>
@@ -411,7 +411,7 @@ Open it later from Settings → Open ARMSX2 directory.</string>
     <string name="home_launching_game">Launching: %1$s</string>
     <string name="home_unable_open_file_picker">Unable to open file picker</string>
     <string name="home_games_found_count">Found %1$d game(s)</string>
-    <string name="home_no_games_detected">No games detected in this folder</string>
+    <string name="home_no_games_detected">此目录中没有检测到游戏</string>
     <string name="home_background_cleared">Background cleared.</string>
     <string name="home_preflight_boot_bios">Preflight: booting BIOS...</string>
     <string name="home_preflight_launch_selected_game">Preflight: launching selected game...</string>
