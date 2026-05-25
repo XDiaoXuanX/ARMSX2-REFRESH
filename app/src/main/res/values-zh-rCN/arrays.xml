@@ -40,7 +40,7 @@
     </string-array>
     <string-array name="bilinear_present">
         <item>关闭</item>
-        <item>Bilinear (Smooth)</item>
+        <item>双线性过滤(平滑)</item>
         <item>Bilinear (Sharp)</item>
     </string-array>
     <string-array name="trilinear_filtering">
@@ -92,7 +92,7 @@
     </string-array>
     <string-array name="auto_flush_hw">
         <item>禁用</item>
-        <item>Sprites Only</item>
+        <item>仅处理平面元素</item>
         <item>启用</item>
     </string-array>
     <string-array name="cpu_cores_basic">
