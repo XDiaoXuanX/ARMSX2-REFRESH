@@ -9,7 +9,7 @@
     <string-array name="gpu_profile_override">
         <item>自动 (推荐)</item>
         <item>强制使用Mali 图形处理器</item>
-        <item>强制使用 Adreno图形处理器</item>
+        <item>强制使用 Adreno 图形处理器</item>
     </string-array>
     <string-array name="texture_filtering">
         <item>PS2 (默认)</item>
