@@ -12,17 +12,82 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "SIO/Pad/PadDualshock2.h"
 #include "Counters.h"
 #include "GS/GSState.h"
+#include "pcsx2/Host.h"
 #include "pcsx2/INISettingsInterface.h"
 #include "common/FileSystem.h"
 #include "common/Path.h"
+#include "common/ZipHelpers.h"
 
 #include <cstdio>
+#include <future>
+#include <optional>
+#include <string_view>
+#include <vector>
 
 // Access the global settings interface from ios_main.mm
 extern INISettingsInterface* g_p44_settings_interface;
 extern "C" void ARMSX2_PrepareGameRenderViewForCurrentRenderer(const char* reason);
 
 static NSDate* s_lastNVMSaveDate = nil;
+
+@implementation ARMSX2SaveStateSlotInfo
+@end
+
+static NSString* ARMSX2NSStringFromStdString(const std::string& value)
+{
+    if (value.empty())
+        return @"";
+
+    NSString* string = [NSString stringWithUTF8String:value.c_str()];
+    return string ?: @"";
+}
+
+static NSString* ARMSX2NSStringFromStringView(std::string_view value)
+{
+    if (value.empty())
+        return @"";
+
+    NSString* string = [[NSString alloc] initWithBytes:value.data() length:value.size() encoding:NSUTF8StringEncoding];
+    return string ?: @"";
+}
+
+static BOOL ARMSX2GetCurrentSaveStateIdentity(std::string* serial, u32* crc)
+{
+    if (!VMManager::HasValidVM())
+        return NO;
+
+    const std::string currentSerial = VMManager::GetDiscSerial();
+    const u32 currentCRC = VMManager::GetDiscCRC();
+    if (currentSerial.empty() || currentCRC == 0)
+        return NO;
+
+    if (serial)
+        *serial = currentSerial;
+    if (crc)
+        *crc = currentCRC;
+    return YES;
+}
+
+static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
+{
+    if (path.empty())
+        return nil;
+
+    zip_error_t ze = {};
+    auto zf = zip_open_managed(path.c_str(), ZIP_RDONLY, &ze);
+    if (!zf)
+        return nil;
+
+    auto zff = zip_fopen_managed(zf.get(), "Screenshot.png", 0);
+    if (!zff)
+        return nil;
+
+    std::optional<std::vector<u8>> data = ReadBinaryFileInZip(zff.get());
+    if (!data.has_value() || data->empty())
+        return nil;
+
+    return [NSData dataWithBytes:data->data() length:data->size()];
+}
 
 @implementation ARMSX2Bridge
 
@@ -412,6 +477,85 @@ static NSDate* s_lastNVMSaveDate = nil;
 
 + (void)requestVMShutdown {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSRequestVMShutdown" object:nil];
+}
+
+#pragma mark - Save states
+
++ (BOOL)hasValidSaveStateGame {
+    return ARMSX2GetCurrentSaveStateIdentity(nullptr, nullptr);
+}
+
++ (nonnull NSArray<ARMSX2SaveStateSlotInfo *> *)saveStateSlots {
+    std::string serial;
+    u32 crc = 0;
+    if (!ARMSX2GetCurrentSaveStateIdentity(&serial, &crc))
+        return @[];
+
+    NSMutableArray<ARMSX2SaveStateSlotInfo *> *slots = [NSMutableArray arrayWithCapacity:VMManager::NUM_SAVE_STATE_SLOTS];
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    for (s32 slot = 1; slot <= VMManager::NUM_SAVE_STATE_SLOTS; slot++) {
+        const std::string path = VMManager::GetSaveStateFileName(serial.c_str(), crc, slot);
+        const BOOL occupied = !path.empty() && FileSystem::FileExists(path.c_str());
+        NSString *nsPath = ARMSX2NSStringFromStdString(path);
+
+        ARMSX2SaveStateSlotInfo *info = [ARMSX2SaveStateSlotInfo new];
+        info.slot = slot;
+        info.occupied = occupied;
+        info.filePath = nsPath;
+        info.fileName = ARMSX2NSStringFromStringView(Path::GetFileName(path));
+
+        if (occupied) {
+            NSDictionary<NSFileAttributeKey, id> *attrs = [fm attributesOfItemAtPath:nsPath error:nil];
+            info.modifiedDate = attrs[NSFileModificationDate];
+            info.previewPNGData = ARMSX2ReadSaveStatePreviewPNG(path);
+        }
+
+        [slots addObject:info];
+    }
+
+    return slots;
+}
+
++ (void)saveStateToSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion {
+    const s32 nativeSlot = static_cast<s32>(slot);
+    ARMSX2SaveStateCompletion callback = [completion copy];
+    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || ![self hasValidSaveStateGame]) {
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(NO); });
+        return;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        bool result = false;
+        Host::RunOnCPUThread([nativeSlot, &result]() {
+            result = VMManager::SaveStateToSlot(nativeSlot, false);
+            VMManager::WaitForSaveStateFlush();
+        }, true);
+
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
+    });
+}
+
++ (void)loadStateFromSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion {
+    const s32 nativeSlot = static_cast<s32>(slot);
+    ARMSX2SaveStateCompletion callback = [completion copy];
+    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || ![self hasValidSaveStateGame]) {
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(NO); });
+        return;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        bool result = false;
+        Host::RunOnCPUThread([nativeSlot, &result]() {
+            result = VMManager::LoadStateFromSlot(nativeSlot);
+        }, true);
+
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
+    });
 }
 
 // Gamepad button mapping

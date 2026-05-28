@@ -24,6 +24,8 @@
 #include <string>
 #include <iostream>
 #include <algorithm>
+#include <deque>
+#include <future>
 
 #include "common/ProgressCallback.h"
 #include "pcsx2/Input/InputManager.h"
@@ -129,6 +131,30 @@ static std::atomic<bool> s_requestVMBoot{false};     // signal VM thread to boot
 static std::mutex s_vmMutex;
 static std::condition_variable s_vmCV;
 static bool s_vmThreadCreated = false;               // guarded by s_vmMutex
+
+static std::mutex s_cpuTaskMutex;
+static std::deque<std::function<void()>> s_cpuTasks;
+static std::thread::id s_cpuThreadId;
+
+static bool ARMSX2IsCPUThread()
+{
+    std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+    return s_cpuThreadId == std::this_thread::get_id();
+}
+
+static void ARMSX2DrainCPUThreadTasks()
+{
+    std::deque<std::function<void()>> tasks;
+    {
+        std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+        tasks.swap(s_cpuTasks);
+    }
+
+    for (std::function<void()>& task : tasks) {
+        if (task)
+            task();
+    }
+}
 
 // Gamepad button mapping — 16 PS2 buttons → SDL_GamepadButton
 std::atomic<bool> s_captureMode{false};
@@ -348,7 +374,29 @@ namespace Host
     void SetFullscreen(bool) {}
     void BeginTextInput() {}
     bool ConfirmMessage(std::string_view, std::string_view) { return true; }
-    void RunOnCPUThread(std::function<void()>, bool) {}
+    void RunOnCPUThread(std::function<void()> function, bool block)
+    {
+        if (!function)
+            return;
+
+        if (ARMSX2IsCPUThread() || !s_vmThreadActive.load()) {
+            function();
+            return;
+        }
+
+        if (block) {
+            auto task = std::make_shared<std::packaged_task<void()>>(std::move(function));
+            std::future<void> done = task->get_future();
+            {
+                std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+                s_cpuTasks.emplace_back([task = std::move(task)]() { (*task)(); });
+            }
+            done.wait();
+        } else {
+            std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+            s_cpuTasks.emplace_back(std::move(function));
+        }
+    }
     void ReportInfoAsync(std::string_view, std::string_view) {}
     void ReportErrorAsync(std::string_view title, std::string_view msg) {
         Console.Error("Host::ReportErrorAsync: %s - %s", std::string(title).c_str(), std::string(msg).c_str());
@@ -370,6 +418,8 @@ namespace Host
     void OnAchievementsRefreshed() {}
     void PumpMessagesOnCPUThread()
     {
+        ARMSX2DrainCPUThreadTasks();
+
 // Check for VM shutdown request (safe: runs on CPU thread)
         if (s_requestVMStop.load()) {
             Console.WriteLn("[UI] PumpMessages: setting VM state to Stopping");
@@ -1467,6 +1517,11 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 #endif
 
     std::thread vmThread([]() {
+        {
+            std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+            s_cpuThreadId = std::this_thread::get_id();
+        }
+
 #if ARMSX2_APPLE_MAC_RUNTIME
         LogUnified("@@MAC_VM_THREAD_ENTER@@\n");
 #endif
@@ -1658,6 +1713,7 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 #endif
                         execute_count++;
                     } else {
+                        ARMSX2DrainCPUThreadTasks();
 #if ARMSX2_APPLE_MAC_RUNTIME
                         static unsigned s_mac_vm_sleep_log_count = 0;
                         if (s_mac_vm_sleep_log_count < 16 || ((s_mac_vm_sleep_log_count % 120) == 0))
