@@ -36,6 +36,17 @@ typedef NS_ENUM(NSInteger, ARMSX2PadButton) {
     ARMSX2PadButtonR3,
 };
 
+@interface ARMSX2SaveStateSlotInfo : NSObject
+@property (nonatomic, assign) NSInteger slot;
+@property (nonatomic, assign) BOOL occupied;
+@property (nonatomic, copy, nonnull) NSString *filePath;
+@property (nonatomic, copy, nonnull) NSString *fileName;
+@property (nonatomic, strong, nullable) NSDate *modifiedDate;
+@property (nonatomic, strong, nullable) NSData *previewPNGData;
+@end
+
+typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
+
 @interface ARMSX2Bridge : NSObject
 
 // Game render view (for UIViewRepresentable)
@@ -105,6 +116,12 @@ typedef NS_ENUM(NSInteger, ARMSX2PadButton) {
 + (BOOL)hasBIOS;
 + (void)requestVMBoot;
 + (void)requestVMShutdown;
+
+// Save states
++ (BOOL)hasValidSaveStateGame;
++ (nonnull NSArray<ARMSX2SaveStateSlotInfo *> *)saveStateSlots;
++ (void)saveStateToSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(saveState(toSlot:completion:));
++ (void)loadStateFromSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(loadState(fromSlot:completion:));
 
 // [P53] Gamepad button mapping
 + (void)startButtonCapture;
