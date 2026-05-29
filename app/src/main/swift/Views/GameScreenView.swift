@@ -11,6 +11,8 @@ struct GameScreenView: View {
     @State private var fullScreen = false
     @State private var showSaveStates = false
     @State private var saveStateStatus: String? = nil
+    @State private var saveStateGameReady = false
+    @State private var saveStateMenuVersion = 0
 
     var body: some View {
         GeometryReader { geo in
@@ -55,6 +57,18 @@ struct GameScreenView: View {
         .overlay(alignment: .bottom) {
             saveStateToast
         }
+        .onAppear {
+            refreshSaveStateMenuAvailability(reason: "appear")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                refreshSaveStateMenuAvailability(reason: "appear_delay_250ms")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                refreshSaveStateMenuAvailability(reason: "appear_delay_1s")
+            }
+        }
+        .onChange(of: appState.runningGameName) { _, _ in
+            refreshSaveStateMenuAvailability(reason: "running_game_changed")
+        }
     }
 
     private func menuOverlay(isLandscape: Bool) -> some View {
@@ -93,8 +107,10 @@ struct GameScreenView: View {
                     Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
             }
-            if ARMSX2Bridge.hasValidSaveStateGame() {
+            if shouldOfferSaveStates {
                 Button {
+                    refreshSaveStateMenuAvailability(reason: "menu_save_states_selected")
+                    saveStateUILog("@@SAVE_STATE_UI@@ menu_open offer=\(shouldOfferSaveStates ? 1 : 0) valid=\(ARMSX2Bridge.hasValidSaveStateGame() ? 1 : 0) game=\(appState.runningGameName ?? "(nil)")")
                     showSaveStates = true
                 } label: {
                     Label("Save States", systemImage: "square.stack.3d.up.fill")
@@ -112,6 +128,31 @@ struct GameScreenView: View {
                 .foregroundStyle(.white.opacity(0.5))
                 .padding(6)
                 .background(.black.opacity(0.15), in: Circle())
+        }
+        .id(saveStateMenuVersion)
+        .simultaneousGesture(TapGesture().onEnded {
+            refreshSaveStateMenuAvailability(reason: "menu_tap")
+        })
+    }
+
+    private var isRealGameSession: Bool {
+        guard let runningGameName = appState.runningGameName else {
+            return false
+        }
+        return runningGameName != "BIOS"
+    }
+
+    private var shouldOfferSaveStates: Bool {
+        isRealGameSession || saveStateGameReady
+    }
+
+    private func refreshSaveStateMenuAvailability(reason: String) {
+        let valid = ARMSX2Bridge.hasValidSaveStateGame()
+        let ready = isRealGameSession || valid
+        saveStateUILog("@@SAVE_STATE_UI@@ availability reason=\(reason) real_game=\(isRealGameSession ? 1 : 0) valid=\(valid ? 1 : 0) ready=\(ready ? 1 : 0) current=\(saveStateGameReady ? 1 : 0) game=\(appState.runningGameName ?? "(nil)")")
+        if saveStateGameReady != ready {
+            saveStateGameReady = ready
+            saveStateMenuVersion += 1
         }
     }
 
@@ -202,28 +243,38 @@ private struct SaveStatesPanel: View {
 
     private func refresh() {
         slots = ARMSX2Bridge.saveStateSlots()
+        let occupied = slots.filter(\.occupied).count
+        saveStateUILog("@@SAVE_STATE_UI@@ refresh slots=\(slots.count) occupied=\(occupied)")
     }
 
     private func save(_ slot: ARMSX2SaveStateSlotInfo) {
+        saveStateUILog("@@SAVE_STATE_UI@@ save_begin slot=\(slot.slot) occupied=\(slot.occupied)")
         busySlot = slot.slot
         ARMSX2Bridge.saveState(toSlot: slot.slot) { success in
             busySlot = nil
             refresh()
+            saveStateUILog("@@SAVE_STATE_UI@@ save_end slot=\(slot.slot) success=\(success ? 1 : 0)")
             statusHandler(success ? "State saved to slot \(slot.slot)" : "Failed to save slot \(slot.slot)")
         }
     }
 
     private func load(_ slot: ARMSX2SaveStateSlotInfo) {
+        saveStateUILog("@@SAVE_STATE_UI@@ load_begin slot=\(slot.slot) occupied=\(slot.occupied)")
         busySlot = slot.slot
         ARMSX2Bridge.loadState(fromSlot: slot.slot) { success in
             busySlot = nil
             refresh()
+            saveStateUILog("@@SAVE_STATE_UI@@ load_end slot=\(slot.slot) success=\(success ? 1 : 0)")
             statusHandler(success ? "State loaded from slot \(slot.slot)" : "Failed to load slot \(slot.slot)")
             if success {
                 dismiss()
             }
         }
     }
+}
+
+private func saveStateUILog(_ message: String) {
+    ARMSX2Bridge.logSaveStateEvent(message)
 }
 
 private struct SaveStateSlotRow: View {

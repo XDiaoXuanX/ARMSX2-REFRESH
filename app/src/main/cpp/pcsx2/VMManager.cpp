@@ -206,9 +206,14 @@ static bool s_target_speed_can_sync_to_host = false;
 static bool s_target_speed_synced_to_host = false;
 static bool s_use_vsync_for_timing = false;
 
-#if ARMSX2_APPLE_MAC_RUNTIME
+#if ARMSX2_APPLE_UIKIT || ARMSX2_APPLE_MAC_RUNTIME
 extern "C" void LogUnified(const char* fmt, ...);
+#define ARMSX2_SAVE_STATE_LOG(...) LogUnified(__VA_ARGS__)
+#else
+#define ARMSX2_SAVE_STATE_LOG(...) ((void)0)
+#endif
 
+#if ARMSX2_APPLE_MAC_RUNTIME
 static const char* MacCDVDSourceName(CDVD_SourceType type)
 {
 	switch (type)
@@ -2333,18 +2338,28 @@ std::string VMManager::GetCurrentSaveStateFileName(s32 slot, bool backup)
 
 bool VMManager::DoLoadState(const char* filename)
 {
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_load_begin file=%s state=%d\n",
+		filename ? filename : "", static_cast<int>(VMManager::GetState()));
 	if (GSDumpReplayer::IsReplayingDump())
+	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_load_reject reason=gsdump file=%s state=%d\n",
+			filename ? filename : "", static_cast<int>(VMManager::GetState()));
 		return false;
+	}
 
 	Host::OnSaveStateLoading(filename);
 
 	Error error;
 	if (!SaveState_UnzipFromDisk(filename, &error))
 	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_load_unzip_failed file=%s state=%d\n",
+			filename ? filename : "", static_cast<int>(VMManager::GetState()));
 		Host::ReportErrorAsync(TRANSLATE_SV("VMManager", "Failed to load save state"), error.GetDescription());
 		return false;
 	}
 
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_load_unzip_ok file=%s state=%d\n",
+		filename ? filename : "", static_cast<int>(VMManager::GetState()));
 	Host::OnSaveStateLoaded(filename, true);
 	if (g_InputRecording.isActive())
 	{
@@ -2353,55 +2368,96 @@ bool VMManager::DoLoadState(const char* filename)
 	}
 
 	MemcardBusy::CheckSaveStateDependency();
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_load_end file=%s state=%d\n",
+		filename ? filename : "", static_cast<int>(VMManager::GetState()));
 	return true;
 }
 
 bool VMManager::DoSaveState(const char* filename, s32 slot_for_message, bool zip_on_thread, bool backup_old_state)
 {
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_begin file=%s slot=%d zip_on_thread=%d backup_old=%d state=%d\n",
+		filename ? filename : "", static_cast<int>(slot_for_message), zip_on_thread ? 1 : 0,
+		backup_old_state ? 1 : 0, static_cast<int>(VMManager::GetState()));
 	if (GSDumpReplayer::IsReplayingDump())
+	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_reject reason=gsdump file=%s slot=%d state=%d\n",
+			filename ? filename : "", static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
 		return false;
+	}
 
 	std::string osd_key(fmt::format("SaveStateSlot{}", slot_for_message));
 	Error error;
 
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_download_begin file=%s slot=%d state=%d\n",
+		filename ? filename : "", static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
 	std::unique_ptr<ArchiveEntryList> elist = SaveState_DownloadState(&error);
 	if (!elist)
 	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_download_failed file=%s slot=%d state=%d\n",
+			filename ? filename : "", static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
 		Host::AddIconOSDMessage(std::move(osd_key), ICON_FA_EXCLAMATION_TRIANGLE,
 			fmt::format(TRANSLATE_FS("VMManager", "Failed to save state: {}."), error.GetDescription()),
 			Host::OSD_ERROR_DURATION);
 		return false;
 	}
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_download_ok file=%s slot=%d entries=%p state=%d\n",
+		filename ? filename : "", static_cast<int>(slot_for_message), elist.get(), static_cast<int>(VMManager::GetState()));
 
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_screenshot_begin file=%s slot=%d state=%d\n",
+		filename ? filename : "", static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
 	std::unique_ptr<SaveStateScreenshotData> screenshot = SaveState_SaveScreenshot();
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_screenshot_end file=%s slot=%d screenshot=%p state=%d\n",
+		filename ? filename : "", static_cast<int>(slot_for_message), screenshot.get(), static_cast<int>(VMManager::GetState()));
 
 	if (FileSystem::FileExists(filename) && backup_old_state)
 	{
 		const std::string backup_filename(fmt::format("{}.backup", filename));
 		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn(fmt::format("Creating save state backup {}...", backup_filename));
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_backup_begin file=%s backup=%s slot=%d state=%d\n",
+			filename ? filename : "", backup_filename.c_str(), static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
 		if (!FileSystem::RenamePath(filename, backup_filename.c_str()))
 		{
+			ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_backup_failed file=%s backup=%s slot=%d state=%d\n",
+				filename ? filename : "", backup_filename.c_str(), static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
 			Host::AddIconOSDMessage(osd_key, ICON_FA_EXCLAMATION_TRIANGLE,
 				fmt::format(
 					TRANSLATE_FS("VMManager", "Failed to back up old save state {}."), Path::GetFileName(filename)),
 				Host::OSD_ERROR_DURATION);
 		}
+		else
+		{
+			ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_backup_ok file=%s backup=%s slot=%d state=%d\n",
+				filename ? filename : "", backup_filename.c_str(), static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
+		}
 	}
 
 	if (zip_on_thread)
 	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_zip_thread_queue file=%s slot=%d state=%d\n",
+			filename ? filename : "", static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
 		// lock order here is important; the thread could exit before we resume here.
 		std::unique_lock lock(s_save_state_threads_mutex);
 		s_save_state_threads.emplace_back(&VMManager::ZipSaveStateOnThread, std::move(elist), std::move(screenshot),
 			std::move(osd_key), std::string(filename), slot_for_message);
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_zip_thread_queued file=%s slot=%d pending=%zu state=%d\n",
+			filename ? filename : "", static_cast<int>(slot_for_message), s_save_state_threads.size(),
+			static_cast<int>(VMManager::GetState()));
 	}
 	else
 	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_zip_inline_begin file=%s slot=%d state=%d\n",
+			filename ? filename : "", static_cast<int>(slot_for_message), static_cast<int>(VMManager::GetState()));
 		ZipSaveState(std::move(elist), std::move(screenshot), std::move(osd_key), filename, slot_for_message);
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_zip_inline_end file=%s slot=%d exists=%d state=%d\n",
+			filename ? filename : "", static_cast<int>(slot_for_message),
+			(filename && FileSystem::FileExists(filename)) ? 1 : 0, static_cast<int>(VMManager::GetState()));
 	}
 
 	Host::OnSaveStateSaved(filename);
 	MemcardBusy::CheckSaveStateDependency();
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ do_save_end file=%s slot=%d exists=%d state=%d\n",
+		filename ? filename : "", static_cast<int>(slot_for_message),
+		(filename && FileSystem::FileExists(filename)) ? 1 : 0, static_cast<int>(VMManager::GetState()));
 	return true;
 }
 
@@ -2410,8 +2466,16 @@ void VMManager::ZipSaveState(std::unique_ptr<ArchiveEntryList> elist,
 	s32 slot_for_message)
 {
 	Common::Timer timer;
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ zip_begin file=%s slot=%d entries=%p screenshot=%p state=%d\n",
+		filename ? filename : "", static_cast<int>(slot_for_message), elist.get(), screenshot.get(),
+		static_cast<int>(VMManager::GetState()));
 
-	if (SaveState_ZipToDisk(std::move(elist), std::move(screenshot), filename))
+	const bool zip_ok = SaveState_ZipToDisk(std::move(elist), std::move(screenshot), filename);
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ zip_result file=%s slot=%d ok=%d exists=%d elapsed_ms=%.2f state=%d\n",
+		filename ? filename : "", static_cast<int>(slot_for_message), zip_ok ? 1 : 0,
+		(filename && FileSystem::FileExists(filename)) ? 1 : 0, timer.GetTimeMilliseconds(),
+		static_cast<int>(VMManager::GetState()));
+	if (zip_ok)
 	{
 		if (slot_for_message >= 0 && VMManager::HasValidVM())
 		{
@@ -2453,16 +2517,24 @@ void VMManager::ZipSaveStateOnThread(std::unique_ptr<ArchiveEntryList> elist,
 void VMManager::WaitForSaveStateFlush()
 {
 	std::unique_lock lock(s_save_state_threads_mutex);
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ flush_begin pending=%zu state=%d\n",
+		s_save_state_threads.size(), static_cast<int>(VMManager::GetState()));
 	while (!s_save_state_threads.empty())
 	{
 		// take a thread from the list and join with it. it won't self detatch then, but that's okay,
 		// since we're joining with it here.
 		std::thread save_thread(std::move(s_save_state_threads.front()));
 		s_save_state_threads.pop_front();
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ flush_join_begin pending_after_pop=%zu state=%d\n",
+			s_save_state_threads.size(), static_cast<int>(VMManager::GetState()));
 		lock.unlock();
 		save_thread.join();
 		lock.lock();
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ flush_join_end pending=%zu state=%d\n",
+			s_save_state_threads.size(), static_cast<int>(VMManager::GetState()));
 	}
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ flush_end pending=%zu state=%d\n",
+		s_save_state_threads.size(), static_cast<int>(VMManager::GetState()));
 }
 
 u32 VMManager::DeleteSaveStates(const char* game_serial, u32 game_crc, bool also_backups /* = true */)
@@ -2518,8 +2590,13 @@ bool VMManager::LoadState(const char* filename)
 bool VMManager::LoadStateFromSlot(s32 slot, bool backup)
 {
 	const std::string filename = GetCurrentSaveStateFileName(slot, backup);
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ load_slot_begin slot=%d backup=%d file=%s exists=%d state=%d\n",
+		static_cast<int>(slot), backup ? 1 : 0, filename.c_str(),
+		(!filename.empty() && FileSystem::FileExists(filename.c_str())) ? 1 : 0, static_cast<int>(VMManager::GetState()));
 	if (filename.empty() || !FileSystem::FileExists(filename.c_str()))
 	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ load_slot_missing slot=%d backup=%d file=%s state=%d\n",
+			static_cast<int>(slot), backup ? 1 : 0, filename.c_str(), static_cast<int>(VMManager::GetState()));
 		Host::AddIconOSDMessage("LoadStateFromSlot", ICON_FA_EXCLAMATION_TRIANGLE,
 			fmt::format(TRANSLATE_FS("VMManager", "There is no saved {} in slot {}."), backup ? TRANSLATE("VMManager", "backup state") : "state", slot),
 			Host::OSD_QUICK_DURATION);
@@ -2528,6 +2605,8 @@ bool VMManager::LoadStateFromSlot(s32 slot, bool backup)
 
 	if (Achievements::IsHardcoreModeActive())
 	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ load_slot_hardcore_confirm slot=%d backup=%d file=%s state=%d\n",
+			static_cast<int>(slot), backup ? 1 : 0, filename.c_str(), static_cast<int>(VMManager::GetState()));
 		Achievements::ConfirmHardcoreModeDisableAsync(TRANSLATE("VMManager", "Loading state"),
 			[slot](bool approved) {
 				if (approved)
@@ -2538,6 +2617,8 @@ bool VMManager::LoadStateFromSlot(s32 slot, bool backup)
 
 	if (MemcardBusy::IsBusy())
 	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ load_slot_memcard_busy slot=%d backup=%d file=%s state=%d\n",
+			static_cast<int>(slot), backup ? 1 : 0, filename.c_str(), static_cast<int>(VMManager::GetState()));
 		Host::AddIconOSDMessage("LoadStateFromSlot", ICON_FA_EXCLAMATION_TRIANGLE,
 			fmt::format(TRANSLATE_FS("VMManager", "Failed to load {} from slot {} (Memory card is busy)"), backup ? TRANSLATE("VMManager", "backup state") : TRANSLATE("VMManager", "state"), slot),
 			Host::OSD_QUICK_DURATION);
@@ -2546,7 +2627,10 @@ bool VMManager::LoadStateFromSlot(s32 slot, bool backup)
 
 	Host::AddIconOSDMessage("LoadStateFromSlot", ICON_FA_FOLDER_OPEN,
 		fmt::format(TRANSLATE_FS("VMManager", "Loading {} from slot {}..."), backup ? TRANSLATE("VMManager", "backup state") : TRANSLATE("VMManager", "state"), slot), Host::OSD_QUICK_DURATION);
-	return DoLoadState(filename.c_str());
+	const bool result = DoLoadState(filename.c_str());
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ load_slot_end slot=%d backup=%d result=%d file=%s state=%d\n",
+		static_cast<int>(slot), backup ? 1 : 0, result ? 1 : 0, filename.c_str(), static_cast<int>(VMManager::GetState()));
+	return result;
 }
 
 bool VMManager::SaveState(const char* filename, bool zip_on_thread, bool backup_old_state)
@@ -2565,11 +2649,20 @@ bool VMManager::SaveState(const char* filename, bool zip_on_thread, bool backup_
 bool VMManager::SaveStateToSlot(s32 slot, bool zip_on_thread)
 {
 	const std::string filename(GetCurrentSaveStateFileName(slot));
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ save_slot_begin slot=%d zip_on_thread=%d file=%s exists_before=%d state=%d\n",
+		static_cast<int>(slot), zip_on_thread ? 1 : 0, filename.c_str(),
+		(!filename.empty() && FileSystem::FileExists(filename.c_str())) ? 1 : 0, static_cast<int>(VMManager::GetState()));
 	if (filename.empty())
+	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ save_slot_empty_filename slot=%d state=%d\n",
+			static_cast<int>(slot), static_cast<int>(VMManager::GetState()));
 		return false;
+	}
 
 	if (MemcardBusy::IsBusy())
 	{
+		ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ save_slot_memcard_busy slot=%d file=%s state=%d\n",
+			static_cast<int>(slot), filename.c_str(), static_cast<int>(VMManager::GetState()));
 		Host::AddIconOSDMessage("LoadStateFromSlot", ICON_FA_EXCLAMATION_TRIANGLE,
 			fmt::format(TRANSLATE_FS("VMManager", "Failed to save state to slot {} (Memory card is busy)"), slot),
 			Host::OSD_QUICK_DURATION);
@@ -2579,7 +2672,11 @@ bool VMManager::SaveStateToSlot(s32 slot, bool zip_on_thread)
 	// if it takes more than a minute.. well.. wtf.
 	Host::AddIconOSDMessage(fmt::format("SaveStateSlot{}", slot), ICON_FA_SAVE,
 		fmt::format(TRANSLATE_FS("VMManager", "Saving state to slot {}..."), slot), 60.0f);
-	return DoSaveState(filename.c_str(), slot, zip_on_thread, EmuConfig.BackupSavestate);
+	const bool result = DoSaveState(filename.c_str(), slot, zip_on_thread, EmuConfig.BackupSavestate);
+	ARMSX2_SAVE_STATE_LOG("@@SAVE_STATE_VM@@ save_slot_end slot=%d result=%d file=%s exists_after=%d state=%d\n",
+		static_cast<int>(slot), result ? 1 : 0, filename.c_str(),
+		FileSystem::FileExists(filename.c_str()) ? 1 : 0, static_cast<int>(VMManager::GetState()));
+	return result;
 }
 
 LimiterModeType VMManager::GetLimiterMode()

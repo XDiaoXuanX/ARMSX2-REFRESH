@@ -4,8 +4,16 @@
 #include "microVU.h"
 
 #include "common/AlignedMalloc.h"
+#include "common/Darwin/ApplePlatform.h"
 #include "common/Perf.h"
 #include "common/StringUtil.h"
+
+#if ARMSX2_APPLE_UIKIT || ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+#define ARMSX2_VU_JIT_FREEZE_LOG(...) LogUnified(__VA_ARGS__)
+#else
+#define ARMSX2_VU_JIT_FREEZE_LOG(...) ((void)0)
+#endif
 
 alignas(128) vuRegistersPack g_vuRegistersPack;
 VU_Thread& vu1Thread = g_vuRegistersPack.vu1Thread;
@@ -429,8 +437,16 @@ void recMicroVU1::ResumeXGkick()
 
 bool SaveStateBase::vuJITFreeze()
 {
-	if (IsSaving())
+	if (IsSaving() && THREAD_VU1)
+	{
+		ARMSX2_VU_JIT_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ vu_jit_wait_begin thread_vu1=1\n");
 		vu1Thread.WaitVU();
+		ARMSX2_VU_JIT_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ vu_jit_wait_end thread_vu1=1\n");
+	}
+	else if (IsSaving())
+	{
+		ARMSX2_VU_JIT_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ vu_jit_wait_skip thread_vu1=0\n");
+	}
 
 	Freeze(microVU0.prog.lpState);
 	Freeze(microVU1.prog.lpState);

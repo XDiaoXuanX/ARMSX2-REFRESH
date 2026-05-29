@@ -6,6 +6,14 @@
 #include "Gif_Unit.h"
 #include "Vif_Dma.h"
 #include "MTVU.h"
+#include "common/Darwin/ApplePlatform.h"
+
+#if ARMSX2_APPLE_UIKIT || ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+#define ARMSX2_GIF_FREEZE_LOG(...) LogUnified(__VA_ARGS__)
+#else
+#define ARMSX2_GIF_FREEZE_LOG(...) ((void)0)
+#endif
 
 Gif_Unit gifUnit;
 
@@ -218,7 +226,22 @@ bool SaveStateBase::gifPathFreeze(u32 path)
 bool SaveStateBase::gifFreeze()
 {
 	bool mtvuMode = THREAD_VU1;
-	pxAssert(vu1Thread.IsDone());
+	if (mtvuMode)
+	{
+		const bool vu_done_before = vu1Thread.IsDone();
+		ARMSX2_GIF_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ gif_vu_wait_check thread_vu1=1 done_before=%d\n", vu_done_before ? 1 : 0);
+		if (!vu_done_before)
+		{
+			ARMSX2_GIF_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ gif_vu_wait_begin thread_vu1=1\n");
+			vu1Thread.WaitVU();
+			ARMSX2_GIF_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ gif_vu_wait_end thread_vu1=1 done_after=%d\n", vu1Thread.IsDone() ? 1 : 0);
+		}
+		pxAssert(vu1Thread.IsDone());
+	}
+	else
+	{
+		ARMSX2_GIF_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ gif_vu_wait_skip thread_vu1=0 done=%d\n", vu1Thread.IsDone() ? 1 : 0);
+	}
 	MTGS::WaitGS();
 	if (!FreezeTag("Gif Unit"))
 		return false;

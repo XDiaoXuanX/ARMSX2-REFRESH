@@ -5,6 +5,15 @@
 #include "VUmicro.h"
 #include "MTVU.h"
 
+#include "common/Darwin/ApplePlatform.h"
+
+#if ARMSX2_APPLE_UIKIT || ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+#define ARMSX2_VU_FREEZE_LOG(...) LogUnified(__VA_ARGS__)
+#else
+#define ARMSX2_VU_FREEZE_LOG(...) ((void)0)
+#endif
+
 //alignas(16) VURegs vuRegs[2];
 
 void vuMemAllocate()
@@ -53,8 +62,16 @@ void vuMemReset()
 
 bool SaveStateBase::vuMicroFreeze()
 {
-	if(IsSaving())
+	if (IsSaving() && THREAD_VU1)
+	{
+		ARMSX2_VU_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ vu_micro_wait_begin thread_vu1=1\n");
 		vu1Thread.WaitVU();
+		ARMSX2_VU_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ vu_micro_wait_end thread_vu1=1\n");
+	}
+	else if (IsSaving())
+	{
+		ARMSX2_VU_FREEZE_LOG("@@SAVE_STATE_DETAIL@@ vu_micro_wait_skip thread_vu1=0\n");
+	}
 
 	if (!FreezeTag("vuMicroRegs"))
 		return false;

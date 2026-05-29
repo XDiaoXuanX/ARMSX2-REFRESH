@@ -20,13 +20,18 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 
 #include <cstdio>
 #include <future>
+#include <functional>
 #include <optional>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 // Access the global settings interface from ios_main.mm
 extern INISettingsInterface* g_p44_settings_interface;
 extern "C" void ARMSX2_PrepareGameRenderViewForCurrentRenderer(const char* reason);
+extern "C" void LogUnified(const char* fmt, ...);
+extern "C" bool ARMSX2_SaveStateToSlotQuiesced(int slot);
+extern "C" bool ARMSX2_LoadStateFromSlotQuiesced(int slot);
 
 static NSDate* s_lastNVMSaveDate = nil;
 
@@ -51,6 +56,11 @@ static NSString* ARMSX2NSStringFromStringView(std::string_view value)
     return string ?: @"";
 }
 
+static unsigned long long ARMSX2BridgeThreadTag()
+{
+    return static_cast<unsigned long long>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+}
+
 static BOOL ARMSX2GetCurrentSaveStateIdentity(std::string* serial, u32* crc)
 {
     if (!VMManager::HasValidVM())
@@ -70,22 +80,31 @@ static BOOL ARMSX2GetCurrentSaveStateIdentity(std::string* serial, u32* crc)
 
 static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
 {
+    LogUnified("@@SAVE_STATE_BRIDGE@@ preview_read_begin path=%s thread=%llu\n", path.c_str(), ARMSX2BridgeThreadTag());
     if (path.empty())
         return nil;
 
     zip_error_t ze = {};
     auto zf = zip_open_managed(path.c_str(), ZIP_RDONLY, &ze);
-    if (!zf)
+    if (!zf) {
+        LogUnified("@@SAVE_STATE_BRIDGE@@ preview_read_zip_open_failed path=%s thread=%llu\n", path.c_str(), ARMSX2BridgeThreadTag());
         return nil;
+    }
 
     auto zff = zip_fopen_managed(zf.get(), "Screenshot.png", 0);
-    if (!zff)
+    if (!zff) {
+        LogUnified("@@SAVE_STATE_BRIDGE@@ preview_read_missing_png path=%s thread=%llu\n", path.c_str(), ARMSX2BridgeThreadTag());
         return nil;
+    }
 
     std::optional<std::vector<u8>> data = ReadBinaryFileInZip(zff.get());
-    if (!data.has_value() || data->empty())
+    if (!data.has_value() || data->empty()) {
+        LogUnified("@@SAVE_STATE_BRIDGE@@ preview_read_empty path=%s thread=%llu\n", path.c_str(), ARMSX2BridgeThreadTag());
         return nil;
+    }
 
+    LogUnified("@@SAVE_STATE_BRIDGE@@ preview_read_ok path=%s bytes=%zu thread=%llu\n",
+        path.c_str(), data->size(), ARMSX2BridgeThreadTag());
     return [NSData dataWithBytes:data->data() length:data->size()];
 }
 
@@ -481,6 +500,11 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
 
 #pragma mark - Save states
 
++ (void)logSaveStateEvent:(nonnull NSString *)message {
+    const char *text = message.UTF8String ?: "";
+    LogUnified("%s%s", text, [message hasSuffix:@"\n"] ? "" : "\n");
+}
+
 + (BOOL)hasValidSaveStateGame {
     return ARMSX2GetCurrentSaveStateIdentity(nullptr, nullptr);
 }
@@ -488,8 +512,14 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
 + (nonnull NSArray<ARMSX2SaveStateSlotInfo *> *)saveStateSlots {
     std::string serial;
     u32 crc = 0;
-    if (!ARMSX2GetCurrentSaveStateIdentity(&serial, &crc))
+    if (!ARMSX2GetCurrentSaveStateIdentity(&serial, &crc)) {
+        LogUnified("@@SAVE_STATE_BRIDGE@@ slots_request valid=0 state=%d thread=%llu\n",
+            static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
         return @[];
+    }
+
+    LogUnified("@@SAVE_STATE_BRIDGE@@ slots_request valid=1 serial=%s crc=%08x state=%d thread=%llu\n",
+        serial.c_str(), crc, static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
 
     NSMutableArray<ARMSX2SaveStateSlotInfo *> *slots = [NSMutableArray arrayWithCapacity:VMManager::NUM_SAVE_STATE_SLOTS];
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -511,28 +541,39 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
             info.previewPNGData = ARMSX2ReadSaveStatePreviewPNG(path);
         }
 
+        LogUnified("@@SAVE_STATE_BRIDGE@@ slot_info slot=%d occupied=%d path=%s preview=%d modified=%f thread=%llu\n",
+            static_cast<int>(slot), occupied ? 1 : 0, path.c_str(), info.previewPNGData ? 1 : 0,
+            info.modifiedDate ? [info.modifiedDate timeIntervalSince1970] : 0.0, ARMSX2BridgeThreadTag());
+
         [slots addObject:info];
     }
 
+    LogUnified("@@SAVE_STATE_BRIDGE@@ slots_done count=%lu state=%d thread=%llu\n",
+        static_cast<unsigned long>(slots.count), static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
     return slots;
 }
 
 + (void)saveStateToSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion {
     const s32 nativeSlot = static_cast<s32>(slot);
     ARMSX2SaveStateCompletion callback = [completion copy];
-    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || ![self hasValidSaveStateGame]) {
+    const BOOL validGame = [self hasValidSaveStateGame];
+    LogUnified("@@SAVE_STATE_BRIDGE@@ save_request slot=%d valid=%d state=%d thread=%llu\n",
+        static_cast<int>(nativeSlot), validGame ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
+    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || !validGame) {
+        LogUnified("@@SAVE_STATE_BRIDGE@@ save_reject slot=%d valid=%d state=%d thread=%llu\n",
+            static_cast<int>(nativeSlot), validGame ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(NO); });
         return;
     }
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        bool result = false;
-        Host::RunOnCPUThread([nativeSlot, &result]() {
-            result = VMManager::SaveStateToSlot(nativeSlot, false);
-            VMManager::WaitForSaveStateFlush();
-        }, true);
+        LogUnified("@@SAVE_STATE_BRIDGE@@ save_bg_begin slot=%d state=%d thread=%llu\n",
+            static_cast<int>(nativeSlot), static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
+        const bool result = ARMSX2_SaveStateToSlotQuiesced(static_cast<int>(nativeSlot));
 
+        LogUnified("@@SAVE_STATE_BRIDGE@@ save_bg_quiesced_return slot=%d result=%d state=%d thread=%llu\n",
+            static_cast<int>(nativeSlot), result ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
     });
@@ -541,18 +582,24 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
 + (void)loadStateFromSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion {
     const s32 nativeSlot = static_cast<s32>(slot);
     ARMSX2SaveStateCompletion callback = [completion copy];
-    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || ![self hasValidSaveStateGame]) {
+    const BOOL validGame = [self hasValidSaveStateGame];
+    LogUnified("@@SAVE_STATE_BRIDGE@@ load_request slot=%d valid=%d state=%d thread=%llu\n",
+        static_cast<int>(nativeSlot), validGame ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
+    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || !validGame) {
+        LogUnified("@@SAVE_STATE_BRIDGE@@ load_reject slot=%d valid=%d state=%d thread=%llu\n",
+            static_cast<int>(nativeSlot), validGame ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(NO); });
         return;
     }
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        bool result = false;
-        Host::RunOnCPUThread([nativeSlot, &result]() {
-            result = VMManager::LoadStateFromSlot(nativeSlot);
-        }, true);
+        LogUnified("@@SAVE_STATE_BRIDGE@@ load_bg_begin slot=%d state=%d thread=%llu\n",
+            static_cast<int>(nativeSlot), static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
+        const bool result = ARMSX2_LoadStateFromSlotQuiesced(static_cast<int>(nativeSlot));
 
+        LogUnified("@@SAVE_STATE_BRIDGE@@ load_bg_quiesced_return slot=%d result=%d state=%d thread=%llu\n",
+            static_cast<int>(nativeSlot), result ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2BridgeThreadTag());
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
     });

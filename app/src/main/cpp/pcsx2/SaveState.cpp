@@ -32,6 +32,7 @@
 #include "ps2/BiosTools.h"
 
 #include "common/Error.h"
+#include "common/Darwin/ApplePlatform.h"
 #include "common/FileSystem.h"
 #include "common/Path.h"
 #include "common/ScopedGuard.h"
@@ -52,6 +53,13 @@
 #endif
 
 using namespace R5900;
+
+#if ARMSX2_APPLE_UIKIT || ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+#define ARMSX2_SAVE_STATE_DETAIL_LOG(...) LogUnified(__VA_ARGS__)
+#else
+#define ARMSX2_SAVE_STATE_DETAIL_LOG(...) ((void)0)
+#endif
 
 static tlbs s_tlb_backup[std::size(tlb)];
 
@@ -179,17 +187,30 @@ bool SaveStateBase::FreezeBios()
 
 bool SaveStateBase::FreezeInternals(Error* error)
 {
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ freeze_internals_begin saving=%d idx=%d buffer=%zu\n",
+		IsSaving() ? 1 : 0, m_idx, m_memory.size());
+
 	// Print this until the MTVU problem in gifPathFreeze is taken care of (rama)
 	if (THREAD_VU1)
 		Console.Warning("MTVU speedhack is enabled, saved states may not be stable");
 
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=vmFreeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	if (!vmFreeze())
+	{
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_fail name=vmFreeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 		return false;
+	}
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=vmFreeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 
 	// Second Block - Various CPU Registers and States
 	// -----------------------------------------------
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=FreezeTag:cpuRegs idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	if (!FreezeTag("cpuRegs"))
+	{
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_fail name=FreezeTag:cpuRegs idx=%d buffer=%zu\n", m_idx, m_memory.size());
 		return false;
+	}
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=FreezeTag:cpuRegs idx=%d buffer=%zu\n", m_idx, m_memory.size());
 
 	Freeze(cpuRegs);		// cpu regs + COP0
 	Freeze(psxRegs);		// iop regs
@@ -201,8 +222,13 @@ bool SaveStateBase::FreezeInternals(Error* error)
 
 	// Third Block - Cycle Timers and Events
 	// -------------------------------------
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=FreezeTag:Cycles idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	if (!FreezeTag("Cycles"))
+	{
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_fail name=FreezeTag:Cycles idx=%d buffer=%zu\n", m_idx, m_memory.size());
 		return false;
+	}
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=FreezeTag:Cycles idx=%d buffer=%zu\n", m_idx, m_memory.size());
 
 	Freeze(EEsCycle);
 	Freeze(EEoCycle);
@@ -213,34 +239,62 @@ bool SaveStateBase::FreezeInternals(Error* error)
 
 	// Fourth Block - EE-related systems
 	// ---------------------------------
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=FreezeTag:EE-Subsystems idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	if (!FreezeTag("EE-Subsystems"))
+	{
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_fail name=FreezeTag:EE-Subsystems idx=%d buffer=%zu\n", m_idx, m_memory.size());
 		return false;
+	}
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=FreezeTag:EE-Subsystems idx=%d buffer=%zu\n", m_idx, m_memory.size());
 
 	bool okay = rcntFreeze();
-	okay = okay && memFreeze(error);
-	okay = okay && gsFreeze();
-	okay = okay && vuMicroFreeze();
-	okay = okay && vuJITFreeze();
-	okay = okay && vif0Freeze();
-	okay = okay && vif1Freeze();
-	okay = okay && sifFreeze();
-	okay = okay && ipuFreeze();
-	okay = okay && ipuDmaFreeze();
-	okay = okay && gifFreeze();
-	okay = okay && gifDmaFreeze();
-	okay = okay && sprFreeze();
-	okay = okay && mtvuFreeze();
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=rcntFreeze ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
+	if (!okay)
+		return false;
+
+#define ARMSX2_RUN_FREEZE_STEP(name, expr) \
+	do { \
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=%s idx=%d buffer=%zu\n", name, m_idx, m_memory.size()); \
+		okay = (expr); \
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=%s ok=%d idx=%d buffer=%zu\n", name, okay ? 1 : 0, m_idx, m_memory.size()); \
+		if (!okay) \
+			return false; \
+	} while (0)
+
+	ARMSX2_RUN_FREEZE_STEP("memFreeze", memFreeze(error));
+	ARMSX2_RUN_FREEZE_STEP("gsFreeze", gsFreeze());
+	ARMSX2_RUN_FREEZE_STEP("vuMicroFreeze", vuMicroFreeze());
+	ARMSX2_RUN_FREEZE_STEP("vuJITFreeze", vuJITFreeze());
+	ARMSX2_RUN_FREEZE_STEP("vif0Freeze", vif0Freeze());
+	ARMSX2_RUN_FREEZE_STEP("vif1Freeze", vif1Freeze());
+	ARMSX2_RUN_FREEZE_STEP("sifFreeze", sifFreeze());
+	ARMSX2_RUN_FREEZE_STEP("ipuFreeze", ipuFreeze());
+	ARMSX2_RUN_FREEZE_STEP("ipuDmaFreeze", ipuDmaFreeze());
+	ARMSX2_RUN_FREEZE_STEP("gifFreeze", gifFreeze());
+	ARMSX2_RUN_FREEZE_STEP("gifDmaFreeze", gifDmaFreeze());
+	ARMSX2_RUN_FREEZE_STEP("sprFreeze", sprFreeze());
+	ARMSX2_RUN_FREEZE_STEP("mtvuFreeze", mtvuFreeze());
+
+#undef ARMSX2_RUN_FREEZE_STEP
+
 	if (!okay)
 		return false;
 
 	// Fifth Block - iop-related systems
 	// ---------------------------------
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=FreezeTag:IOP-Subsystems idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	if (!FreezeTag("IOP-Subsystems"))
+	{
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_fail name=FreezeTag:IOP-Subsystems idx=%d buffer=%zu\n", m_idx, m_memory.size());
 		return false;
+	}
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=FreezeTag:IOP-Subsystems idx=%d buffer=%zu\n", m_idx, m_memory.size());
 
 	FreezeMem(iopMem->Sif, sizeof(iopMem->Sif));		// iop's sif memory (not really needed, but oh well)
 
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=psxRcntFreeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	okay = okay && psxRcntFreeze();
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=psxRcntFreeze ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
 
 	// TODO: move all the others over to StateWrapper too...
 	if (!okay)
@@ -254,17 +308,25 @@ bool SaveStateBase::FreezeInternals(Error* error)
 		else
 			load_stream.emplace(&m_memory[m_idx], static_cast<int>(m_memory.size()) - m_idx);
 
-		StateWrapper sw(IsSaving() ? static_cast<StateWrapper::IStream*>(&save_stream.value()) :
-									 static_cast<StateWrapper::IStream*>(&load_stream.value()),
-			IsSaving() ? StateWrapper::Mode::Write : StateWrapper::Mode::Read, g_SaveVersion);
+			StateWrapper sw(IsSaving() ? static_cast<StateWrapper::IStream*>(&save_stream.value()) :
+										 static_cast<StateWrapper::IStream*>(&load_stream.value()),
+				IsSaving() ? StateWrapper::Mode::Write : StateWrapper::Mode::Read, g_SaveVersion);
 
-		okay = okay && g_Sio0.DoState(sw);
-		okay = okay && g_Sio2.DoState(sw);
-		okay = okay && g_MultitapArr.at(0).DoState(sw);
-		okay = okay && g_MultitapArr.at(1).DoState(sw);
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=SIO0 idx=%d buffer=%zu\n", m_idx, m_memory.size());
+			okay = okay && g_Sio0.DoState(sw);
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=SIO0 ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=SIO2 idx=%d buffer=%zu\n", m_idx, m_memory.size());
+			okay = okay && g_Sio2.DoState(sw);
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=SIO2 ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=Multitap0 idx=%d buffer=%zu\n", m_idx, m_memory.size());
+			okay = okay && g_MultitapArr.at(0).DoState(sw);
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=Multitap0 ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=Multitap1 idx=%d buffer=%zu\n", m_idx, m_memory.size());
+			okay = okay && g_MultitapArr.at(1).DoState(sw);
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=Multitap1 ok=%d idx=%d buffer=%zu sw=%d\n", okay ? 1 : 0, m_idx, m_memory.size(), sw.IsGood() ? 1 : 0);
 
-		if (!okay || !sw.IsGood())
-			return false;
+			if (!okay || !sw.IsGood())
+				return false;
 
 		if (IsSaving())
 		{
@@ -280,16 +342,27 @@ bool SaveStateBase::FreezeInternals(Error* error)
 		}
 	}
 
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=cdrFreeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	okay = okay && cdrFreeze();
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=cdrFreeze ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=cdvdFreeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	okay = okay && cdvdFreeze();
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=cdvdFreeze ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
 
 	// technically this is HLE BIOS territory, but we don't have enough such stuff
 	// to merit an HLE Bios sub-section... yet.
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=deci2Freeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	okay = okay && deci2Freeze();
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=deci2Freeze ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
 
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=InputRecordingFreeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	okay = okay && InputRecordingFreeze();
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=InputRecordingFreeze ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
 
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_begin name=handleFreeze idx=%d buffer=%zu\n", m_idx, m_memory.size());
 	okay = okay && handleFreeze(); //file handles
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ step_end name=handleFreeze ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ freeze_internals_end ok=%d idx=%d buffer=%zu\n", okay ? 1 : 0, m_idx, m_memory.size());
 
 	return okay;
 }
@@ -719,39 +792,63 @@ static const std::unique_ptr<BaseSavestateEntry> SavestateEntries[] = {
 
 std::unique_ptr<ArchiveEntryList> SaveState_DownloadState(Error* error)
 {
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_begin\n");
 	std::unique_ptr<ArchiveEntryList> destlist = std::make_unique<ArchiveEntryList>();
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_alloc_list list=%p\n", destlist.get());
 	destlist->GetBuffer().resize(1024 * 1024 * 64);
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_buffer_reserved size=%zu\n", destlist->GetBuffer().size());
 
 	memSavingState saveme(destlist->GetBuffer());
 	ArchiveEntry internals(EntryFilename_InternalStructures);
 	internals.SetDataIndex(saveme.GetCurrentPos());
 
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_freeze_bios_begin pos=%d buffer=%zu\n",
+		saveme.GetCurrentPos(), destlist->GetBuffer().size());
 	if (!saveme.FreezeBios())
 	{
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_freeze_bios_failed pos=%d buffer=%zu\n",
+			saveme.GetCurrentPos(), destlist->GetBuffer().size());
 		Error::SetString(error, "FreezeBios() failed");
 		return nullptr;
 	}
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_freeze_bios_end pos=%d buffer=%zu\n",
+		saveme.GetCurrentPos(), destlist->GetBuffer().size());
 
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_freeze_internals_begin pos=%d buffer=%zu\n",
+		saveme.GetCurrentPos(), destlist->GetBuffer().size());
 	if (!saveme.FreezeInternals(error))
 	{
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_freeze_internals_failed pos=%d buffer=%zu error=%d\n",
+			saveme.GetCurrentPos(), destlist->GetBuffer().size(), error && error->IsValid() ? 1 : 0);
 		if (!error->IsValid())
 			Error::SetString(error, "FreezeInternals() failed");
 
 		return nullptr;
 	}
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_freeze_internals_end pos=%d buffer=%zu\n",
+		saveme.GetCurrentPos(), destlist->GetBuffer().size());
 
 	internals.SetDataSize(saveme.GetCurrentPos() - internals.GetDataIndex());
 	destlist->Add(internals);
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_add_entry name=%s size=%u pos=%d\n",
+		EntryFilename_InternalStructures, internals.GetDataSize(), saveme.GetCurrentPos());
 
 	for (const std::unique_ptr<BaseSavestateEntry>& entry : SavestateEntries)
 	{
 		uint startpos = saveme.GetCurrentPos();
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_entry_begin name=%s start=%u buffer=%zu\n",
+			entry->GetFilename(), startpos, destlist->GetBuffer().size());
 		if (!entry->FreezeOut(saveme))
 		{
+			ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_entry_failed name=%s start=%u pos=%d buffer=%zu\n",
+				entry->GetFilename(), startpos, saveme.GetCurrentPos(), destlist->GetBuffer().size());
 			Error::SetString(error, fmt::format("FreezeOut() failed for {}.", entry->GetFilename()));
 			destlist.reset();
 			break;
 		}
+		ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_entry_end name=%s start=%u pos=%d size=%u buffer=%zu\n",
+			entry->GetFilename(), startpos, saveme.GetCurrentPos(), saveme.GetCurrentPos() - startpos,
+			destlist->GetBuffer().size());
 
 		destlist->Add(
 			ArchiveEntry(entry->GetFilename())
@@ -759,6 +856,8 @@ std::unique_ptr<ArchiveEntryList> SaveState_DownloadState(Error* error)
 				.SetDataSize(saveme.GetCurrentPos() - startpos));
 	}
 
+	ARMSX2_SAVE_STATE_DETAIL_LOG("@@SAVE_STATE_DETAIL@@ download_end list=%p pos=%d buffer=%zu\n",
+		destlist.get(), saveme.GetCurrentPos(), destlist ? destlist->GetBuffer().size() : 0);
 	return destlist;
 }
 

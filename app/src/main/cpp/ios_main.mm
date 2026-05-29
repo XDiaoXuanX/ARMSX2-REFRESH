@@ -24,7 +24,9 @@
 #include <string>
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 #include <deque>
+#include <functional>
 #include <future>
 
 #include "common/ProgressCallback.h"
@@ -132,9 +134,20 @@ static std::mutex s_vmMutex;
 static std::condition_variable s_vmCV;
 static bool s_vmThreadCreated = false;               // guarded by s_vmMutex
 
+extern "C" void LogUnified(const char* fmt, ...);
+
 static std::mutex s_cpuTaskMutex;
 static std::deque<std::function<void()>> s_cpuTasks;
 static std::thread::id s_cpuThreadId;
+static std::atomic<unsigned long long> s_cpuTaskSerial{0};
+static std::mutex s_vmExecuteMutex;
+static std::condition_variable s_vmExecuteCV;
+static bool s_vmInsideExecute = false;
+
+static unsigned long long ARMSX2ThreadTag()
+{
+    return static_cast<unsigned long long>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+}
 
 static bool ARMSX2IsCPUThread()
 {
@@ -142,18 +155,77 @@ static bool ARMSX2IsCPUThread()
     return s_cpuThreadId == std::this_thread::get_id();
 }
 
+static size_t ARMSX2CPUQueuedTaskCount()
+{
+    std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+    return s_cpuTasks.size();
+}
+
+static void ARMSX2SetVMInsideExecute(bool inside, unsigned long long execute_count)
+{
+    {
+        std::lock_guard<std::mutex> lock(s_vmExecuteMutex);
+        s_vmInsideExecute = inside;
+    }
+    LogUnified("@@SAVE_STATE_QUIESCE@@ execute_%s count=%llu state=%d thread=%llu\n",
+        inside ? "enter" : "leave", execute_count, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+    s_vmExecuteCV.notify_all();
+}
+
+static bool ARMSX2WaitForVMQuiesced(const char* op, int slot, std::chrono::milliseconds timeout)
+{
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(s_vmExecuteMutex);
+    bool ok = s_vmExecuteCV.wait_for(lock, timeout, []() {
+        return !s_vmThreadActive.load() ||
+               (!s_vmInsideExecute && VMManager::GetState() != VMState::Running);
+    });
+
+    const bool inside = s_vmInsideExecute;
+    lock.unlock();
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    LogUnified("@@SAVE_STATE_QUIESCE@@ wait_%s op=%s slot=%d ok=%d elapsed_ms=%lld inside_execute=%d state=%d active=%d thread=%llu\n",
+        ok ? "done" : "timeout", op, slot, ok ? 1 : 0, static_cast<long long>(elapsed),
+        inside ? 1 : 0, static_cast<int>(VMManager::GetState()), s_vmThreadActive.load() ? 1 : 0,
+        ARMSX2ThreadTag());
+    return ok;
+}
+
+static bool ARMSX2VMInsideExecuteSnapshot()
+{
+    std::lock_guard<std::mutex> lock(s_vmExecuteMutex);
+    return s_vmInsideExecute;
+}
+
 static void ARMSX2DrainCPUThreadTasks()
 {
     std::deque<std::function<void()>> tasks;
     {
         std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+        if (s_cpuTasks.empty())
+            return;
         tasks.swap(s_cpuTasks);
     }
 
+    LogUnified("@@SAVE_STATE_CPU@@ drain_begin count=%zu thread=%llu state=%d active=%d\n",
+        tasks.size(), ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()),
+        s_vmThreadActive.load() ? 1 : 0);
+
+    size_t index = 0;
     for (std::function<void()>& task : tasks) {
+        LogUnified("@@SAVE_STATE_CPU@@ task_begin index=%zu count=%zu thread=%llu state=%d\n",
+            index, tasks.size(), ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
         if (task)
             task();
+        LogUnified("@@SAVE_STATE_CPU@@ task_end index=%zu count=%zu thread=%llu state=%d\n",
+            index, tasks.size(), ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
+        index++;
     }
+
+    LogUnified("@@SAVE_STATE_CPU@@ drain_end count=%zu thread=%llu state=%d queued_after=%zu\n",
+        tasks.size(), ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()), ARMSX2CPUQueuedTaskCount());
 }
 
 // Gamepad button mapping — 16 PS2 buttons → SDL_GamepadButton
@@ -193,6 +265,9 @@ const int s_defaultMap[16] = {
 // View controller references for background color switching
 static UIViewController* __unsafe_unretained s_menuVC = nil;
 static UIViewController* __unsafe_unretained s_rootVC = nil;
+static std::string s_saveStateLogPath;
+static FILE* s_saveStateLogFile = nullptr;
+static std::mutex s_unifiedLogMutex;
 
 // Helper to log to screen (thread safe)
 void LogToScreen(const char* str) {
@@ -232,28 +307,42 @@ extern "C" void LogUnified(const char* fmt, ...) {
     }
     va_end(args_copy);
 
-    fputs(text, stderr);
-    fflush(stderr);
+    const bool is_save_state_log = (std::strstr(text, "@@SAVE_STATE") != nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(s_unifiedLogMutex);
+        fputs(text, stderr);
+        fflush(stderr);
+
+        if (is_save_state_log && !s_saveStateLogPath.empty()) {
+            if (!s_saveStateLogFile)
+                s_saveStateLogFile = fopen(s_saveStateLogPath.c_str(), "a");
+            if (s_saveStateLogFile) {
+                fputs(text, s_saveStateLogFile);
+                fflush(s_saveStateLogFile);
+            }
+        }
 
 #if ARMSX2_APPLE_MAC_RUNTIME
-    static FILE* s_catalyst_trace_file = nullptr;
-    static bool s_catalyst_trace_file_opened = false;
-    if (!s_catalyst_trace_file_opened) {
-        s_catalyst_trace_file = fopen("/tmp/armsx2_maccatalyst_trace.log", "a");
-        s_catalyst_trace_file_opened = true;
-    }
-    if (s_catalyst_trace_file) {
-        fputs(text, s_catalyst_trace_file);
-        fflush(s_catalyst_trace_file);
+        static FILE* s_catalyst_trace_file = nullptr;
+        static bool s_catalyst_trace_file_opened = false;
+        if (!s_catalyst_trace_file_opened) {
+            s_catalyst_trace_file = fopen("/tmp/armsx2_maccatalyst_trace.log", "a");
+            s_catalyst_trace_file_opened = true;
+        }
+        if (s_catalyst_trace_file) {
+            fputs(text, s_catalyst_trace_file);
+            fflush(s_catalyst_trace_file);
+        }
+#endif
     }
 
-    if (std::strstr(text, "@@MAC_") || std::strstr(text, "@@MTL_") ||
+    if (is_save_state_log || std::strstr(text, "@@MAC_") || std::strstr(text, "@@MTL_") ||
         std::strstr(text, "@@PHASE@@") || std::strstr(text, "@@LOG_")) {
         NSString* message = [NSString stringWithUTF8String:text];
         if (message)
             NSLog(@"%@", message);
     }
-#endif
 }
 
 // ... Host Stubs (Keep existing ones) ...
@@ -379,32 +468,86 @@ namespace Host
         if (!function)
             return;
 
-        if (ARMSX2IsCPUThread() || !s_vmThreadActive.load()) {
+        const bool on_cpu_thread = ARMSX2IsCPUThread();
+        const bool vm_active = s_vmThreadActive.load();
+        LogUnified("@@SAVE_STATE_CPU_QUEUE@@ request block=%d on_cpu=%d active=%d thread=%llu state=%d queued=%zu\n",
+            block ? 1 : 0, on_cpu_thread ? 1 : 0, vm_active ? 1 : 0, ARMSX2ThreadTag(),
+            static_cast<int>(VMManager::GetState()), ARMSX2CPUQueuedTaskCount());
+
+        if (on_cpu_thread || !vm_active) {
+            LogUnified("@@SAVE_STATE_CPU_QUEUE@@ inline_begin reason=%s thread=%llu state=%d\n",
+                on_cpu_thread ? "cpu_thread" : "inactive_vm", ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
             function();
+            LogUnified("@@SAVE_STATE_CPU_QUEUE@@ inline_end reason=%s thread=%llu state=%d\n",
+                on_cpu_thread ? "cpu_thread" : "inactive_vm", ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
             return;
         }
 
+        const unsigned long long task_id = ++s_cpuTaskSerial;
         if (block) {
             auto task = std::make_shared<std::packaged_task<void()>>(std::move(function));
             std::future<void> done = task->get_future();
             {
                 std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
-                s_cpuTasks.emplace_back([task = std::move(task)]() { (*task)(); });
+                s_cpuTasks.emplace_back([task = std::move(task), task_id]() {
+                    LogUnified("@@SAVE_STATE_CPU_QUEUE@@ execute_begin id=%llu thread=%llu state=%d\n",
+                        task_id, ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
+                    (*task)();
+                    LogUnified("@@SAVE_STATE_CPU_QUEUE@@ execute_end id=%llu thread=%llu state=%d\n",
+                        task_id, ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
+                });
+                LogUnified("@@SAVE_STATE_CPU_QUEUE@@ queued_block id=%llu queued=%zu request_thread=%llu state=%d\n",
+                    task_id, s_cpuTasks.size(), ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
             }
-            done.wait();
+
+            const auto start = std::chrono::steady_clock::now();
+            unsigned wait_ticks = 0;
+            while (done.wait_for(std::chrono::milliseconds(250)) != std::future_status::ready) {
+                wait_ticks++;
+                if (wait_ticks == 1 || wait_ticks == 4 || (wait_ticks % 20) == 0) {
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start).count();
+                    LogUnified("@@SAVE_STATE_CPU_QUEUE@@ wait_block id=%llu elapsed_ms=%lld queued=%zu active=%d state=%d request_thread=%llu\n",
+                        task_id, static_cast<long long>(elapsed), ARMSX2CPUQueuedTaskCount(),
+                        s_vmThreadActive.load() ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+                }
+            }
+
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            LogUnified("@@SAVE_STATE_CPU_QUEUE@@ wait_done id=%llu elapsed_ms=%lld queued=%zu active=%d state=%d request_thread=%llu\n",
+                task_id, static_cast<long long>(elapsed), ARMSX2CPUQueuedTaskCount(),
+                s_vmThreadActive.load() ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
         } else {
             std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
-            s_cpuTasks.emplace_back(std::move(function));
+            s_cpuTasks.emplace_back([function = std::move(function), task_id]() {
+                LogUnified("@@SAVE_STATE_CPU_QUEUE@@ execute_begin id=%llu thread=%llu state=%d\n",
+                    task_id, ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
+                function();
+                LogUnified("@@SAVE_STATE_CPU_QUEUE@@ execute_end id=%llu thread=%llu state=%d\n",
+                    task_id, ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
+            });
+            LogUnified("@@SAVE_STATE_CPU_QUEUE@@ queued_async id=%llu queued=%zu request_thread=%llu state=%d\n",
+                task_id, s_cpuTasks.size(), ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()));
         }
     }
     void ReportInfoAsync(std::string_view, std::string_view) {}
     void ReportErrorAsync(std::string_view title, std::string_view msg) {
         Console.Error("Host::ReportErrorAsync: %s - %s", std::string(title).c_str(), std::string(msg).c_str());
     }
-    void OnSaveStateSaved(std::string_view) {}
-    void OnSaveStateLoaded(std::string_view, bool) {}
+    void OnSaveStateSaved(std::string_view path) {
+        LogUnified("@@SAVE_STATE_HOST@@ saved path=%.*s state=%d thread=%llu\n",
+            static_cast<int>(path.size()), path.data(), static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+    }
+    void OnSaveStateLoaded(std::string_view path, bool was_successful) {
+        LogUnified("@@SAVE_STATE_HOST@@ loaded ok=%d path=%.*s state=%d thread=%llu\n",
+            was_successful ? 1 : 0, static_cast<int>(path.size()), path.data(), static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+    }
     void BeginPresentFrame() {}
-    void OnSaveStateLoading(std::string_view) {}
+    void OnSaveStateLoading(std::string_view path) {
+        LogUnified("@@SAVE_STATE_HOST@@ loading path=%.*s state=%d thread=%llu\n",
+            static_cast<int>(path.size()), path.data(), static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+    }
     bool LocaleCircleConfirm() { return false; }
 
     void RefreshGameListAsync(bool) {}
@@ -418,6 +561,12 @@ namespace Host
     void OnAchievementsRefreshed() {}
     void PumpMessagesOnCPUThread()
     {
+        const size_t queued_tasks = ARMSX2CPUQueuedTaskCount();
+        if (queued_tasks > 0) {
+            LogUnified("@@SAVE_STATE_CPU@@ pump_drain queued=%zu thread=%llu state=%d active=%d\n",
+                queued_tasks, ARMSX2ThreadTag(), static_cast<int>(VMManager::GetState()),
+                s_vmThreadActive.load() ? 1 : 0);
+        }
         ARMSX2DrainCPUThreadTasks();
 
 // Check for VM shutdown request (safe: runs on CPU thread)
@@ -597,6 +746,71 @@ namespace Host
     void OnCreateMemoryCardOpenRequested() {}
     void OnAchievementsHardcoreModeChanged(bool) {}
     void OpenURL(std::string_view) {}
+}
+
+static bool ARMSX2RunSaveStateOperationQuiesced(int slot, bool load)
+{
+    const char* op = load ? "load" : "save";
+    if (!VMManager::HasValidVM()) {
+        LogUnified("@@SAVE_STATE_QUIESCE@@ reject op=%s slot=%d reason=no_vm state=%d thread=%llu\n",
+            op, slot, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+        return false;
+    }
+
+    const VMState initial_state = VMManager::GetState();
+    const bool resume_after = (initial_state == VMState::Running);
+    LogUnified("@@SAVE_STATE_QUIESCE@@ begin op=%s slot=%d initial_state=%d resume_after=%d inside_execute=%d thread=%llu\n",
+        op, slot, static_cast<int>(initial_state), resume_after ? 1 : 0,
+        ARMSX2VMInsideExecuteSnapshot() ? 1 : 0, ARMSX2ThreadTag());
+
+    if (resume_after) {
+        LogUnified("@@SAVE_STATE_QUIESCE@@ pause_request op=%s slot=%d state=%d thread=%llu\n",
+            op, slot, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+        VMManager::SetPaused(true);
+    }
+
+    if (!ARMSX2WaitForVMQuiesced(op, slot, std::chrono::seconds(10))) {
+        if (resume_after && VMManager::HasValidVM() && VMManager::GetState() == VMState::Paused) {
+            LogUnified("@@SAVE_STATE_QUIESCE@@ resume_after_timeout op=%s slot=%d state=%d thread=%llu\n",
+                op, slot, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+            VMManager::SetPaused(false);
+        }
+        return false;
+    }
+
+    bool result = false;
+    Host::RunOnCPUThread([slot, load, op, &result]() {
+        LogUnified("@@SAVE_STATE_QUIESCE@@ cpu_begin op=%s slot=%d state=%d thread=%llu\n",
+            op, slot, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+        result = load ? VMManager::LoadStateFromSlot(slot) : VMManager::SaveStateToSlot(slot, false);
+        LogUnified("@@SAVE_STATE_QUIESCE@@ cpu_after_call op=%s slot=%d result=%d state=%d thread=%llu\n",
+            op, slot, result ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+        if (!load) {
+            VMManager::WaitForSaveStateFlush();
+            LogUnified("@@SAVE_STATE_QUIESCE@@ cpu_after_flush op=%s slot=%d result=%d state=%d thread=%llu\n",
+                op, slot, result ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+        }
+    }, true);
+
+    if (resume_after && VMManager::HasValidVM() && VMManager::GetState() == VMState::Paused) {
+        LogUnified("@@SAVE_STATE_QUIESCE@@ resume_request op=%s slot=%d result=%d state=%d thread=%llu\n",
+            op, slot, result ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+        VMManager::SetPaused(false);
+    }
+
+    LogUnified("@@SAVE_STATE_QUIESCE@@ end op=%s slot=%d result=%d state=%d thread=%llu\n",
+        op, slot, result ? 1 : 0, static_cast<int>(VMManager::GetState()), ARMSX2ThreadTag());
+    return result;
+}
+
+extern "C" bool ARMSX2_SaveStateToSlotQuiesced(int slot)
+{
+    return ARMSX2RunSaveStateOperationQuiesced(slot, false);
+}
+
+extern "C" bool ARMSX2_LoadStateFromSlotQuiesced(int slot)
+{
+    return ARMSX2RunSaveStateOperationQuiesced(slot, true);
 }
 
 namespace Host::Internal
@@ -1705,7 +1919,9 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
                             LogUnified("@@MAC_VM_EXECUTE_ENTER@@ count=%llu state=%d\n",
                                 static_cast<unsigned long long>(execute_count), static_cast<int>(state));
 #endif
+                        ARMSX2SetVMInsideExecute(true, static_cast<unsigned long long>(execute_count));
                         VMManager::Execute();
+                        ARMSX2SetVMInsideExecute(false, static_cast<unsigned long long>(execute_count));
 #if ARMSX2_APPLE_MAC_RUNTIME
                         if (execute_count < 8 || ((execute_count % 120) == 0))
                             LogUnified("@@MAC_VM_EXECUTE_RETURN@@ count=%llu state=%d\n",
@@ -1806,9 +2022,15 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     // ... [Init other folders if needed, but DataRoot is key] ...
     EmuFolders::Logs = dataRoot + "/logs";
 
-    // --- Unified Logging Redirection ---
-    // Force stderr and stdout to pcsx2_log.txt
-    std::string logPath = dataRoot + "/pcsx2_log.txt";
+	    // --- Unified Logging Redirection ---
+	    // Force stderr and stdout to pcsx2_log.txt
+	    std::string logPath = dataRoot + "/pcsx2_log.txt";
+	    s_saveStateLogPath = dataRoot + "/save_state_log.txt";
+	    if (s_saveStateLogFile) {
+	        fclose(s_saveStateLogFile);
+	        s_saveStateLogFile = nullptr;
+	    }
+	    std::remove(s_saveStateLogPath.c_str());
 
     // Redirect stderr to file
     if (freopen(logPath.c_str(), "w", stderr) == NULL) { // "w" clears old logs
@@ -1833,7 +2055,9 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 #if ARMSX2_APPLE_MAC_RUNTIME
     std::remove("/tmp/armsx2_maccatalyst_trace.log");
 #endif
-    LogUnified("@@LOG_UNIFIED_READY@@ path=%s extra=/tmp/armsx2_maccatalyst_trace.log pid=%d\n", logPath.c_str(), getpid());
+	    LogUnified("@@LOG_UNIFIED_READY@@ path=%s save_state=%s extra=/tmp/armsx2_maccatalyst_trace.log pid=%d\n",
+	        logPath.c_str(), s_saveStateLogPath.c_str(), getpid());
+	    LogUnified("@@SAVE_STATE_LOG@@ ready path=%s pid=%d\n", s_saveStateLogPath.c_str(), getpid());
     NSString* bundleID = [[NSBundle mainBundle] bundleIdentifier];
     fprintf(stderr, "@@BUNDLE_ID@@ %s\n", bundleID ? [bundleID UTF8String] : "(null)");
     fprintf(stderr, "@@BUILD_ID@@ %s_%s_%s\n", ARMSX2_GIT_HASH, __DATE__, __TIME__);

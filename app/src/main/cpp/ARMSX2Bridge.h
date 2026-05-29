@@ -118,6 +118,7 @@ typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
 + (void)requestVMShutdown;
 
 // Save states
++ (void)logSaveStateEvent:(nonnull NSString *)message NS_SWIFT_NAME(logSaveStateEvent(_:));
 + (BOOL)hasValidSaveStateGame;
 + (nonnull NSArray<ARMSX2SaveStateSlotInfo *> *)saveStateSlots;
 + (void)saveStateToSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(saveState(toSlot:completion:));
