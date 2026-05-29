@@ -50,6 +50,7 @@ bool eeEventTestIsActive = false;
 EE_intProcessStatus eeRunInterruptScan = INT_NOT_RUNNING;
 
 u32 g_eeloadMain = 0, g_eeloadExec = 0, g_osdsys_str = 0;
+u32 g_armsx2_last_real_epc = 0;
 
 #if ARMSX2_APPLE_MAC_RUNTIME
 extern "C" void LogUnified(const char* fmt, ...);
@@ -175,6 +176,7 @@ __ri void cpuException(u32 code, u32 bd)
 			cpuRegs.CP0.n.EPC = cpuRegs.pc;
 			cpuRegs.CP0.n.Cause &= ~0x80000000;
 		}
+		g_armsx2_last_real_epc = cpuRegs.CP0.n.EPC;
 	}
 	else
 	{

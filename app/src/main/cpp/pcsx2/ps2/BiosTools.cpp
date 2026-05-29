@@ -12,6 +12,13 @@
 #include "Common.h"
 #include "BiosTools.h"
 #include "Config.h"
+#include "Memory.h"
+
+extern "C" void LogUnified(const char* fmt, ...);
+
+static u32 s_eeload_rom_offset = 0;
+static u32 s_eeload_rom_size = 0;
+static bool s_eeload_recopy_done = false;
 
 static constexpr u32 MIN_BIOS_SIZE = 4 * _1mb;
 static constexpr u32 MAX_BIOS_SIZE = 8 * _1mb;
@@ -377,8 +384,217 @@ void CopyBIOSToMemory()
 		}
 	}
 
+	bool rom1_empty = (BiosRom.size() < (Ps2MemSize::Rom + Ps2MemSize::Rom1));
+	if (!rom1_empty)
+	{
+		size_t nonzero = 0;
+		for (size_t i = 0; i < 256; i++)
+		{
+			if (eeMem->ROM1[i] != 0)
+			{
+				nonzero = 1;
+				break;
+			}
+		}
+		rom1_empty = (nonzero == 0);
+	}
+
+	if (rom1_empty)
+	{
+		std::memcpy(eeMem->ROM1, eeMem->ROM, sizeof(eeMem->ROM1));
+		LogUnified("@@ROM1_FALLBACK@@ mode=COPY reason=EMPTY\n");
+	}
+
 	if (EmuConfig.CurrentIRX.length() > 3)
 		LoadIrx(EmuConfig.CurrentIRX, &eeMem->ROM[0x3C0000], sizeof(eeMem->ROM) - 0x3C0000);
 
 	CurrentBiosInformation.eeThreadListAddr = 0;
+
+	Console.WriteLn("@@EELOAD_HLE_ENTRY@@ BiosRom.size()=%zu eeMem=%p", BiosRom.size(), (void*)eeMem);
+	if (BiosRom.size() >= sizeof(romdir))
+	{
+		const u8* romdata = BiosRom.data();
+		const size_t romsize = BiosRom.size();
+		u32 dir_offset = UINT32_MAX;
+		for (u32 i = 0; i + sizeof(romdir) <= romsize; i++)
+		{
+			const romdir* rd = reinterpret_cast<const romdir*>(romdata + i);
+			if (std::strncmp(rd->fileName, "RESET", sizeof(rd->fileName)) == 0)
+			{
+				dir_offset = i;
+				break;
+			}
+		}
+
+		Console.WriteLn("@@EELOAD_HLE_SCAN@@ dir_offset=%08x", dir_offset);
+		if (dir_offset != UINT32_MAX)
+		{
+			u32 file_offset = 0;
+			const romdir* entry = reinterpret_cast<const romdir*>(romdata + dir_offset);
+			const u32 max_entries = (romsize - dir_offset) / sizeof(romdir);
+			u32 found_n = 0;
+			for (u32 n = 0; n < max_entries && entry->fileName[0] != '\0'; n++, entry++)
+			{
+				found_n = n;
+				if (std::strncmp(entry->fileName, "EELOAD", sizeof(entry->fileName)) == 0)
+				{
+					Console.WriteLn("@@EELOAD_HLE_FOUND@@ n=%u file_offset=%08x fileSize=%08x", n, file_offset, entry->fileSize);
+					if (entry->fileSize > 0 && file_offset + entry->fileSize <= romsize)
+					{
+						static constexpr u32 EELOAD_DEST = 0x82000;
+						const u32 copy_size = std::min<u32>(entry->fileSize, Ps2MemSize::MainRam - EELOAD_DEST);
+						std::memcpy(eeMem->Main + EELOAD_DEST, romdata + file_offset, copy_size);
+						s_eeload_rom_offset = file_offset;
+						s_eeload_rom_size = copy_size;
+						s_eeload_recopy_done = false;
+						LogUnified("@@EELOAD_HLE_COPY@@ rom_offset=0x%05x size=0x%04x dest=0x%05x\n",
+							file_offset, entry->fileSize, EELOAD_DEST);
+
+						const u8* eeload_data = romdata + file_offset;
+						u32 str_foff = UINT32_MAX;
+						for (u32 i = 0; i + 12 <= copy_size; i++)
+						{
+							if (std::memcmp(eeload_data + i, "rom0:OSDSYS", 12) == 0)
+							{
+								str_foff = i;
+								break;
+							}
+						}
+						if (str_foff != UINT32_MAX)
+						{
+							const u32 str_flat_addr = EELOAD_DEST + str_foff;
+							u32 str_expected = 0;
+							for (u32 i = 0; i + 8 <= copy_size && i < 512; i += 4)
+							{
+								u32 insn0;
+								std::memcpy(&insn0, eeload_data + i, 4);
+								if ((insn0 & 0xFFFF0000u) == 0x3C040000u)
+								{
+									const u32 lui_imm = insn0 & 0xFFFFu;
+									for (u32 j = i + 4; j + 4 <= copy_size && j < i + 36; j += 4)
+									{
+										u32 insn1;
+										std::memcpy(&insn1, eeload_data + j, 4);
+										if ((insn1 & 0xFFFF0000u) == 0x24840000u)
+										{
+											const s16 addiu_imm = static_cast<s16>(insn1 & 0xFFFFu);
+											str_expected = (lui_imm << 16) + addiu_imm;
+											break;
+										}
+									}
+									if (str_expected != 0)
+										break;
+								}
+							}
+							if (str_expected != 0 && str_expected != str_flat_addr)
+							{
+								const u32 data_size = copy_size - str_foff;
+								if (str_expected + data_size <= Ps2MemSize::MainRam)
+								{
+									std::memcpy(eeMem->Main + str_expected, eeload_data + str_foff, data_size);
+									LogUnified("@@EELOAD_DATA_RELOC@@ str_foff=0x%x flat=0x%x expected=0x%x slide=0x%x data_size=0x%x\n",
+										str_foff, str_flat_addr, str_expected, str_expected - str_flat_addr, data_size);
+								}
+							}
+							else
+							{
+								LogUnified("@@EELOAD_DATA_RELOC@@ no_reloc str_foff=0x%x flat=0x%x expected=0x%x\n",
+									str_foff, str_flat_addr, str_expected);
+							}
+						}
+					}
+					break;
+				}
+				if ((entry->fileSize % 0x10) == 0)
+					file_offset += entry->fileSize;
+				else
+					file_offset += (entry->fileSize + 0x10) & 0xFFFFFFF0u;
+			}
+			Console.WriteLn("@@EELOAD_HLE_SCAN_DONE@@ scanned=%u entries, last_foff=%08x", found_n, file_offset);
+		}
+	}
+
+	{
+		constexpr u32 BLTZ_OFFSET = 0x089C;
+		u32 insn;
+		std::memcpy(&insn, eeMem->ROM + BLTZ_OFFSET, 4);
+		if (insn == 0x0440002Bu)
+		{
+			u32 nop = 0x00000000;
+			std::memcpy(eeMem->ROM + BLTZ_OFFSET, &nop, 4);
+			Console.WriteLn("@@BIOS_BLTZ_BYPASS@@ patched BFC0089C: BLTZ v0 -> NOP (was %08x)", insn);
+		}
+		else
+		{
+			Console.WriteLn("@@BIOS_BLTZ_BYPASS@@ BFC0089C instruction mismatch: %08x (expected 0440002b)", insn);
+		}
+	}
+}
+
+bool BiosRetriggerEeloadCopy()
+{
+	if (s_eeload_recopy_done || s_eeload_rom_size == 0)
+		return false;
+
+	static constexpr u32 EELOAD_DEST = 0x82000;
+
+	if (BiosRom.size() < s_eeload_rom_offset + s_eeload_rom_size)
+		return false;
+
+	const u8* romdata = BiosRom.data();
+	std::memcpy(eeMem->Main + EELOAD_DEST, romdata + s_eeload_rom_offset, s_eeload_rom_size);
+
+	const u8* eeload_data = romdata + s_eeload_rom_offset;
+	u32 str_foff = UINT32_MAX;
+	for (u32 i = 0; i + 12 <= s_eeload_rom_size; i++)
+	{
+		if (std::memcmp(eeload_data + i, "rom0:OSDSYS", 12) == 0)
+		{
+			str_foff = i;
+			break;
+		}
+	}
+	if (str_foff != UINT32_MAX)
+	{
+		const u32 str_flat_addr = EELOAD_DEST + str_foff;
+		u32 str_expected = 0;
+		for (u32 i = 0; i + 8 <= s_eeload_rom_size && i < 512; i += 4)
+		{
+			u32 insn0;
+			std::memcpy(&insn0, eeload_data + i, 4);
+			if ((insn0 & 0xFFFF0000u) == 0x3C040000u)
+			{
+				const u32 lui_imm = insn0 & 0xFFFFu;
+				for (u32 j = i + 4; j + 4 <= s_eeload_rom_size && j < i + 36; j += 4)
+				{
+					u32 insn1;
+					std::memcpy(&insn1, eeload_data + j, 4);
+					if ((insn1 & 0xFFFF0000u) == 0x24840000u)
+					{
+						const s16 addiu_imm = static_cast<s16>(insn1 & 0xFFFFu);
+						str_expected = (lui_imm << 16) + addiu_imm;
+						break;
+					}
+				}
+				if (str_expected != 0)
+					break;
+			}
+		}
+		if (str_expected != 0 && str_expected != str_flat_addr)
+		{
+			const u32 data_size = s_eeload_rom_size - str_foff;
+			if (str_expected + data_size <= Ps2MemSize::MainRam)
+				std::memcpy(eeMem->Main + str_expected, eeload_data + str_foff, data_size);
+		}
+	}
+
+	s_eeload_recopy_done = true;
+	Console.WriteLn("@@EELOAD_LATE_RECOPY@@ re-copied EELOAD to 0x%05x size=0x%04x (kern init cleared original)",
+		EELOAD_DEST, s_eeload_rom_size);
+	return true;
+}
+
+void BiosResetEeloadCopyFlag()
+{
+	s_eeload_recopy_done = false;
 }

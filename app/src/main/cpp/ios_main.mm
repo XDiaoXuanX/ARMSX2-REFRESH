@@ -1063,48 +1063,13 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
     if (!si)
         return;
 
-    const bool interpreter_requested =
-#if ARMSX2_APPLE_MAC_RUNTIME
-        false;
-#else
-        si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1 || DarwinMisc::IsNoJitModeActive();
-#endif
-    if (interpreter_requested) {
-        DarwinMisc::ForceNoJitMode();
-        si->SetIntValue("EmuCore/CPU", "CoreType", 1);
-        si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEECache", false);
-    } else {
-#if ARMSX2_APPLE_MAC_RUNTIME
-        si->SetIntValue("EmuCore/CPU", "CoreType", 2);
-        si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
-#else
-        if (!si->ContainsValue("EmuCore/CPU", "CoreType"))
-            si->SetIntValue("EmuCore/CPU", "CoreType", 2);
-        if (!si->ContainsValue("EmuCore/CPU", "UseArm64Dynarec"))
-            si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableEE"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableIOP"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableVU0"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableVU1"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableFastmem"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
-#endif
-    }
+    si->SetIntValue("EmuCore/CPU", "CoreType", 2);
+    si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
     si->SetBoolValue("EmuCore/CPU", "EnableSparseMemory", true);
     si->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
 
@@ -1136,15 +1101,6 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
     ARMSX2ClampINIInt(si, "EmuCore/GS", "dithering_ps2", 2, 0, 3);
     si->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
     si->SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
-}
-
-static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
-{
-#if ARMSX2_APPLE_MAC_RUNTIME
-    return false;
-#else
-    return DarwinMisc::IsNoJitModeActive() || (si && si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1);
-#endif
 }
 
 //
@@ -1206,7 +1162,7 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
         ARMSX2LogIOSSettingsSnapshot("after_ini_load_before_defaults", s_settings_interface);
         ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
         ARMSX2LogIOSSettingsSnapshot("after_initial_runtime_defaults", s_settings_interface);
-        Console.WriteLn("@@CFG_DEFAULTS@@ applied iOS runtime defaults");
+        Console.WriteLn("@@CFG_DEFAULTS@@ CoreType=2 UseArm64Dynarec=true EnableEE=1 EnableIOP=1 Metal=1");
         s_settings_interface->Save();
         Host::Internal::SetBaseSettingsLayer(s_settings_interface);
         g_p44_settings_interface = s_settings_interface; // expose to Bridge
@@ -1644,17 +1600,6 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 // CS_DEBUGGED check only (DolphiniOS approach) — no blocking, runs on main thread
 - (void)checkJITAndStartVM {
 #if ARMSX2_APPLE_IOS_DEVICE
-    if (ARMSX2IOSInterpreterRequested(s_settings_interface)) {
-        DarwinMisc::ForceNoJitMode();
-        if (s_settings_interface) {
-            ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
-            s_settings_interface->Save();
-        }
-        Console.WriteLn("@@JIT_GATE@@ interpreter requested — starting VM with JIT disabled");
-        [self startVMThread];
-        return;
-    }
-
     if (DarwinMisc::IsJITAvailable()) {
         Console.WriteLn("@@JIT_GATE@@ JIT available — starting VM in JIT mode");
         [self startVMThread];
@@ -1662,12 +1607,8 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     }
 
     Console.Warning("@@JIT_GATE@@ JIT NOT available — falling back to Interpreter mode");
-    DarwinMisc::ForceNoJitMode();
-    if (s_settings_interface) {
-        ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
-        s_settings_interface->Save();
-    }
-    Console.WriteLn("@@JIT_GATE@@ ARMSX2 no-JIT mode forced");
+    DarwinMisc::ARMSX2_FORCE_EE_INTERP = 1;
+    Console.WriteLn("@@JIT_GATE@@ ARMSX2_FORCE_EE_INTERP forced to 1");
     [self startVMThread];
 #else
 #if ARMSX2_APPLE_MAC_RUNTIME
@@ -2006,6 +1947,9 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     NSSetUncaughtExceptionHandler(&ARMSX2UncaughtExceptionHandler);
+
+    setenv("ARMSX2_FORCE_JIT", "1", 0);
+    setenv("ARMSX2_IOP_CORE_TYPE", "0", 0);
 
     // Override point for customization after application launch.
 

@@ -19,6 +19,12 @@
 #define RFASTMEMBASE x86Emitter::rbp
 #endif
 
+// ARMSX2: Enable recompiler modules when Real Rec is requested
+#if defined(ARMSX2_REAL_REC) && ARMSX2_REAL_REC
+    #define SHIFT_RECOMPILE
+    #define MULTDIV_RECOMPILE
+#endif
+
 extern u32 maxrecmem;
 extern u32 pc;             // recompiler pc
 extern int g_branch;       // set for branch
@@ -183,3 +189,31 @@ void eeRecompileCodeRC2(R5900FNPTR constcode, R5900FNPTR_INFO noconstcode, int x
 // rd = rs op rt (all regs need to be in xmm)
 int eeRecompileCodeXMM(int xmminfo);
 void eeFPURecompileCode(R5900FNPTR_INFO xmmcode, R5900FNPTR fpucode, int xmminfo);
+
+// [STEP2] Flight Recorder Struct (Shared)
+struct Step2FlightRecEntry {
+    u32 kind;       // 1=READ, 2=BRANCH
+    u32 guest_pc;   // The PC being compiled
+    u32 addr;       // Read Address OR Branch Target
+    u32 val;        // Read Value OR Branch Taken
+    u32 extra1;     // RS value or 0
+    u32 extra2;     // RT value or 0
+    u32 pc_m4;
+    u32 pc_m8;
+};
+extern volatile u32 g_step2_idx;
+extern volatile Step2FlightRecEntry g_step2_ring[];
+// [DIAG] ROM_READ_DIAG_V1
+struct RomReadDiagEntry {
+    u32 pc;
+    u32 va32;
+    u32 phys32;
+    u32 val32;
+    u64 host_ptr;
+    u32 path_id; // 1=FastMem
+    u32 _pad;
+};
+extern volatile RomReadDiagEntry g_rom_diag_ring[];
+extern volatile u32 g_rom_diag_idx;
+
+extern "C" void Step2_CheckDump();

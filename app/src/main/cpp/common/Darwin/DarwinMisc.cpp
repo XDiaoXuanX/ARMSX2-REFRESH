@@ -681,12 +681,6 @@ DarwinMisc::JitMode DarwinMisc::GetJitMode()
 
 void* DarwinMisc::MmapCodeDualMap(size_t size)
 {
-	if (IsNoJitModeActive())
-	{
-		fprintf(stderr, "@@JIT_ALLOC@@ blocked executable allocation in no-JIT mode size=0x%zx\n", size);
-		return nullptr;
-	}
-
     JitMode mode = GetJitMode();
 
 
@@ -865,28 +859,6 @@ bool DarwinMisc::IsJITAvailable()
 #endif
 }
 
-bool DarwinMisc::IsNoJitModeActive()
-{
-#if ARMSX2_APPLE_IOS_DEVICE
-	if (ARMSX2_FORCE_EE_INTERP != 0)
-		return true;
-	if (ARMSX2_FORCE_JIT != 0)
-		return false;
-	return true;
-#else
-	return false;
-#endif
-}
-
-void DarwinMisc::ForceNoJitMode()
-{
-#if ARMSX2_APPLE_IOS_DEVICE
-	ARMSX2_FORCE_EE_INTERP = 1;
-	ARMSX2_FORCE_JIT = 0;
-	ARMSX2_IOP_CORE_TYPE = 1;
-#endif
-}
-
 SharedMemoryMappingArea::SharedMemoryMappingArea(u8* base_ptr, size_t size, size_t num_pages)
 	: m_base_ptr(base_ptr)
 	, m_size(size)
@@ -1042,20 +1014,6 @@ static thread_local int s_code_write_depth = 0;
 
 void HostSys::BeginCodeWrite()
 {
-	if (DarwinMisc::IsNoJitModeActive())
-	{
-		if ((s_code_write_depth++) == 0)
-		{
-			static bool s_logged_no_jit_write = false;
-			if (!s_logged_no_jit_write)
-			{
-				fprintf(stderr, "@@NO_JIT_CODE_WRITE@@ begin ignored while no-JIT mode is active\n");
-				s_logged_no_jit_write = true;
-			}
-		}
-		return;
-	}
-
 	if ((s_code_write_depth++) == 0)
 	{
         if (DarwinMisc::ARMSX2_WX_TRACE) {
@@ -1097,12 +1055,6 @@ void HostSys::BeginCodeWrite()
 void HostSys::EndCodeWrite()
 {
 	pxAssert(s_code_write_depth > 0);
-	if (DarwinMisc::IsNoJitModeActive())
-	{
-		--s_code_write_depth;
-		return;
-	}
-
 	if ((--s_code_write_depth) == 0)
 	{
         DarwinMisc::g_jit_write_state = 0;
@@ -1128,9 +1080,6 @@ void HostSys::EndCodeWrite()
 
 void DarwinMisc::LegacyEnsureExecutable()
 {
-	if (IsNoJitModeActive())
-		return;
-
 	if (!s_legacy_code_base || !s_legacy_is_writable)
 		return;
 
@@ -1298,7 +1247,7 @@ int DarwinMisc::ARMSX2_CALLPROBE = [](){
 
 int DarwinMisc::ARMSX2_FORCE_JIT = [](){
     const char* s = getenv("ARMSX2_FORCE_JIT");
-    int val = (s && s[0] == '1') ? 1 : 0;
+    int val = (s && s[0] == '0') ? 0 : 1;
     fprintf(stderr, "@@CFG@@ ARMSX2_FORCE_JIT=%d\n", val);
     return val;
 }();
@@ -1312,7 +1261,7 @@ int DarwinMisc::ARMSX2_JIT_HLE = [](){
 
 int DarwinMisc::ARMSX2_IOP_CORE_TYPE = [](){
     const char* s = getenv("ARMSX2_IOP_CORE_TYPE");
-    int val = -1;
+    int val = 0;
     if (s) {
         if (s[0] == '-' && s[1] == '1') val = -1;
         else if (s[0] == '0') val = 0;

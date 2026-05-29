@@ -560,7 +560,7 @@ void MIN_MAX_SS(mV, const xmm& to, const xmm& from, const xmm& t1in, bool min)
 //	else	 xMAX.PD(to, t1);
     if (min) armAsm->Fminnm(to.V2D(), to.V2D(), t1.V2D());
     else     armAsm->Fmaxnm(to.V2D(), to.V2D(), t1.V2D());
-    if (!t1.Is(t1in)) 
+    if (!t1.Is(t1in))
 		mVU.regAlloc->clearNeeded(t1);
 }
 
@@ -721,12 +721,7 @@ void ADD_SS_TriAceHack(microVU& mVU, const xmm& to, const xmm& from)
 	do { \
 		mVUclamp3(mVU, to, t1, (isPS) ? 0xf : 0x8); \
 		mVUclamp3(mVU, from, t1, (isPS) ? 0xf : 0x8); \
-		if (isPS) { \
-			opX(to.V4S(), to.V4S(), from.V4S()); \
-		} else { \
-			opX(RQSCRATCH.S(), to.S(), from.S()); \
-			armAsm->Ins(to.V4S(), 0, RQSCRATCH.V4S(), 0); \
-		} \
+		opX(to.V4S(), to.V4S(), from.V4S()); \
 		mVUclamp4(mVU, to, t1, (isPS) ? 0xf : 0x8); \
 	} while (0)
 

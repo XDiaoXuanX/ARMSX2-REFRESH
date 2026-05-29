@@ -25,7 +25,9 @@ namespace R5900
 	{
 		// Generates an entry for the given opcode name.
 		// Assumes the default function naming schemes for interpreter and recompiler  functions.
-//#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+// [ARMSX2] Linker fix: Disable recompiler entries for ARM64 until implemented
+// [ARMSX2] Linker fix: Enable recompiler entries for ARM64
+#if defined(_M_X86) || defined(_M_ARM64) || defined(ARMSX2_REAL_REC)
 	#	define MakeOpcode( name, cycles, flags ) \
 		static const OPCODE name = { \
 			#name, \
@@ -69,6 +71,51 @@ namespace R5900
 			::R5900::Dynarec::OpcodeImpl::COP1::rec##name, \
 			::R5900::OpcodeDisasm::name \
 		}
+#else
+	#	define MakeOpcode( name, cycles, flags ) \
+		static const OPCODE name = { \
+			#name, \
+			cycles, \
+			flags, \
+			NULL, \
+			::R5900::Interpreter::OpcodeImpl::name, \
+			nullptr, \
+			::R5900::OpcodeDisasm::name \
+		}
+
+#	define MakeOpcodeM( name, cycles, flags ) \
+		static const OPCODE name = { \
+			#name, \
+			cycles, \
+			flags, \
+			NULL, \
+			::R5900::Interpreter::OpcodeImpl::MMI::name, \
+			nullptr, \
+			::R5900::OpcodeDisasm::name \
+		}
+
+#	define MakeOpcode0( name, cycles, flags ) \
+		static const OPCODE name = { \
+			#name, \
+			cycles, \
+			flags, \
+			NULL, \
+			::R5900::Interpreter::OpcodeImpl::COP0::name, \
+			nullptr, \
+			::R5900::OpcodeDisasm::name \
+		}
+
+	#	define MakeOpcode1( name, cycles, flags ) \
+		static const OPCODE name = { \
+			#name, \
+			cycles, \
+			flags, \
+			NULL, \
+			::R5900::Interpreter::OpcodeImpl::COP1::name, \
+			nullptr, \
+			::R5900::OpcodeDisasm::name \
+		}
+#endif
 //#else
 //	#	define MakeOpcode( name, cycles, flags ) \
 //		static const OPCODE name = { \
@@ -265,6 +312,7 @@ namespace R5900
 		MakeOpcode( SRAV, Default, 0 );
 		MakeOpcode( MOVZ, Default, IS_ALU|ALUTYPE_CONDMOVE|CONDTYPE_EQ );
 		MakeOpcode( MOVN, Default, IS_ALU|ALUTYPE_CONDMOVE|CONDTYPE_NE );
+		MakeOpcode( MOVCI, Default, IS_ALU|ALUTYPE_CONDMOVE );
 		MakeOpcode( DSLLV, Default, 0 );
 		MakeOpcode( DSRLV, Default, 0 );
 		MakeOpcode( DSRAV, Default, 0 );
@@ -504,7 +552,7 @@ namespace R5900
 
 		static const OPCODE tbl_Special[64] =
 		{
-			SLL,      Unknown,  SRL,      SRA,      SLLV,    Unknown, SRLV,    SRAV,
+			SLL,      MOVCI,    SRL,      SRA,      SLLV,    Unknown, SRLV,    SRAV,
 			JR,       JALR,     MOVZ,     MOVN,     SYSCALL, BREAK,   Unknown, SYNC,
 			MFHI,     MTHI,     MFLO,     MTLO,     DSLLV,   Unknown, DSRLV,   DSRAV,
 			MULT,     MULTU,    DIV,      DIVU,     Unknown, Unknown, Unknown, Unknown,

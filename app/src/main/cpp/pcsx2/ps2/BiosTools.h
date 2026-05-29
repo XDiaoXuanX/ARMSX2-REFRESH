@@ -117,3 +117,5 @@ extern bool IsBIOSAvailable(const std::string& full_path);
 
 extern bool LoadBIOS();
 extern void CopyBIOSToMemory();
+extern bool BiosRetriggerEeloadCopy();
+extern void BiosResetEeloadCopyFlag();

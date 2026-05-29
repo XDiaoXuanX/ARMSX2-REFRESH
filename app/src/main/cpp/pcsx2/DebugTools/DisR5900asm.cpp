@@ -1045,6 +1045,7 @@ void DSRL32( std::string& output )  { _sap("dsrl32\t%s, 0x%02X") disDestSource(D
 void DSRA32( std::string& output )  { _sap("dsra32\t%s, 0x%02X") disDestSource(DECODE_RD,DECODE_RT), DECODE_SA); }
 void MOVZ( std::string& output )    { _sap("movz\t%s, %s, %s") GPR_REG[DECODE_RD], GPR_REG[DECODE_RS], GPR_REG[DECODE_RT]); }
 void MOVN( std::string& output )    { _sap("movn\t%s, %s, %s") GPR_REG[DECODE_RD], GPR_REG[DECODE_RS], GPR_REG[DECODE_RT]); }
+void MOVCI( std::string& output )   { ssappendf(output, "%s\t%s, %s", (disasmOpcode >> 16) & 1 ? "movt" : "movf", GPR_REG[DECODE_RD], GPR_REG[DECODE_RS]); }
 void MFSA( std::string& output )    { _sap("mfsa\t%s")          GPR_REG[DECODE_RD]);}
 void MTSA( std::string& output )    { _sap("mtsa\t%s")          GPR_REG[DECODE_RS]);}
 //*** unsupport (yet) cpu opcodes

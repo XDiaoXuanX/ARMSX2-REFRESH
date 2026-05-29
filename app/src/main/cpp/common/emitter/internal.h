@@ -33,7 +33,13 @@ namespace x86Emitter
 	template <typename T>
 	inline void xWrite(T val)
 	{
+#if defined(__APPLE__) && defined(_M_ARM64)
+		// [P43] Dual-mapping: write through RW view, x86Ptr stays in RX space
+		extern ptrdiff_t g_code_rw_offset_for_emitter;
+		*(T*)((u8*)x86Ptr + g_code_rw_offset_for_emitter) = val;
+#else
 		*(T*)x86Ptr = val;
+#endif
 		x86Ptr += sizeof(T);
 	}
 
@@ -69,6 +75,7 @@ namespace x86Emitter
 	//
 	// Prefixes are typically 0x66, 0xf2, or 0xf3.  OpcodePrefixes are either 0x38 or
 	// 0x3a [and other value will result in assertion failue].
+	//
 	//
 	template <typename T1, typename T2>
 	__emitinline void xOpWrite0F(u8 prefix, u16 opcode, const T1& param1, const T2& param2)

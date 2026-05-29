@@ -12,10 +12,22 @@
 namespace a64 = vixl::aarch64;
 
 static const uint iREGCNT_XMM = 16;
-#if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
+// All ARM64 platforms use 25 GPR slots (matching x0-x24 + some extras)
+// Allocatable registers are controlled by _isAllocatableX86reg()
+// iOS/ARM64: Use slot allocation mapped to a small set of callee-saved registers.
+// Keep x26 (iopMem->Main) reserved.
+#if defined(__APPLE__) && defined(__aarch64__)
+static const uint iREGCNT_GPR = 5;
+// [P38] microVU has its own register allocator using physical ARM64 GPRs (x0-x24).
+// This is independent of the EE JIT slot-based allocator (iREGCNT_GPR=5).
+static const uint iREGCNT_MVU_GPR = 25;
+#elif defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
+// Other ARM64 platforms currently use direct physical register mapping (legacy)
 static const uint iREGCNT_GPR = 25;
+static const uint iREGCNT_MVU_GPR = 25;
 #else
 static const uint iREGCNT_GPR = 16;
+static const uint iREGCNT_MVU_GPR = 16;
 #endif
 
 enum XMMSSEType
@@ -27,10 +39,9 @@ enum XMMSSEType
 
 extern thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM];
 
-#if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
+#if defined(__ANDROID__) || defined(_M_ARM64)
 
-namespace x86Emitter
-{
+namespace x86Emitter {
 
 static const int wordsize = sizeof(sptr);
 static constexpr int SHADOW_STACK_SIZE = 0;

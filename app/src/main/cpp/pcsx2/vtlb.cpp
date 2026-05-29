@@ -29,6 +29,7 @@
 
 #include "fmt/format.h"
 
+#include <atomic>
 #include <bit>
 #include <map>
 #include <unordered_set>
@@ -46,6 +47,15 @@ namespace vtlb_private
 {
     MapData& vtlbdata = g_cpuRegistersPack.vtlbdata;
 } // namespace vtlb_private
+
+extern "C" void TraceJitStore(u32, u32, int)
+{
+}
+
+std::atomic<uint64_t> g_hpf_cnt{0};
+std::atomic<uintptr_t> g_hpf_last_fa{0};
+std::atomic<uintptr_t> g_hpf_last_epc{0};
+std::atomic<uint32_t> g_hpf_last_path{0};
 
 static vtlbHandler vtlbHandlerCount = 0;
 

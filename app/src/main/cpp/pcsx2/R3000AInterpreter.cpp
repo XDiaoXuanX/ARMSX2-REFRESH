@@ -13,6 +13,8 @@
 
 using namespace R3000A;
 
+u32 g_iop_reboot_count = 0;
+
 // Used to flag delay slot instructions when throwig exceptions.
 bool iopIsDelaySlot = false;
 

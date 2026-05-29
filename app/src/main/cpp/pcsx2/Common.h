@@ -49,6 +49,14 @@ inline bool ARMSX2_GetRuntimeEnvBool(const char* name, bool default_value = fals
 	return (value[0] == '1' && value[1] == '\0');
 }
 
+inline bool ARMSX2_IsSafeOnlyEnabled()
+{
+	static int s_cached = -1;
+	if (s_cached < 0)
+		s_cached = ARMSX2_GetRuntimeEnvBool("ARMSX2_SAFE_ONLY", true) ? 1 : 0;
+	return (s_cached == 1);
+}
+
 inline bool ARMSX2_IsDebugVerbose()
 {
 	static int s_cached = -1;

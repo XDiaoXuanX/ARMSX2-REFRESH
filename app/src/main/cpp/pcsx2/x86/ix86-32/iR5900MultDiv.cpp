@@ -67,7 +67,7 @@ static void recWritebackHILO(int info, bool writed, bool upper)
 			if (gprlo >= 0)
 			{
 //				xMOVSX(xRegister64(gprlo), eax);
-                armAsm->Sxtw(a64::XRegister(gprlo), EAX);
+                armAsm->Sxtw(HostX(gprlo), EAX);
 			}
 			else
 			{
@@ -98,7 +98,7 @@ static void recWritebackHILO(int info, bool writed, bool upper)
 			if (gprhi >= 0)
 			{
 //				xMOVSX(xRegister64(gprhi), edx);
-                armAsm->Sxtw(a64::XRegister(gprhi), EDX);
+                armAsm->Sxtw(HostX(gprhi), EDX);
 			}
 			else
 			{
@@ -118,13 +118,23 @@ static void recWritebackHILO(int info, bool writed, bool upper)
 		if (info & PROCESS_EE_D)
 		{
 			if (eax_sign_extended) {
-//                xMOV(xRegister64(EEREC_D), rax);
-                armAsm->Mov(a64::XRegister(EEREC_D), RAX);
+//                xMOV(xRegister64(HostGprPhys(EEREC_D)), rax);
+                armAsm->Mov(HostX(EEREC_D), RAX);
             }
 			else {
-//                xMOVSX(xRegister64(EEREC_D), eax);
-                armAsm->Sxtw(a64::XRegister(EEREC_D), EAX);
+//                xMOVSX(xRegister64(HostGprPhys(EEREC_D)), eax);
+                armAsm->Sxtw(HostX(EEREC_D), EAX);
             }
+			// [FIX] Force-store Rd to cpuRegs immediately after writing to host register.
+			// Root cause: LO/HI allocation above can evict EEREC_D's slot, causing
+			// the slot→phys mapping to become stale. When the evicted value is written
+			// back to cpuRegs during eviction, it uses the OLD host register value
+			// (before the MULT result was placed in EAX). The Sxtw/Mov above writes
+			// to HostX(EEREC_D) which may now point to a slot reassigned to LO/HI.
+			// This force-store ensures the correct multiply result reaches cpuRegs.GPR.r[Rd]
+			// while the host register still holds the correct value.
+			// Same bug class as SLT eviction fix (5-slot ARM64 allocator pressure).
+			armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), HostX(EEREC_D));
 		}
 		else
 		{
@@ -164,7 +174,7 @@ static void recWritebackConstHILO(u64 res, bool writed, int upper)
 			const int gprlo = upper ? -1 : (lolive ? _allocX86reg(X86TYPE_GPR, XMMGPR_LO, MODE_WRITE) : _checkX86reg(X86TYPE_GPR, XMMGPR_LO, MODE_WRITE));
 			if (gprlo >= 0) {
 //                xImm64Op(xMOV, xRegister64(gprlo), rax, loval);
-                armAsm->Mov(a64::XRegister(gprlo), loval);
+                armAsm->Mov(HostX(gprlo), loval);
             }
 			else {
 //                xImm64Op(xMOV, ptr64[&cpuRegs.LO.UD[upper]], rax, loval);
@@ -190,7 +200,7 @@ static void recWritebackConstHILO(u64 res, bool writed, int upper)
 			const int gprhi = upper ? -1 : (hilive ? _allocX86reg(X86TYPE_GPR, XMMGPR_HI, MODE_WRITE) : _checkX86reg(X86TYPE_GPR, XMMGPR_HI, MODE_WRITE));
 			if (gprhi >= 0) {
 //                xImm64Op(xMOV, xRegister64(gprhi), rax, hival);
-                armAsm->Mov(a64::XRegister(gprhi), hival);
+                armAsm->Mov(HostX(gprhi), hival);
             }
 			else {
 //                xImm64Op(xMOV, ptr64[&cpuRegs.HI.UD[upper]], rax, hival);
@@ -207,7 +217,7 @@ static void recWritebackConstHILO(u64 res, bool writed, int upper)
 		const int regd = _checkX86reg(X86TYPE_GPR, _Rd_, MODE_WRITE);
 		if (regd >= 0) {
 //            xImm64Op(xMOV, xRegister64(regd), rax, loval);
-            armAsm->Mov(a64::XRegister(regd), loval);
+            armAsm->Mov(HostX(regd), loval);
         }
 		else {
 //            xImm64Op(xMOV, ptr64[&cpuRegs.GPR.r[_Rd_].UD[0]], rax, loval);
@@ -232,8 +242,8 @@ static void recMULTsuper(int info, bool sign, bool upper, int process)
 //		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
         armAsm->Mov(EAX, g_cpuConstRegs[_Rs_].UL[0]);
 		if (info & PROCESS_EE_T) {
-//            sign ? xMUL(xRegister32(EEREC_T)) : xUMUL(xRegister32(EEREC_T));
-            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(EEREC_T)) : armAsm->Umull(RAX, EAX, a64::WRegister(EEREC_T));
+//            sign ? xMUL(xRegister32(HostGprPhys(EEREC_T))) : xUMUL(xRegister32(HostGprPhys(EEREC_T)));
+            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_T))) : armAsm->Umull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_T)));
         }
 		else {
 //            sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]) : xUMUL(
@@ -247,8 +257,8 @@ static void recMULTsuper(int info, bool sign, bool upper, int process)
 //		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
         armAsm->Mov(EAX, g_cpuConstRegs[_Rt_].UL[0]);
 		if (info & PROCESS_EE_S) {
-//            sign ? xMUL(xRegister32(EEREC_S)) : xUMUL(xRegister32(EEREC_S));
-            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(EEREC_S)) : armAsm->Umull(RAX, EAX, a64::WRegister(EEREC_S));
+//            sign ? xMUL(xRegister32(HostGprPhys(EEREC_S))) : xUMUL(xRegister32(HostGprPhys(EEREC_S)));
+            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_S))) : armAsm->Umull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_S)));
         }
 		else {
 //            sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]) : xUMUL(
@@ -261,8 +271,8 @@ static void recMULTsuper(int info, bool sign, bool upper, int process)
 	{
 		// S is more likely to be in a register than T (so put T in eax).
 		if (info & PROCESS_EE_T) {
-//            xMOV(eax, xRegister32(EEREC_T));
-            armAsm->Mov(EAX, a64::WRegister(EEREC_T));
+//            xMOV(eax, xRegister32(HostGprPhys(EEREC_T)));
+            armAsm->Mov(EAX, a64::WRegister(HostGprPhys(EEREC_T)));
         }
 		else {
 //            xMOV(eax, ptr[&cpuRegs.GPR.r[_Rt_].UL[0]]);
@@ -270,8 +280,8 @@ static void recMULTsuper(int info, bool sign, bool upper, int process)
         }
 
 		if (info & PROCESS_EE_S) {
-//            sign ? xMUL(xRegister32(EEREC_S)) : xUMUL(xRegister32(EEREC_S));
-            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(EEREC_S)) : armAsm->Umull(RAX, EAX, a64::WRegister(EEREC_S));
+//            sign ? xMUL(xRegister32(HostGprPhys(EEREC_S))) : xUMUL(xRegister32(HostGprPhys(EEREC_S)));
+            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_S))) : armAsm->Umull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_S)));
         }
 		else {
 //            sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]) : xUMUL(
@@ -282,7 +292,24 @@ static void recMULTsuper(int info, bool sign, bool upper, int process)
 	}
     armAsm->Lsr(RDX, RAX, 32);
 
+	// [R99 FIX] Save EAX to a scratch register BEFORE recWritebackHILO.
+	// recWritebackHILO's LO/HI allocation can trigger XMM eviction of a GPR-type
+	// XMM register. The XMM writeback (_writebackXMMreg) writes 128 bits to
+	// cpuRegs.GPR.r[reg], potentially overwriting the force-store value.
+	// By saving EAX to EEX (w4, not in allocator pool) and writing Rd from EEX
+	// AFTER recWritebackHILO, we guarantee the MULT result is the last write.
+	if (_Rd_)
+		armAsm->Mov(EEX, EAX); // Save low MULT result to EEX (w4)
+
 	recWritebackHILO(info, 1, upper);
+
+	// [R99 FIX] Final Rd writeback from EEX — cannot be overwritten by any eviction.
+	if (_Rd_ && EEINST_LIVETEST(_Rd_))
+	{
+		armAsm->Sxtw(REX, EEX); // sign-extend w4 → x4
+		armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), REX);
+	}
+
 }
 
 static void recMULT_(int info)
@@ -409,7 +436,7 @@ static void recDIV_const()
 
 static void recDIVsuper(int info, bool sign, bool upper, int process)
 {
-	const a64::WRegister divisor((info & PROCESS_EE_T) ? EEREC_T : ECX.GetCode());
+	const a64::WRegister divisor((info & PROCESS_EE_T) ? HostGprPhys(EEREC_T) : ECX.GetCode());
 	if (!(info & PROCESS_EE_T))
 	{
 		if (process & PROCESS_CONSTT) {
@@ -649,7 +676,7 @@ static void addConstantAndWriteBackToHiLoRd(int hiloID, u64 constant)
 //	xMOV(ehi, ptr[&cpuRegs.HI.UL[hiloID * 2]]);
     armLoad(ehi, PTR_CPU(cpuRegs.HI.UL[hiloID * 2]));
 //	xADD(eax, (u32)(constant & 0xffffffff));
-    armAsm->Add(EAX, EAX, (u32)(constant & 0xffffffff));
+    armAsm->Adds(EAX, EAX, (u32)(constant & 0xffffffff)); // [BUG-E003] ADDS sets carry flag
 //	xADC(ehi, (u32)(constant >> 32));
     armAsm->Adc(ehi, ehi, (u32)(constant >> 32));
 	writeBackMAddToHiLoRd(hiloID);
@@ -658,7 +685,7 @@ static void addConstantAndWriteBackToHiLoRd(int hiloID, u64 constant)
 static void addEaxEdxAndWriteBackToHiLoRd(int hiloID)
 {
 //	xADD(eax, ptr[&cpuRegs.LO.UL[hiloID * 2]]);
-    armAsm->Add(EAX, EAX, armLoad(PTR_CPU(cpuRegs.LO.UL[hiloID * 2])));
+    armAsm->Adds(EAX, EAX, armLoad(PTR_CPU(cpuRegs.LO.UL[hiloID * 2]))); // [BUG-E003] ADDS sets carry
 //	xADC(edx, ptr[&cpuRegs.HI.UL[hiloID * 2]]);
     armAsm->Adc(EDX, EDX, armLoad(PTR_CPU(cpuRegs.HI.UL[hiloID * 2])));
 

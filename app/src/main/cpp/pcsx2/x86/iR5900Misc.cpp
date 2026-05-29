@@ -4,6 +4,12 @@
 #include "Common.h"
 #include "iR5900.h"
 #include "R5900OpcodeTables.h"
+#include <atomic>
+
+// [iter681] recClear is defined in iR5900.cpp (global scope, outside namespace)
+extern void recClear(u32 addr, u32 size);
+// [TEMP_DIAG] JIT perf counter
+extern std::atomic<uint32_t> s_jit_cache_clear_count;
 
 #if !defined(__ANDROID__)
 using namespace x86Emitter;
@@ -74,9 +80,11 @@ void recPREF()
 {
 }
 
+#if !defined(_M_ARM64)
 void recSYNC()
 {
 }
+#endif
 
 void recMFSA()
 {
@@ -97,7 +105,7 @@ void recMFSA()
 	else if (const int gprreg = _allocIfUsedGPRtoX86(_Rd_, MODE_WRITE); gprreg >= 0)
 	{
 //		xMOV(xRegister32(gprreg), ptr32[&cpuRegs.sa]);
-        armLoad(a64::WRegister(gprreg), PTR_CPU(cpuRegs.sa));
+        armLoad(HostW(gprreg), PTR_CPU(cpuRegs.sa));
 	}
 	else
 	{
@@ -129,7 +137,7 @@ void recMTSA()
 		else if ((mmreg = _checkX86reg(X86TYPE_GPR, _Rs_, MODE_READ)) >= 0)
 		{
 //			xMOV(ptr[&cpuRegs.sa], xRegister32(mmreg));
-            armStore(PTR_CPU(cpuRegs.sa), a64::WRegister(mmreg));
+            armStore(PTR_CPU(cpuRegs.sa), HostW(mmreg));
 		}
 		else
 		{
@@ -219,14 +227,56 @@ void recCOP1_Unknown()
 *
 **********************************************************/
 
-// Suikoden 3 uses it a lot
-void recCACHE() //Interpreter only!
+// [iter681] FIX: CACHE instruction must invalidate JIT blocks for EE RAM targets.
+// Without this, FlushCache SYSCALL leaves stale JIT blocks from before kernel code copy,
+// causing the BIOS sceSifSetDma implementation (at 0x80006410) to execute NOPs instead
+// of the real code, preventing SIF DMA tag setup and BIOS browser display.
+//
+// Runtime helper: called for each CACHE instruction targeting EE RAM.
+// Clears any compiled JIT block at the given address.
+static void recCACHE_ClearBlock(u32 addr)
 {
-	//xMOV(ptr32[&cpuRegs.code], (u32)cpuRegs.code );
-	//xMOV(ptr32[&cpuRegs.pc], (u32)pc );
-	//iFlushCall(FLUSH_EVERYTHING);
-	//xFastCall((void*)(uptr)R5900::Interpreter::OpcodeImpl::CACHE );
-	//branch = 2;
+	s_jit_cache_clear_count.fetch_add(1, std::memory_order_relaxed); // [TEMP_DIAG]
+	u32 phys = addr & 0x1FFFFFFFu;
+	// Only clear blocks in EE RAM range (0-32MB)
+	if (phys < Ps2MemSize::MainRam) {
+		recClear(phys, 1);
+	}
+}
+
+void recCACHE()
+{
+	// [iter684] Only clear JIT blocks for I-cache operations.
+	// D-cache operations (0x10-0x1C) don't affect compiled code.
+	// I-cache: 0x07 (IXIN), 0x0C (BFH/BTAC Flush)
+	// This filter eliminates ~95% of unnecessary JIT block invalidations.
+	const u32 op = _Rt_;
+	if (op != 0x07 && op != 0x0C) {
+		// Data cache operation — no JIT impact, skip
+		return;
+	}
+
+	// Emit a runtime call to recCACHE_ClearBlock(base + offset)
+	// CACHE instruction format: base=Rs, offset=Imm (sign-extended)
+	iFlushCall(FLUSH_EVERYTHING);
+
+	// Compute target address: Rs + sign_extended_imm
+	if (GPR_IS_CONST1(_Rs_)) {
+		u32 addr = g_cpuConstRegs[_Rs_].UL[0] + _Imm_;
+		armAsm->Mov(a64::w0, addr);
+	} else {
+		int rs = _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
+		armAsm->Mov(a64::w0, HostW(rs));
+		if (_Imm_ != 0)
+			armAsm->Add(a64::w0, a64::w0, _Imm_);
+	}
+	armEmitCall((void*)recCACHE_ClearBlock);
+}
+
+void recMOVCI()
+{
+	if (!_Rd_) return; // rd==0: always NOP
+	recCall(R5900::Interpreter::OpcodeImpl::MOVCI);
 }
 
 void recTGE()

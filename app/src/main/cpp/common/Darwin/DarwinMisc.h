@@ -22,7 +22,6 @@ namespace DarwinMisc {
     extern int ARMSX2_FORCE_JIT;
     extern int ARMSX2_IOP_CORE_TYPE;
 
-
     struct IndirectEvent {
         u64 site;
         u64 target;
@@ -81,8 +80,6 @@ struct CPUClass {
     bool FindJitBlock(uintptr_t site, u32* out_guest_pc, void** out_recptr);
 
     bool IsJITAvailable();
-    bool IsNoJitModeActive();
-    void ForceNoJitMode();
 
     enum class JitMode {
         Simulator,

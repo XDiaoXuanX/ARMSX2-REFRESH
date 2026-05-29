@@ -37,13 +37,13 @@ BIOS
 
 #include "common/AlignedMalloc.h"
 #include "common/Error.h"
-#ifdef __APPLE__
-#include "common/Darwin/DarwinMisc.h"
-#include <TargetConditionals.h>
-#endif
 
 #ifdef ENABLECACHE
 #include "Cache.h"
+#endif
+
+#ifdef __APPLE__
+#include "common/Darwin/DarwinMisc.h"
 #endif
 
 namespace Ps2MemSize
@@ -53,8 +53,8 @@ namespace Ps2MemSize
 
 namespace SysMemory
 {
-	static u8* TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size, const PageProtectionMode& mode);
-	static u8* AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base, const PageProtectionMode& mode);
+	static u8* TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size);
+	static u8* AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base);
 
 	static bool AllocateMemoryMap();
 	static void DumpMemoryMap();
@@ -90,14 +90,14 @@ namespace HostMemoryMap
 	}
 } // namespace HostMemoryMap
 
-u8* SysMemory::TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size, const PageProtectionMode& mode)
+u8* SysMemory::TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size)
 {
 	u8* baseptr;
 
 	if (file_handle)
 		baseptr = static_cast<u8*>(HostSys::MapSharedMemory(file_handle, 0, (void*)base, size, PageAccess_ReadWrite()));
 	else
-		baseptr = static_cast<u8*>(HostSys::Mmap((void*)base, size, mode));
+		baseptr = static_cast<u8*>(HostSys::Mmap((void*)base, size, PageAccess_Any()));
 
 	if (!baseptr)
 		return nullptr;
@@ -124,7 +124,7 @@ u8* SysMemory::TryAllocateVirtualMemory(const char* name, void* file_handle, upt
 	return baseptr;
 }
 
-u8* SysMemory::AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base, const PageProtectionMode& mode)
+u8* SysMemory::AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base)
 {
 	// ARM64 does not need the rec areas to be in +/- 2GB.
 #ifdef _M_X86
@@ -148,14 +148,14 @@ u8* SysMemory::AllocateVirtualMemory(const char* name, void* file_handle, size_t
 			continue;
 		}
 
-		if (u8* ret = TryAllocateVirtualMemory(name, file_handle, base, size, mode))
+		if (u8* ret = TryAllocateVirtualMemory(name, file_handle, base, size))
 			return ret;
 
 		DevCon.Warning("%s: host memory @ 0x%016" PRIXPTR " -> 0x%016" PRIXPTR " is unavailable; attempting to map elsewhere...", name,
 			base, base + size);
 	}
 #else
-	return TryAllocateVirtualMemory(name, file_handle, 0, size, mode);
+	return TryAllocateVirtualMemory(name, file_handle, 0, size);
 #endif
 
 	return nullptr;
@@ -171,23 +171,14 @@ bool SysMemory::AllocateMemoryMap()
 		return false;
 	}
 
-	if ((s_data_memory = AllocateVirtualMemory("Data Memory", s_data_memory_file_handle, HostMemoryMap::MainSize, 0, PageAccess_ReadWrite())) == nullptr)
+	if ((s_data_memory = AllocateVirtualMemory("Data Memory", s_data_memory_file_handle, HostMemoryMap::MainSize, 0)) == nullptr)
 	{
 		Host::ReportErrorAsync("Error", "Failed to map data memory at an acceptable location.");
 		ReleaseMemoryMap();
 		return false;
 	}
 
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-	const bool no_jit = DarwinMisc::IsNoJitModeActive();
-#else
-	const bool no_jit = false;
-#endif
-	const PageProtectionMode code_mode = no_jit ? PageAccess_ReadWrite() : PageAccess_Any();
-	DevCon.WriteLn(Color_Gray, "@@CODE_MEMORY@@ executable=%d no_jit=%d size=%zu",
-		code_mode.CanExecute() ? 1 : 0, no_jit ? 1 : 0, HostMemoryMap::CodeSize);
-
-	if ((s_code_memory = AllocateVirtualMemory("Code Memory", nullptr, HostMemoryMap::CodeSize, HostMemoryMap::MainSize, code_mode)) == nullptr)
+	if ((s_code_memory = AllocateVirtualMemory("Code Memory", nullptr, HostMemoryMap::CodeSize, HostMemoryMap::MainSize)) == nullptr)
 	{
 		Host::ReportErrorAsync("Error", "Failed to allocate code memory at an acceptable location.");
 		ReleaseMemoryMap();
@@ -197,6 +188,11 @@ bool SysMemory::AllocateMemoryMap()
 	HostMemoryMap::EEmem = (uptr)(s_data_memory + HostMemoryMap::EEmemOffset);
 	HostMemoryMap::IOPmem = (uptr)(s_data_memory + HostMemoryMap::IOPmemOffset);
 	HostMemoryMap::VUmem = (uptr)(s_data_memory + HostMemoryMap::VUmemSize);
+
+#ifdef __APPLE__
+	DarwinMisc::SetJitRange(s_code_memory, HostMemoryMap::CodeSize);
+	Console.WriteLn("@@P43_OFFSET@@ g_code_rw_offset=%ld", (long)DarwinMisc::g_code_rw_offset);
+#endif
 
 	DumpMemoryMap();
 	return true;

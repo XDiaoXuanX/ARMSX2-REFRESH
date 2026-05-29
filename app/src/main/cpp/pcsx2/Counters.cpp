@@ -8,6 +8,7 @@
 #include "R3000A.h"
 #include "Counters.h"
 #include "IopCounters.h"
+#include "Memory.h"
 
 #include "GS.h"
 #include "GS/GS.h"
@@ -24,6 +25,43 @@
 static const uint EECNT_FUTURE_TARGET = 0x10000000;
 
 uint g_FrameCount = 0;
+
+extern "C" void vtlb_MemWrite32_KSEG1(u32 addr, u32 data)
+{
+	memWrite32(addr, data);
+}
+
+extern "C" void vtlb_MemWrite8_KSEG1(u32 addr, u8 data)
+{
+	memWrite8(addr & 0x1FFFFFFF, data);
+}
+
+extern "C" void armsx2_probe_lw_result_9fc433f0(u32 result, u32 slot)
+{
+	static u32 s_count = 0;
+	if (s_count < 10)
+	{
+		Console.WriteLn("@@LW_RESULT_9FC433F0@@ n=%u result=%08x slot=%u pc=%08x cycle=%u",
+			s_count, result, slot, cpuRegs.pc, cpuRegs.cycle);
+		s_count++;
+	}
+}
+
+extern "C" void armsx2_probe_bne_9fc43404(u64 v0_val, u32 cycle)
+{
+	static u32 s_count = 0;
+	if (s_count < 20)
+	{
+		Console.WriteLn("@@BNE_9FC43404@@ n=%u v0=%08x_%08x cycle=%u pc=%08x",
+			s_count, static_cast<u32>(v0_val >> 32), static_cast<u32>(v0_val), cycle, cpuRegs.pc);
+		s_count++;
+	}
+}
+
+extern "C" u32 recMemRead32_KSEG1(u32 addr)
+{
+	return memRead32(addr);
+}
 
 // Counter 4 takes care of scanlines - hSync/hBlanks
 // Counter 5 takes care of vSync/vBlanks

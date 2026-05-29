@@ -16,6 +16,28 @@
 
 #include "fmt/format.h"
 
+char g_ioprp_path[128] = {};
+bool g_ioprp_path_pending = false;
+u32 g_last_syscall_pc = 0;
+u32 g_last_syscall_call = 0;
+u32 g_last_syscall_a0 = 0;
+u32 g_last_syscall_ra = 0;
+u32 g_last_syscall_cycle = 0;
+
+struct SyscallEntry
+{
+	u32 pc;
+	u32 call;
+	u32 a0;
+	u32 ra;
+	u32 v1_raw;
+	u32 cycle;
+};
+
+static constexpr int SYSCALL_RING_SIZE = 32;
+SyscallEntry g_syscall_ring[SYSCALL_RING_SIZE] = {};
+int g_syscall_ring_idx = 0;
+
 GS_VideoMode gsVideoMode = GS_VideoMode::Uninitialized;
 bool gsIsInterlaced = false;
 
@@ -861,6 +883,17 @@ void MOVN() {
 	}
 }
 
+void MOVCI()
+{
+	if (!_Rd_)
+		return;
+
+	const u32 tf = (cpuRegs.code >> 16) & 1;
+	const bool cc = (fpuRegs.fprc[31] & 0x00800000) != 0;
+	if (cc == (tf != 0))
+		cpuRegs.GPR.r[_Rd_].UD[0] = cpuRegs.GPR.r[_Rs_].UD[0];
+}
+
 /*********************************************************
 * Special purpose instructions                           *
 * Format:  OP                                            *
@@ -881,6 +914,21 @@ void SYSCALL()
 
 	BIOS_LOG("Bios call: %s (%x)", R5900::bios[call], call);
 
+	g_last_syscall_pc = cpuRegs.pc;
+	g_last_syscall_call = call;
+	g_last_syscall_a0 = cpuRegs.GPR.n.a0.UL[0];
+	g_last_syscall_ra = cpuRegs.GPR.n.ra.UL[0];
+	g_last_syscall_cycle = cpuRegs.cycle;
+	{
+		SyscallEntry& entry = g_syscall_ring[g_syscall_ring_idx & (SYSCALL_RING_SIZE - 1)];
+		entry.pc = cpuRegs.pc;
+		entry.call = call;
+		entry.a0 = cpuRegs.GPR.n.a0.UL[0];
+		entry.ra = cpuRegs.GPR.n.ra.UL[0];
+		entry.v1_raw = cpuRegs.GPR.n.v1.UL[0];
+		entry.cycle = cpuRegs.cycle;
+		g_syscall_ring_idx++;
+	}
 
 	switch (static_cast<Syscall>(call))
 	{

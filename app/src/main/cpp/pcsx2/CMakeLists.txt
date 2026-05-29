@@ -26,7 +26,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 	set(_M_ARM64 TRUE)
 	target_compile_definitions(PCSX2_FLAGS INTERFACE
 		"_M_ARM64=1"
-		"PCSX2_ARM64_DYNAREC=1"
 	)
 endif()
 target_compile_options(PCSX2_FLAGS INTERFACE "${PCSX2_WARNINGS}")
