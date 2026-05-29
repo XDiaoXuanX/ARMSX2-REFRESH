@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 import SwiftUI
+import Foundation
 import UniformTypeIdentifiers
 
 @Observable
@@ -83,12 +84,14 @@ final class FileImportHandler: @unchecked Sendable {
 
         if preferredDestination == .game {
             guard Self.gameExtensions.contains(ext) else {
+                NSLog("[ARMSX2 iOS Import] unsupported game file: %@", fileName)
                 return .unsupported(fileName)
             }
             destDir = (docsPath as NSString).appendingPathComponent("iso")
             category = "Game"
         } else if preferredDestination == .bios {
             guard Self.biosExtensions.contains(ext) else {
+                NSLog("[ARMSX2 iOS Import] unsupported BIOS file: %@", fileName)
                 return .unsupported(fileName)
             }
             destDir = (docsPath as NSString).appendingPathComponent("bios")
@@ -108,6 +111,7 @@ final class FileImportHandler: @unchecked Sendable {
                 category = "BIOS"
             }
         } else {
+            NSLog("[ARMSX2 iOS Import] unsupported file: %@", fileName)
             return .unsupported(fileName)
         }
 
@@ -122,8 +126,10 @@ final class FileImportHandler: @unchecked Sendable {
                 try FileManager.default.removeItem(atPath: destPath)
             }
             try FileManager.default.copyItem(at: url, to: URL(fileURLWithPath: destPath))
+            NSLog("[ARMSX2 iOS Import] %@ imported: %@ -> %@", category, fileName, destPath)
             return .success("\(category) imported: \(fileName)")
         } catch {
+            NSLog("[ARMSX2 iOS Import] failed: %@ -> %@ error=%@", fileName, destPath, error.localizedDescription)
             return .failure("\(fileName): \(error.localizedDescription)")
         }
     }

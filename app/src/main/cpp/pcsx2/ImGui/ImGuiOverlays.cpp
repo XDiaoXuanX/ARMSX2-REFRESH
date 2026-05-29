@@ -37,6 +37,10 @@
 #include "fmt/format.h"
 #include "imgui.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -137,13 +141,11 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 			switch (PerformanceMetrics::GetInternalFPSMethod())
 			{
 				case PerformanceMetrics::InternalFPSMethod::GSPrivilegedRegister:
-					text.append_format("FPS: {:.2f} [P]", PerformanceMetrics::GetInternalFPS(),
-						PerformanceMetrics::GetFPS());
+					text.append_format("FPS: {:.2f} [P]", PerformanceMetrics::GetInternalFPS());
 					break;
 
 				case PerformanceMetrics::InternalFPSMethod::DISPFBBlit:
-					text.append_format("FPS: {:.2f} [B]", PerformanceMetrics::GetInternalFPS(),
-						PerformanceMetrics::GetFPS());
+					text.append_format("FPS: {:.2f} [B]", PerformanceMetrics::GetInternalFPS());
 					break;
 
 				case PerformanceMetrics::InternalFPSMethod::None:
@@ -156,8 +158,7 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 
 		if (GSConfig.OsdShowVPS)
 		{
-			text.append_format("{}VPS: {:.2f}", first ? "" : " | ", PerformanceMetrics::GetFPS(),
-				PerformanceMetrics::GetFPS());
+			text.append_format("{}VPS: {:.2f}", first ? "" : " | ", PerformanceMetrics::GetFPS());
 			first = false;
 		}
 
@@ -175,8 +176,11 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 
 		if (GSConfig.OsdShowVersion)
 		{
-//			text.append_format("{}PCSX2 {}", first ? "" : " | ", BuildVersion::GitRev);
-            text.append_format("{}ARMSX2 {}", first ? "" : " | ", "v2.3.430");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			text.append_format("{}ARMSX2 iOS", first ? "" : " | ");
+#else
+			text.append_format("{}ARMSX2 {}", first ? "" : " | ", BuildVersion::GitRev);
+#endif
 		}
 
 		if (!text.empty())

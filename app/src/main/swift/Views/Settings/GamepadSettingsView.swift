@@ -126,8 +126,10 @@ struct GamepadSettingsView: View {
             let captured = ARMSX2Bridge.capturedButton()
             if captured >= 0 {
                 ARMSX2Bridge.setButtonMapping(Int32(ps2Index), toSDLButton: captured)
-                stopCapture()
-                mappingVersion += 1
+                Task { @MainActor in
+                    stopCapture()
+                    mappingVersion += 1
+                }
             }
         }
     }

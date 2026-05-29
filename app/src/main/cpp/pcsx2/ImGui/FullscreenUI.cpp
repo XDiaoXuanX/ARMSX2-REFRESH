@@ -1404,7 +1404,7 @@ void FullscreenUI::DrawLandingTemplate(ImVec2* menu_pos, ImVec2* menu_size)
 				logo_pos, logo_pos + logo_size);
 			dl->AddText(heading_font, heading_font->FontSize,
 				ImVec2(logo_pos.x + logo_size.x + LayoutScale(LAYOUT_MENU_BUTTON_X_PADDING), logo_pos.y),
-				ImGui::GetColorU32(ImGuiCol_Text), "PCSX2");
+				ImGui::GetColorU32(ImGuiCol_Text), "ARMSX2");
 		}
 
 		// draw time
@@ -1620,7 +1620,7 @@ void FullscreenUI::DrawExitWindow()
 			QueueResetFocus(FocusResetType::WindowChanged);
 		}
 
-		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/exit.png"), FSUI_CSTR("Exit PCSX2"),
+		if (HorizontalMenuItem(GetCachedTexture("fullscreenui/exit.png"), FSUI_CSTR("Exit ARMSX2"),
 				FSUI_CSTR("Completely exits the application, returning you to your desktop.")))
 		{
 			DoRequestExit();
@@ -3430,7 +3430,7 @@ void FullscreenUI::DrawInterfaceSettingsPage()
 		FSUI_NSTR("Untouched Lagoon"),
 		FSUI_NSTR("Baby Pastel"),
 		FSUI_NSTR("Pizza Time!"),
-		FSUI_NSTR("PCSX2 Blue"),
+		FSUI_NSTR("ARMSX2 Blue"),
 		FSUI_NSTR("Scarlet Devil"),
 		FSUI_NSTR("Violet Angel"),
 		FSUI_NSTR("Cobalt Sky"),
@@ -3585,8 +3585,8 @@ void FullscreenUI::DrawInterfaceSettingsPage()
 		FSUI_CSTR(
 			"Shows on-screen-display messages when events occur such as save states being created/loaded, screenshots being taken, etc."),
 		"EmuCore/GS", "OsdShowMessages", true);
-	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_INFO, "Show PCSX2 Version"),
-		FSUI_CSTR("Shows the current PCSX2 version on the top-right corner of the display."), "EmuCore/GS",
+	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_INFO, "Show ARMSX2 Version"),
+		FSUI_CSTR("Shows the current ARMSX2 version on the top-right corner of the display."), "EmuCore/GS",
 		"OsdShowVersion", false);
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_TACHOMETER_ALT, "Show Speed"),
 		FSUI_CSTR("Shows the current emulation speed of the system in the top-right corner of the display as a percentage."), "EmuCore/GS",
@@ -3817,7 +3817,7 @@ void FullscreenUI::DrawEmulationSettingsPage()
 		FSUI_CSTR("Speeds up emulation so that the guest refresh rate matches the host."), "EmuCore/GS", "SyncToHostRefreshRate", false);
 
 	DrawToggleSetting(bsi, FSUI_CSTR("Use Host VSync Timing"),
-		FSUI_CSTR("Disables PCSX2's internal frame timing, and uses host vsync instead."), "EmuCore/GS", "UseVSyncForTiming", false,
+		FSUI_CSTR("Disables the emulator's internal frame timing, and uses host vsync instead."), "EmuCore/GS", "UseVSyncForTiming", false,
 		GetEffectiveBoolSetting(bsi, "EmuCore/GS", "VsyncEnable", false) && GetEffectiveBoolSetting(bsi, "EmuCore/GS", "SyncToHostRefreshRate", false));
 
 	EndMenuButtons();
@@ -5148,8 +5148,8 @@ void FullscreenUI::DrawAdvancedSettingsPage()
 	if (!IsEditingGameSettings(bsi))
 	{
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_BIOHAZARD, "Show Advanced Settings"),
-			FSUI_CSTR("Changing these options may cause games to become non-functional. Modify at your own risk, the PCSX2 team will not "
-					  "provide support for configurations with these settings changed."),
+			FSUI_CSTR("Changing these options may cause games to become non-functional. Modify at your own risk; support is not "
+					  "guaranteed for configurations with these settings changed."),
 			"UI", "ShowAdvancedSettings", false);
 	}
 
@@ -5337,7 +5337,7 @@ void FullscreenUI::DrawPatchesOrCheatsSettingsPage(bool cheats)
 					 FSUI_CSTR("Activating game patches can cause unpredictable behavior, crashing, soft-locks, or broken saved games."),
 			false, false, ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY);
 		ActiveButton(
-			FSUI_CSTR("Use patches at your own risk, the PCSX2 team will provide no support for users who have enabled game patches."),
+			FSUI_CSTR("Use patches at your own risk; support is not guaranteed for users who have enabled game patches."),
 			false, false, ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY);
 	}
 
@@ -7223,7 +7223,7 @@ void FullscreenUI::DrawAchievementsSettingsPage(std::unique_lock<std::mutex>& se
 
 	MenuHeading(FSUI_CSTR("Settings"));
 	check_challenge_state = DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_TROPHY, "Enable Achievements"),
-		FSUI_CSTR("When enabled and logged in, PCSX2 will scan for achievements on startup."), "Achievements", "Enabled", false);
+		FSUI_CSTR("When enabled and logged in, ARMSX2 will scan for achievements on startup."), "Achievements", "Enabled", false);
 
 	const bool enabled = bsi->GetBoolValue("Achievements", "Enabled", false);
 
@@ -7247,11 +7247,11 @@ void FullscreenUI::DrawAchievementsSettingsPage(std::unique_lock<std::mutex>& se
 		FSUI_CSTR("When enabled, each session will behave as if no achievements have been unlocked."), "Achievements", "EncoreMode", false,
 		enabled);
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_EYE, "Spectator Mode"),
-		FSUI_CSTR("When enabled, PCSX2 will assume all achievements are locked and not send any unlock notifications to the server."),
+		FSUI_CSTR("When enabled, ARMSX2 will assume all achievements are locked and not send any unlock notifications to the server."),
 		"Achievements", "SpectatorMode", false, enabled);
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MEDAL, "Test Unofficial Achievements"),
 		FSUI_CSTR(
-			"When enabled, PCSX2 will list achievements from unofficial sets. These achievements are not tracked by RetroAchievements."),
+			"When enabled, ARMSX2 will list achievements from unofficial sets. These achievements are not tracked by RetroAchievements."),
 		"Achievements", "UnofficialTestMode", false, enabled);
 
 	// Check for challenge mode just being enabled.
@@ -7426,7 +7426,7 @@ TRANSLATE_NOOP("FullscreenUI", "Start BIOS");
 TRANSLATE_NOOP("FullscreenUI", "Start the console without any disc inserted.");
 TRANSLATE_NOOP("FullscreenUI", "Back");
 TRANSLATE_NOOP("FullscreenUI", "Return to the previous menu.");
-TRANSLATE_NOOP("FullscreenUI", "Exit PCSX2");
+	TRANSLATE_NOOP("FullscreenUI", "Exit ARMSX2");
 TRANSLATE_NOOP("FullscreenUI", "Completely exits the application, returning you to your desktop.");
 TRANSLATE_NOOP("FullscreenUI", "Desktop Mode");
 TRANSLATE_NOOP("FullscreenUI", "Exits Big Picture mode, returning to the desktop interface.");
@@ -7467,7 +7467,7 @@ TRANSLATE_NOOP("FullscreenUI", "On-Screen Display");
 TRANSLATE_NOOP("FullscreenUI", "Determines how large the on-screen messages and monitor are.");
 TRANSLATE_NOOP("FullscreenUI", "%d%%");
 TRANSLATE_NOOP("FullscreenUI", "Shows on-screen-display messages when events occur such as save states being created/loaded, screenshots being taken, etc.");
-TRANSLATE_NOOP("FullscreenUI", "Shows the current PCSX2 version on the top-right corner of the display.");
+TRANSLATE_NOOP("FullscreenUI", "Shows the current ARMSX2 version on the top-right corner of the display.");
 TRANSLATE_NOOP("FullscreenUI", "Shows the current emulation speed of the system in the top-right corner of the display as a percentage.");
 TRANSLATE_NOOP("FullscreenUI", "Shows the number of video frames (or v-syncs) displayed per second by the system in the top-right corner of the display.");
 TRANSLATE_NOOP("FullscreenUI", "Shows the CPU usage based on threads in the top-right corner of the display.");
@@ -7520,7 +7520,7 @@ TRANSLATE_NOOP("FullscreenUI", "Synchronizes frame presentation with host refres
 TRANSLATE_NOOP("FullscreenUI", "Sync to Host Refresh Rate");
 TRANSLATE_NOOP("FullscreenUI", "Speeds up emulation so that the guest refresh rate matches the host.");
 TRANSLATE_NOOP("FullscreenUI", "Use Host VSync Timing");
-TRANSLATE_NOOP("FullscreenUI", "Disables PCSX2's internal frame timing, and uses host vsync instead.");
+TRANSLATE_NOOP("FullscreenUI", "Disables the emulator's internal frame timing, and uses host vsync instead.");
 TRANSLATE_NOOP("FullscreenUI", "Renderer");
 TRANSLATE_NOOP("FullscreenUI", "Selects the API used to render the emulated GS.");
 TRANSLATE_NOOP("FullscreenUI", "Display");
@@ -7727,7 +7727,7 @@ TRANSLATE_NOOP("FullscreenUI", "Determines the pressure required to activate the
 TRANSLATE_NOOP("FullscreenUI", "Toggle every %d frames");
 TRANSLATE_NOOP("FullscreenUI", "Clears all bindings for this USB controller.");
 TRANSLATE_NOOP("FullscreenUI", "Data Save Locations");
-TRANSLATE_NOOP("FullscreenUI", "Changing these options may cause games to become non-functional. Modify at your own risk, the PCSX2 team will not provide support for configurations with these settings changed.");
+TRANSLATE_NOOP("FullscreenUI", "Changing these options may cause games to become non-functional. Modify at your own risk; support is not guaranteed for configurations with these settings changed.");
 TRANSLATE_NOOP("FullscreenUI", "Logging");
 TRANSLATE_NOOP("FullscreenUI", "Writes log messages to the system console (console window/standard output).");
 TRANSLATE_NOOP("FullscreenUI", "Writes log messages to emulog.txt.");
@@ -7782,7 +7782,7 @@ TRANSLATE_NOOP("FullscreenUI", "No patches are available for this game.");
 TRANSLATE_NOOP("FullscreenUI", "Game Patches");
 TRANSLATE_NOOP("FullscreenUI", "Activating cheats can cause unpredictable behavior, crashing, soft-locks, or broken saved games.");
 TRANSLATE_NOOP("FullscreenUI", "Activating game patches can cause unpredictable behavior, crashing, soft-locks, or broken saved games.");
-TRANSLATE_NOOP("FullscreenUI", "Use patches at your own risk, the PCSX2 team will provide no support for users who have enabled game patches.");
+TRANSLATE_NOOP("FullscreenUI", "Use patches at your own risk; support is not guaranteed for users who have enabled game patches.");
 TRANSLATE_NOOP("FullscreenUI", "Game Fixes");
 TRANSLATE_NOOP("FullscreenUI", "Game fixes should not be modified unless you are aware of what each option does and the implications of doing so.");
 TRANSLATE_NOOP("FullscreenUI", "FPU Multiply Hack");
@@ -7845,15 +7845,15 @@ TRANSLATE_NOOP("FullscreenUI", "About PCSX2");
 TRANSLATE_NOOP("FullscreenUI", "PCSX2 is a free and open-source PlayStation 2 (PS2) emulator. Its purpose is to emulate the PS2's hardware, using a combination of MIPS CPU Interpreters, Recompilers and a Virtual Machine which manages hardware states and PS2 system memory. This allows you to play PS2 games on your PC, with many additional features and benefits.");
 TRANSLATE_NOOP("FullscreenUI", "PlayStation 2 and PS2 are registered trademarks of Sony Interactive Entertainment. This application is not affiliated in any way with Sony Interactive Entertainment.");
 TRANSLATE_NOOP("FullscreenUI", "Version: %s");
-TRANSLATE_NOOP("FullscreenUI", "When enabled and logged in, PCSX2 will scan for achievements on startup.");
+TRANSLATE_NOOP("FullscreenUI", "When enabled and logged in, ARMSX2 will scan for achievements on startup.");
 TRANSLATE_NOOP("FullscreenUI", "\"Challenge\" mode for achievements, including leaderboard tracking. Disables save state, cheats, and slowdown functions.");
 TRANSLATE_NOOP("FullscreenUI", "Displays popup messages on events such as achievement unlocks and leaderboard submissions.");
 TRANSLATE_NOOP("FullscreenUI", "Displays popup messages when starting, submitting, or failing a leaderboard challenge.");
 TRANSLATE_NOOP("FullscreenUI", "Plays sound effects for events such as achievement unlocks and leaderboard submissions.");
 TRANSLATE_NOOP("FullscreenUI", "Shows icons in the lower-right corner of the screen when a challenge/primed achievement is active.");
 TRANSLATE_NOOP("FullscreenUI", "When enabled, each session will behave as if no achievements have been unlocked.");
-TRANSLATE_NOOP("FullscreenUI", "When enabled, PCSX2 will assume all achievements are locked and not send any unlock notifications to the server.");
-TRANSLATE_NOOP("FullscreenUI", "When enabled, PCSX2 will list achievements from unofficial sets. These achievements are not tracked by RetroAchievements.");
+TRANSLATE_NOOP("FullscreenUI", "When enabled, ARMSX2 will assume all achievements are locked and not send any unlock notifications to the server.");
+TRANSLATE_NOOP("FullscreenUI", "When enabled, ARMSX2 will list achievements from unofficial sets. These achievements are not tracked by RetroAchievements.");
 TRANSLATE_NOOP("FullscreenUI", "Sound Effects");
 TRANSLATE_NOOP("FullscreenUI", "Account");
 TRANSLATE_NOOP("FullscreenUI", "Logs out of RetroAchievements.");
@@ -7921,7 +7921,7 @@ TRANSLATE_NOOP("FullscreenUI", "Grey Matter");
 TRANSLATE_NOOP("FullscreenUI", "Untouched Lagoon");
 TRANSLATE_NOOP("FullscreenUI", "Baby Pastel");
 TRANSLATE_NOOP("FullscreenUI", "Pizza Time!");
-TRANSLATE_NOOP("FullscreenUI", "PCSX2 Blue");
+TRANSLATE_NOOP("FullscreenUI", "ARMSX2 Blue");
 TRANSLATE_NOOP("FullscreenUI", "Scarlet Devil");
 TRANSLATE_NOOP("FullscreenUI", "Violet Angel");
 TRANSLATE_NOOP("FullscreenUI", "Cobalt Sky");
@@ -8145,7 +8145,7 @@ TRANSLATE_NOOP("FullscreenUI", "Double-Click Toggles Fullscreen");
 TRANSLATE_NOOP("FullscreenUI", "Hide Cursor In Fullscreen");
 TRANSLATE_NOOP("FullscreenUI", "OSD Scale");
 TRANSLATE_NOOP("FullscreenUI", "Show Messages");
-TRANSLATE_NOOP("FullscreenUI", "Show PCSX2 Version");
+TRANSLATE_NOOP("FullscreenUI", "Show ARMSX2 Version");
 TRANSLATE_NOOP("FullscreenUI", "Show Speed");
 TRANSLATE_NOOP("FullscreenUI", "Show FPS");
 TRANSLATE_NOOP("FullscreenUI", "Show CPU Usage");

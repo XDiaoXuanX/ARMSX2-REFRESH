@@ -90,10 +90,11 @@ struct GraphicsSettingsView: View {
                 }
 
                 Picker("Aspect Ratio", selection: $settings.aspectRatio) {
-                    Text("Auto 4:3 / 3:2 (Default)").tag(0)
-                    Text("4:3").tag(1)
-                    Text("16:9 (Widescreen)").tag(2)
-                    Text("Stretch to Window").tag(3)
+                    Text("Auto 4:3 / 3:2 (Default)").tag(1)
+                    Text("4:3").tag(2)
+                    Text("16:9 (Widescreen)").tag(3)
+                    Text("10:7").tag(4)
+                    Text("Stretch to Window").tag(0)
                 }
             }
 

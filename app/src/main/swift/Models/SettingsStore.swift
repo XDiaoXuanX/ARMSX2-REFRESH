@@ -26,7 +26,10 @@ final class SettingsStore: @unchecked Sendable {
 
     // ── Emulator / CPU ──
     var eeCoreType: Int {
-        didSet { ARMSX2Bridge.setINIInt("EmuCore/CPU", key: "CoreType", value: Int32(eeCoreType)) }
+        didSet {
+            ARMSX2Bridge.setINIInt("EmuCore/CPU", key: "CoreType", value: Int32(eeCoreType))
+            ARMSX2Bridge.setINIBool("EmuCore/CPU", key: "UseArm64Dynarec", value: eeCoreType == 2)
+        }
     }
     var iopRecompiler: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/CPU/Recompiler", key: "EnableIOP", value: iopRecompiler) }
@@ -89,7 +92,7 @@ final class SettingsStore: @unchecked Sendable {
         didSet { ARMSX2Bridge.setINIInt("EmuCore/GS", key: "deinterlace_mode", value: Int32(interlaceMode)) }
     }
     var aspectRatio: Int {
-        didSet { ARMSX2Bridge.setINIInt("EmuCore/GS", key: "AspectRatio", value: Int32(aspectRatio)) }
+        didSet { ARMSX2Bridge.setINIString("EmuCore/GS", key: "AspectRatio", value: Self.aspectRatioName(for: aspectRatio)) }
     }
     var blendingAccuracy: Int {
         didSet { ARMSX2Bridge.setINIInt("EmuCore/GS", key: "accurate_blending_unit", value: Int32(blendingAccuracy)) }
@@ -105,8 +108,14 @@ final class SettingsStore: @unchecked Sendable {
             applyOsdPreset(osdPreset)
         }
     }
+    var osdPerformancePosition: Int {
+        didSet { ARMSX2Bridge.setINIInt("EmuCore/GS", key: "OsdPerformancePos", value: Int32(osdPerformancePosition)) }
+    }
     var osdShowFPS: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowFPS", value: osdShowFPS) }
+    }
+    var osdShowVPS: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowVPS", value: osdShowVPS) }
     }
     var osdShowSpeed: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowSpeed", value: osdShowSpeed) }
@@ -114,11 +123,32 @@ final class SettingsStore: @unchecked Sendable {
     var osdShowCPU: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowCPU", value: osdShowCPU) }
     }
+    var osdShowGPU: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowGPU", value: osdShowGPU) }
+    }
     var osdShowResolution: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowResolution", value: osdShowResolution) }
     }
+    var osdShowGSStats: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowGSStats", value: osdShowGSStats) }
+    }
+    var osdShowIndicators: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowIndicators", value: osdShowIndicators) }
+    }
+    var osdShowSettings: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowSettings", value: osdShowSettings) }
+    }
+    var osdShowInputs: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowInputs", value: osdShowInputs) }
+    }
     var osdShowFrameTimes: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowFrameTimes", value: osdShowFrameTimes) }
+    }
+    var osdShowVersion: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowVersion", value: osdShowVersion) }
+    }
+    var osdShowHardwareInfo: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowHardwareInfo", value: osdShowHardwareInfo) }
     }
 
     // ── Gamepad / UI ──
@@ -127,6 +157,28 @@ final class SettingsStore: @unchecked Sendable {
     }
     var hapticFeedback: Bool {
         didSet { ARMSX2Bridge.setINIBool("ARMSX2iOS/UI", key: "HapticFeedback", value: hapticFeedback) }
+    }
+
+    private static func aspectRatioName(for value: Int) -> String {
+        switch value {
+        case 0: return "Stretch"
+        case 1: return "Auto 4:3/3:2"
+        case 2: return "4:3"
+        case 3: return "16:9"
+        case 4: return "10:7"
+        default: return "Auto 4:3/3:2"
+        }
+    }
+
+    private static func aspectRatioValue(from name: String) -> Int {
+        switch name {
+        case "Stretch", "0": return 0
+        case "Auto 4:3/3:2", "1": return 1
+        case "4:3", "2": return 2
+        case "16:9", "3": return 3
+        case "10:7", "4": return 4
+        default: return 1
+        }
     }
 
     // ── Init from INI ──
@@ -159,19 +211,29 @@ final class SettingsStore: @unchecked Sendable {
         casMode = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "CASMode", defaultValue: 0))
         casSharpness = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "CASSharpness", defaultValue: 50))
         interlaceMode = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "deinterlace_mode", defaultValue: 7))
-        aspectRatio = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "AspectRatio", defaultValue: 0))
+        aspectRatio = Self.aspectRatioValue(from: ARMSX2Bridge.getINIString("EmuCore/GS", key: "AspectRatio", defaultValue: "Auto 4:3/3:2"))
         blendingAccuracy = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "accurate_blending_unit", defaultValue: 1))
         dithering = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "dithering_ps2", defaultValue: 2))
         // OSD
         osdPreset = OsdPreset(rawValue: Int(ARMSX2Bridge.getINIInt("ARMSX2iOS/UI", key: "OsdPreset", defaultValue: 0))) ?? .off
+        osdPerformancePosition = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "OsdPerformancePos", defaultValue: 2))
         osdShowFPS = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowFPS", defaultValue: false)
+        osdShowVPS = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowVPS", defaultValue: false)
         osdShowSpeed = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowSpeed", defaultValue: false)
         osdShowCPU = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowCPU", defaultValue: false)
+        osdShowGPU = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowGPU", defaultValue: false)
         osdShowResolution = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowResolution", defaultValue: false)
+        osdShowGSStats = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowGSStats", defaultValue: false)
+        osdShowIndicators = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowIndicators", defaultValue: false)
+        osdShowSettings = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowSettings", defaultValue: false)
+        osdShowInputs = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowInputs", defaultValue: false)
         osdShowFrameTimes = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowFrameTimes", defaultValue: false)
+        osdShowVersion = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowVersion", defaultValue: false)
+        osdShowHardwareInfo = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowHardwareInfo", defaultValue: false)
         // UI
         padOpacity = ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "PadOpacity", defaultValue: 0.6)
         hapticFeedback = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HapticFeedback", defaultValue: true)
+        ARMSX2Bridge.setINIString("EmuCore/GS", key: "AspectRatio", value: Self.aspectRatioName(for: aspectRatio))
         // [P60] Force MTVU off (known buggy)
         ARMSX2Bridge.setINIBool("EmuCore/Speedhacks", key: "vuThread", value: false)
         // Apply OSD preset
@@ -204,15 +266,24 @@ final class SettingsStore: @unchecked Sendable {
         casMode = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "CASMode", defaultValue: 0))
         casSharpness = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "CASSharpness", defaultValue: 50))
         interlaceMode = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "deinterlace_mode", defaultValue: 7))
-        aspectRatio = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "AspectRatio", defaultValue: 0))
+        aspectRatio = Self.aspectRatioValue(from: ARMSX2Bridge.getINIString("EmuCore/GS", key: "AspectRatio", defaultValue: "Auto 4:3/3:2"))
         blendingAccuracy = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "accurate_blending_unit", defaultValue: 1))
         dithering = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "dithering_ps2", defaultValue: 2))
         osdPreset = OsdPreset(rawValue: Int(ARMSX2Bridge.getINIInt("ARMSX2iOS/UI", key: "OsdPreset", defaultValue: 0))) ?? .off
+        osdPerformancePosition = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "OsdPerformancePos", defaultValue: 2))
         osdShowFPS = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowFPS", defaultValue: false)
+        osdShowVPS = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowVPS", defaultValue: false)
         osdShowSpeed = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowSpeed", defaultValue: false)
         osdShowCPU = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowCPU", defaultValue: false)
+        osdShowGPU = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowGPU", defaultValue: false)
         osdShowResolution = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowResolution", defaultValue: false)
+        osdShowGSStats = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowGSStats", defaultValue: false)
+        osdShowIndicators = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowIndicators", defaultValue: false)
+        osdShowSettings = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowSettings", defaultValue: false)
+        osdShowInputs = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowInputs", defaultValue: false)
         osdShowFrameTimes = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowFrameTimes", defaultValue: false)
+        osdShowVersion = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowVersion", defaultValue: false)
+        osdShowHardwareInfo = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowHardwareInfo", defaultValue: false)
         padOpacity = ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "PadOpacity", defaultValue: 0.6)
         hapticFeedback = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HapticFeedback", defaultValue: true)
     }
@@ -220,37 +291,65 @@ final class SettingsStore: @unchecked Sendable {
     /// Apply OSD preset — writes ALL OSD flags to INI + GSConfig
     private func applyOsdPreset(_ preset: OsdPreset) {
         ARMSX2Bridge.applyOsdPreset(Int32(preset.rawValue))
+        if preset == .off {
+            osdPerformancePosition = 0
+        } else if osdPerformancePosition == 0 {
+            osdPerformancePosition = 2
+        }
         let isSimple = preset == .simple
         let isDetail = preset == .detail
         let isFull = preset == .full
         osdShowFPS = isSimple || isDetail || isFull
-        osdShowSpeed = isDetail || isFull
+        osdShowVPS = isDetail || isFull
+        osdShowSpeed = isSimple || isDetail || isFull
         osdShowCPU = isSimple || isDetail || isFull
+        osdShowGPU = isDetail || isFull
         osdShowResolution = isDetail || isFull
+        osdShowGSStats = isFull
+        osdShowIndicators = isSimple || isDetail || isFull
+        osdShowSettings = isFull
+        osdShowInputs = isFull
         osdShowFrameTimes = isFull
-        ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowVPS", value: false)
-        ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowVersion", value: false)
-        ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowHardwareInfo", value: false)
-        ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowGPU", value: false)
-        ARMSX2Bridge.setINIBool("EmuCore/GS", key: "OsdShowGSStats", value: false)
+        osdShowVersion = isFull
+        osdShowHardwareInfo = isFull
     }
 
-    /// Reset emulator settings to PC PCSX2 defaults
+    /// Reset emulator settings to ARMSX2 iOS defaults
     func resetEmulatorDefaults() {
         eeCoreType = 2          // ARM64 JIT
         iopRecompiler = true
-        vu0Recompiler = true    // PC PCSX2 default: microVU JIT
-        vu1Recompiler = true    // PC PCSX2 default: microVU JIT
+        vu0Recompiler = true
+        vu1Recompiler = true
         fastBoot = false
         fastmem = true
         fastCDVD = false
         eeCycleRate = 0
-        vu1Instant = true       // PC PCSX2 recommended default
-        waitLoop = true         // PC PCSX2 recommended default
-        intcStat = true         // PC PCSX2 recommended default
+        vu1Instant = true
+        waitLoop = true
+        intcStat = true
     }
 
-    /// Reset graphics settings to PC PCSX2 defaults
+    /// Keep EE/IOP/VU0 fast while isolating suspected VU1 JIT regressions.
+    func applyVU1CompatibilityPreset() {
+        eeCoreType = 2
+        iopRecompiler = true
+        vu0Recompiler = true
+        vu1Recompiler = false
+        vu1Instant = false
+        fastmem = false
+    }
+
+    /// Slow diagnostic preset for crash isolation when dynarec state is suspect.
+    func applyFullInterpreterPreset() {
+        eeCoreType = 1
+        iopRecompiler = false
+        vu0Recompiler = false
+        vu1Recompiler = false
+        vu1Instant = false
+        fastmem = false
+    }
+
+    /// Reset graphics settings to ARMSX2 iOS defaults
     func resetGraphicsDefaults() {
         renderer = 17           // Metal
         upscaleMultiplier = 1.0 // Native PS2
@@ -260,7 +359,7 @@ final class SettingsStore: @unchecked Sendable {
         casMode = 0             // Disabled
         casSharpness = 50
         interlaceMode = 7       // Adaptive
-        aspectRatio = 0         // Auto 4:3/3:2
+        aspectRatio = 1         // Auto 4:3/3:2
         blendingAccuracy = 1    // Basic
         dithering = 2           // Scaled
     }

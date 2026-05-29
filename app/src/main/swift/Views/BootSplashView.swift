@@ -25,7 +25,7 @@ struct BootSplashView: View {
         }
         .task {
             try? await Task.sleep(nanoseconds: Self.hardTimeout)
-            await finish()
+            finish()
         }
     }
 
@@ -79,7 +79,7 @@ private struct BootSplashPlayerView: UIViewRepresentable {
         coordinator.stopObserving()
     }
 
-    final class Coordinator {
+    final class Coordinator: @unchecked Sendable {
         var player: AVPlayer?
         private let onFinished: () -> Void
         private var endToken: NSObjectProtocol?

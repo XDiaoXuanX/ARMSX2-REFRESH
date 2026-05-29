@@ -205,22 +205,28 @@ private struct SaveStatesPanel: View {
     }
 
     private func save(_ slot: ARMSX2SaveStateSlotInfo) {
-        busySlot = slot.slot
-        ARMSX2Bridge.saveState(toSlot: slot.slot) { success in
-            busySlot = nil
-            refresh()
-            statusHandler(success ? "State saved to slot \(slot.slot)" : "Failed to save slot \(slot.slot)")
+        let slotNumber = slot.slot
+        busySlot = slotNumber
+        ARMSX2Bridge.saveState(toSlot: slotNumber) { success in
+            Task { @MainActor in
+                busySlot = nil
+                refresh()
+                statusHandler(success ? "State saved to slot \(slotNumber)" : "Failed to save slot \(slotNumber)")
+            }
         }
     }
 
     private func load(_ slot: ARMSX2SaveStateSlotInfo) {
-        busySlot = slot.slot
-        ARMSX2Bridge.loadState(fromSlot: slot.slot) { success in
-            busySlot = nil
-            refresh()
-            statusHandler(success ? "State loaded from slot \(slot.slot)" : "Failed to load slot \(slot.slot)")
-            if success {
-                dismiss()
+        let slotNumber = slot.slot
+        busySlot = slotNumber
+        ARMSX2Bridge.loadState(fromSlot: slotNumber) { success in
+            Task { @MainActor in
+                busySlot = nil
+                refresh()
+                statusHandler(success ? "State loaded from slot \(slotNumber)" : "Failed to load slot \(slotNumber)")
+                if success {
+                    dismiss()
+                }
             }
         }
     }

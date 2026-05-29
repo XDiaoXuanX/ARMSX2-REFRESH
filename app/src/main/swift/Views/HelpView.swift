@@ -60,7 +60,7 @@ private let helpData: [HelpSection] = [
     HelpSection(title: "Overlay", icon: "speedometer", items: [
         HelpItem(
             question: "Overlay presets",
-            answer: "OFF: No overlay. Simple: FPS + CPU usage. Detail: FPS, Speed, CPU, Resolution. Full: Everything including Frame Times graph. Configure in Settings > Overlay."
+            answer: "OFF hides the overlay. Simple shows FPS, speed, CPU, and indicators. Detail adds VPS, GPU, and resolution. Full enables the Android-style diagnostic set including GS stats, settings, inputs, frame times, version, and hardware info."
         ),
         HelpItem(
             question: "In-game toggle",

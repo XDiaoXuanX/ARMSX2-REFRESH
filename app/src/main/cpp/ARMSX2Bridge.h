@@ -13,8 +13,10 @@ typedef NS_ENUM(NSInteger, ARMSX2EmulatorState) {
 };
 
 typedef NS_ENUM(NSInteger, ARMSX2CoreType) {
-    ARMSX2CoreTypeJIT = 0,
+    ARMSX2CoreTypeLegacyRecompiler = 0,
     ARMSX2CoreTypeInterpreter = 1,
+    ARMSX2CoreTypeARM64JIT = 2,
+    ARMSX2CoreTypeJIT = ARMSX2CoreTypeARM64JIT,
 };
 
 typedef NS_ENUM(NSInteger, ARMSX2PadButton) {

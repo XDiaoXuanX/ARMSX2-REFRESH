@@ -70,6 +70,22 @@ struct EmulatorSettingsView: View {
             }
 
             Section {
+                Button("Use VU1 Interpreter Preset") {
+                    settings.applyVU1CompatibilityPreset()
+                }
+                Button("Use Full Interpreter Preset") {
+                    settings.applyFullInterpreterPreset()
+                }
+                Text("Use the VU1 preset first for boot crashes or VU1-related texture/rendering glitches. Full Interpreter is much slower, but helps isolate dynarec/JIT issues.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Compatibility")
+            } footer: {
+                Text("Changes take effect on next VM boot.")
+            }
+
+            Section {
                 Stepper("EE Cycle Rate: \(settings.eeCycleRate)", value: $settings.eeCycleRate, in: -3...3)
                 Text("0 = Default. Negative = underclock (stable). Positive = overclock (fast but risky).")
                     .font(.caption)
@@ -80,7 +96,7 @@ struct EmulatorSettingsView: View {
                 Toggle("Wait Loop Detection", isOn: $settings.waitLoop)
                 Toggle("INTC Stat Hack", isOn: $settings.intcStat)
 
-                Text("These are recommended defaults from PCSX2. Disable only if a specific game has issues.")
+                Text("These are recommended compatibility defaults. Disable only if a specific game has issues.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {

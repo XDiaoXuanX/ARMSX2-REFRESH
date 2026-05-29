@@ -832,6 +832,10 @@ void DarwinMisc::MunmapCodeDualMap(void* rx_ptr, size_t size)
 
 bool DarwinMisc::IsJITAvailable()
 {
+	static std::optional<bool> s_cached_jit_available;
+	if (s_cached_jit_available.has_value())
+		return *s_cached_jit_available;
+
 #if ARMSX2_APPLE_IOS_DEVICE
     uint32_t cs_flags = 0;
     int rv = csops(getpid(), 0, &cs_flags, sizeof(cs_flags));
@@ -844,11 +848,13 @@ bool DarwinMisc::IsJITAvailable()
         fprintf(stderr, "@@JIT_DETECT@@ result=UNAVAILABLE (no CS_DEBUGGED — launch via StikDebug)\n");
         s_jit_mode = JitMode::Legacy;
         s_jit_mode_detected = true;
-        return false;
+        s_cached_jit_available = false;
+        return *s_cached_jit_available;
     }
 
     fprintf(stderr, "@@JIT_DETECT@@ result=AVAILABLE (CS_DEBUGGED set)\n");
-    return true;
+    s_cached_jit_available = true;
+    return *s_cached_jit_available;
 #else
     const size_t probe_size = static_cast<size_t>(getpagesize());
     void* probe = mmap(nullptr, probe_size, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -856,12 +862,14 @@ bool DarwinMisc::IsJITAvailable()
     if (probe == MAP_FAILED)
     {
         fprintf(stderr, "@@JIT_DETECT@@ MAP_JIT probe failed errno=%d\n", errno);
-        return false;
+        s_cached_jit_available = false;
+        return *s_cached_jit_available;
     }
 
     munmap(probe, probe_size);
     fprintf(stderr, "@@JIT_DETECT@@ MAP_JIT probe result=AVAILABLE\n");
-    return true;
+    s_cached_jit_available = true;
+    return *s_cached_jit_available;
 #endif
 }
 
@@ -1088,8 +1096,21 @@ void HostSys::BeginCodeWrite()
 			}
 		} else {
 			static auto func = reinterpret_cast<void(*)(int)>(dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+			static bool s_logged_pthread_jit_begin = false;
 			if (func)
+			{
+				if (!s_logged_pthread_jit_begin)
+				{
+					fprintf(stderr, "@@JIT_WRITE_PROTECT@@ pthread_jit_write_protect_np available=1 action=begin_write protect=0\n");
+					s_logged_pthread_jit_begin = true;
+				}
 				func(0);
+			}
+			else if (!s_logged_pthread_jit_begin)
+			{
+				fprintf(stderr, "@@JIT_WRITE_PROTECT@@ pthread_jit_write_protect_np available=0 action=begin_write\n");
+				s_logged_pthread_jit_begin = true;
+			}
 		}
 	}
 }
@@ -1120,8 +1141,21 @@ void HostSys::EndCodeWrite()
 			}
 		} else {
 			static auto func = reinterpret_cast<void(*)(int)>(dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+			static bool s_logged_pthread_jit_end = false;
 			if (func)
+			{
+				if (!s_logged_pthread_jit_end)
+				{
+					fprintf(stderr, "@@JIT_WRITE_PROTECT@@ pthread_jit_write_protect_np available=1 action=end_write protect=1\n");
+					s_logged_pthread_jit_end = true;
+				}
 				func(1);
+			}
+			else if (!s_logged_pthread_jit_end)
+			{
+				fprintf(stderr, "@@JIT_WRITE_PROTECT@@ pthread_jit_write_protect_np available=0 action=end_write\n");
+				s_logged_pthread_jit_end = true;
+			}
 		}
 	}
 }

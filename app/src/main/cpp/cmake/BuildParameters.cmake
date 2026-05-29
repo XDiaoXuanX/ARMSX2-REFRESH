@@ -119,7 +119,7 @@ elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM
 #	add_compile_options("-march=armv8.4-a" "-mcpu=apple-m1")
 
 	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-	add_definitions("-march=armv8-a+crc")
+	add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-march=armv8-a+crc>")
 
 	# If we're running on Linux, we need to detect the page/cache line size.
 	# It could be a virtual machine with 4K pages, or 16K with Asahi.
@@ -159,7 +159,11 @@ if(MSVC)
 	# Disable Exceptions
 	string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
 else()
-	add_compile_options(-pipe -fvisibility=hidden -pthread)
+	add_compile_options(
+		"$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-pipe>"
+		"$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-fvisibility=hidden>"
+		"$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-pthread>"
+	)
 	add_compile_options(
 		"$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>"
 	)

@@ -18,7 +18,9 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "common/Path.h"
 #include "common/ZipHelpers.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <future>
 #include <optional>
 #include <string_view>
@@ -87,6 +89,49 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
         return nil;
 
     return [NSData dataWithBytes:data->data() length:data->size()];
+}
+
+static void ARMSX2ApplyLiveGSBoolSetting(const char* section, const char* key, bool value)
+{
+    if (std::strcmp(section, "EmuCore/GS") != 0)
+        return;
+
+#define APPLY_OSD_BOOL(name) \
+    do { \
+        if (std::strcmp(key, #name) == 0) { \
+            EmuConfig.GS.name = value; \
+            GSConfig.name = value; \
+            return; \
+        } \
+    } while (0)
+
+    APPLY_OSD_BOOL(OsdShowFPS);
+    APPLY_OSD_BOOL(OsdShowVPS);
+    APPLY_OSD_BOOL(OsdShowSpeed);
+    APPLY_OSD_BOOL(OsdShowCPU);
+    APPLY_OSD_BOOL(OsdShowGPU);
+    APPLY_OSD_BOOL(OsdShowResolution);
+    APPLY_OSD_BOOL(OsdShowGSStats);
+    APPLY_OSD_BOOL(OsdShowIndicators);
+    APPLY_OSD_BOOL(OsdShowSettings);
+    APPLY_OSD_BOOL(OsdShowInputs);
+    APPLY_OSD_BOOL(OsdShowFrameTimes);
+    APPLY_OSD_BOOL(OsdShowVersion);
+    APPLY_OSD_BOOL(OsdShowHardwareInfo);
+    APPLY_OSD_BOOL(OsdShowVideoCapture);
+    APPLY_OSD_BOOL(OsdShowInputRec);
+
+#undef APPLY_OSD_BOOL
+}
+
+static void ARMSX2ApplyLiveGSIntSetting(const char* section, const char* key, int value)
+{
+    if (std::strcmp(section, "EmuCore/GS") != 0 || std::strcmp(key, "OsdPerformancePos") != 0)
+        return;
+
+    const int clamped = std::clamp(value, static_cast<int>(OsdOverlayPos::None), static_cast<int>(OsdOverlayPos::TopRight));
+    EmuConfig.GS.OsdPerformancePos = static_cast<OsdOverlayPos>(clamped);
+    GSConfig.OsdPerformancePos = static_cast<OsdOverlayPos>(clamped);
 }
 
 @implementation ARMSX2Bridge
@@ -195,7 +240,7 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
 + (void)requestVMStop {
     extern std::atomic<bool> s_requestVMStop;
     s_requestVMStop.store(true);
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
+    NSLog(@"[ARMSX2Bridge] VM stop requested");
 }
 
 + (void)setFullScreen:(BOOL)enabled {
@@ -209,7 +254,9 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
 
 + (nullable NSString *)currentISOPath {
     NSString *docsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *iniPath = [docsPath stringByAppendingPathComponent:@"PCSX2-iOS.ini"];
+    NSString *iniPath = [docsPath stringByAppendingPathComponent:@"ARMSX2-iOS.ini"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:iniPath])
+        iniPath = [docsPath stringByAppendingPathComponent:@"PCSX2-iOS.ini"];
     // Read BootISO from INI
     FILE *f = fopen(iniPath.UTF8String, "r");
     if (!f) return nil;
@@ -310,28 +357,60 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
     GSConfig.OsdShowFrameTimes = false;
     GSConfig.OsdShowVersion = false;
     GSConfig.OsdShowHardwareInfo = false;
+    GSConfig.OsdShowIndicators = false;
+    GSConfig.OsdShowSettings = false;
+    GSConfig.OsdShowInputs = false;
+    GSConfig.OsdShowVideoCapture = false;
+    GSConfig.OsdShowInputRec = false;
 
     switch (preset) {
-    case 1: // simple: FPS + CPU usage
-        GSConfig.OsdShowFPS = true;
-        GSConfig.OsdShowCPU = true;
-        break;
-    case 2: // detail: simple + speed + resolution
+    case 1: // simple: Android-style quick readout
         GSConfig.OsdShowFPS = true;
         GSConfig.OsdShowSpeed = true;
         GSConfig.OsdShowCPU = true;
-        GSConfig.OsdShowResolution = true;
+        GSConfig.OsdShowIndicators = true;
         break;
-    case 3: // full: detail + frame times
+    case 2: // detail: performance and renderer diagnostics
         GSConfig.OsdShowFPS = true;
+        GSConfig.OsdShowVPS = true;
         GSConfig.OsdShowSpeed = true;
         GSConfig.OsdShowCPU = true;
+        GSConfig.OsdShowGPU = true;
         GSConfig.OsdShowResolution = true;
+        GSConfig.OsdShowIndicators = true;
+        break;
+    case 3: // full: closest to Android's full stats section
+        GSConfig.OsdShowFPS = true;
+        GSConfig.OsdShowVPS = true;
+        GSConfig.OsdShowSpeed = true;
+        GSConfig.OsdShowCPU = true;
+        GSConfig.OsdShowGPU = true;
+        GSConfig.OsdShowResolution = true;
+        GSConfig.OsdShowGSStats = true;
         GSConfig.OsdShowFrameTimes = true;
+        GSConfig.OsdShowVersion = true;
+        GSConfig.OsdShowHardwareInfo = true;
+        GSConfig.OsdShowIndicators = true;
+        GSConfig.OsdShowSettings = true;
+        GSConfig.OsdShowInputs = true;
         break;
     default: // 0 = off
         break;
     }
+
+    EmuConfig.GS.OsdShowFPS = GSConfig.OsdShowFPS;
+    EmuConfig.GS.OsdShowVPS = GSConfig.OsdShowVPS;
+    EmuConfig.GS.OsdShowSpeed = GSConfig.OsdShowSpeed;
+    EmuConfig.GS.OsdShowCPU = GSConfig.OsdShowCPU;
+    EmuConfig.GS.OsdShowGPU = GSConfig.OsdShowGPU;
+    EmuConfig.GS.OsdShowResolution = GSConfig.OsdShowResolution;
+    EmuConfig.GS.OsdShowGSStats = GSConfig.OsdShowGSStats;
+    EmuConfig.GS.OsdShowFrameTimes = GSConfig.OsdShowFrameTimes;
+    EmuConfig.GS.OsdShowVersion = GSConfig.OsdShowVersion;
+    EmuConfig.GS.OsdShowHardwareInfo = GSConfig.OsdShowHardwareInfo;
+    EmuConfig.GS.OsdShowIndicators = GSConfig.OsdShowIndicators;
+    EmuConfig.GS.OsdShowSettings = GSConfig.OsdShowSettings;
+    EmuConfig.GS.OsdShowInputs = GSConfig.OsdShowInputs;
 }
 
 // ============================================================
@@ -438,12 +517,14 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
     if (!g_p44_settings_interface) return;
     g_p44_settings_interface->SetIntValue(section.UTF8String, key.UTF8String, value);
     g_p44_settings_interface->Save();
+    ARMSX2ApplyLiveGSIntSetting(section.UTF8String, key.UTF8String, value);
 }
 
 + (void)setINIBool:(nonnull NSString *)section key:(nonnull NSString *)key value:(BOOL)value {
     if (!g_p44_settings_interface) return;
     g_p44_settings_interface->SetBoolValue(section.UTF8String, key.UTF8String, value);
     g_p44_settings_interface->Save();
+    ARMSX2ApplyLiveGSBoolSetting(section.UTF8String, key.UTF8String, value);
 }
 
 + (void)setINIFloat:(nonnull NSString *)section key:(nonnull NSString *)key value:(float)value {
