@@ -569,6 +569,109 @@ static void ARMSX2SanitizeFrameLimiterConfig(const char* reason)
     EmuConfig.EmulationSpeed.NominalScalar = sanitized;
 }
 
+static void ARMSX2SetIOSOsdFlags(bool show_fps, bool show_vps, bool show_speed, bool show_cpu,
+    bool show_gpu, bool show_resolution, bool show_gs_stats, bool show_indicators,
+    bool show_settings, bool show_inputs, bool show_frame_times, bool show_version,
+    bool show_hardware_info)
+{
+    EmuConfig.GS.OsdShowFPS = show_fps;
+    GSConfig.OsdShowFPS = show_fps;
+    EmuConfig.GS.OsdShowVPS = show_vps;
+    GSConfig.OsdShowVPS = show_vps;
+    EmuConfig.GS.OsdShowSpeed = show_speed;
+    GSConfig.OsdShowSpeed = show_speed;
+    EmuConfig.GS.OsdShowCPU = show_cpu;
+    GSConfig.OsdShowCPU = show_cpu;
+    EmuConfig.GS.OsdShowGPU = show_gpu;
+    GSConfig.OsdShowGPU = show_gpu;
+    EmuConfig.GS.OsdShowResolution = show_resolution;
+    GSConfig.OsdShowResolution = show_resolution;
+    EmuConfig.GS.OsdShowGSStats = show_gs_stats;
+    GSConfig.OsdShowGSStats = show_gs_stats;
+    EmuConfig.GS.OsdShowIndicators = show_indicators;
+    GSConfig.OsdShowIndicators = show_indicators;
+    EmuConfig.GS.OsdShowSettings = show_settings;
+    GSConfig.OsdShowSettings = show_settings;
+    EmuConfig.GS.OsdShowInputs = show_inputs;
+    GSConfig.OsdShowInputs = show_inputs;
+    EmuConfig.GS.OsdShowFrameTimes = show_frame_times;
+    GSConfig.OsdShowFrameTimes = show_frame_times;
+    EmuConfig.GS.OsdShowVersion = show_version;
+    GSConfig.OsdShowVersion = show_version;
+    EmuConfig.GS.OsdShowHardwareInfo = show_hardware_info;
+    GSConfig.OsdShowHardwareInfo = show_hardware_info;
+    EmuConfig.GS.OsdShowVideoCapture = false;
+    GSConfig.OsdShowVideoCapture = false;
+    EmuConfig.GS.OsdShowInputRec = false;
+    GSConfig.OsdShowInputRec = false;
+}
+
+static void ARMSX2WriteIOSOsdFlagsToSettings()
+{
+    if (!s_settings_interface)
+        return;
+
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowFPS", EmuConfig.GS.OsdShowFPS);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowVPS", EmuConfig.GS.OsdShowVPS);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowSpeed", EmuConfig.GS.OsdShowSpeed);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowCPU", EmuConfig.GS.OsdShowCPU);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowGPU", EmuConfig.GS.OsdShowGPU);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowResolution", EmuConfig.GS.OsdShowResolution);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowGSStats", EmuConfig.GS.OsdShowGSStats);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowIndicators", EmuConfig.GS.OsdShowIndicators);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowSettings", EmuConfig.GS.OsdShowSettings);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowInputs", EmuConfig.GS.OsdShowInputs);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowFrameTimes", EmuConfig.GS.OsdShowFrameTimes);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowVersion", EmuConfig.GS.OsdShowVersion);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowHardwareInfo", EmuConfig.GS.OsdShowHardwareInfo);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowVideoCapture", false);
+    s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowInputRec", false);
+}
+
+static void ARMSX2ApplyIOSOsdPresetFromConfig(const char* reason)
+{
+    if (!s_settings_interface)
+        return;
+
+    const int preset = std::clamp(s_settings_interface->GetIntValue("ARMSX2iOS/UI", "OsdPreset", 0), 0, 3);
+    int position = s_settings_interface->GetIntValue("EmuCore/GS", "OsdPerformancePos", 2);
+
+    switch (preset) {
+    case 1:
+        ARMSX2SetIOSOsdFlags(true, false, true, true, false, false, false, true, false, false, false, false, false);
+        break;
+    case 2:
+        ARMSX2SetIOSOsdFlags(true, true, true, true, true, true, false, true, false, false, false, false, false);
+        break;
+    case 3:
+        ARMSX2SetIOSOsdFlags(true, true, true, true, true, true, true, true, true, true, true, true, true);
+        break;
+    default:
+        ARMSX2SetIOSOsdFlags(false, false, false, false, false, false, false, false, false, false, false, false, false);
+        position = 0;
+        break;
+    }
+
+    if (preset != 0 && (position < 1 || position > 2))
+        position = 2;
+
+    EmuConfig.GS.OsdPerformancePos = static_cast<OsdOverlayPos>(position);
+    GSConfig.OsdPerformancePos = static_cast<OsdOverlayPos>(position);
+    ARMSX2WriteIOSOsdFlagsToSettings();
+    s_settings_interface->SetIntValue("ARMSX2iOS/UI", "OsdPreset", preset);
+    s_settings_interface->SetIntValue("EmuCore/GS", "OsdPerformancePos", position);
+    s_settings_interface->Save();
+
+    Console.WriteLn("@@OSD@@ preset=%d position=%d reason=%s fps=%d vps=%d speed=%d frame_times=%d version=%d hardware=%d",
+        preset, position, reason ? reason : "unknown",
+        EmuConfig.GS.OsdShowFPS ? 1 : 0,
+        EmuConfig.GS.OsdShowVPS ? 1 : 0,
+        EmuConfig.GS.OsdShowSpeed ? 1 : 0,
+        EmuConfig.GS.OsdShowFrameTimes ? 1 : 0,
+        EmuConfig.GS.OsdShowVersion ? 1 : 0,
+        EmuConfig.GS.OsdShowHardwareInfo ? 1 : 0);
+}
+
 // Touch pad state
 bool g_touchPadState[64] = {};
 
@@ -1491,6 +1594,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
     VMManager::Internal::LoadStartupSettings();
     ARMSX2SanitizeFrameLimiterConfig("after-startup-settings");
+    ARMSX2ApplyIOSOsdPresetFromConfig("after-startup-settings");
     VMManager::ApplySettings();
     if (EmuConfig.Achievements.Enabled && !Achievements::IsActive())
         Achievements::Initialize();
@@ -2001,6 +2105,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             }
 
             ARMSX2SanitizeFrameLimiterConfig("pre-vm-initialize");
+            ARMSX2ApplyIOSOsdPresetFromConfig("pre-vm-initialize");
             Console.WriteLn("@@FRAMELIMIT@@ boot nominal=%.3f turbo=%.3f slomo=%.3f ntsc=%.3f pal=%.3f",
                 EmuConfig.EmulationSpeed.NominalScalar,
                 EmuConfig.EmulationSpeed.TurboScalar,
@@ -2010,6 +2115,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
             // --- Initialize & Execute VM ---
             if (VMManager::Initialize(boot_params)) {
+                ARMSX2ApplyIOSOsdPresetFromConfig("post-vm-initialize");
                 Console.WriteLn("[VM] VM initialized successfully");
                 VMManager::SetState(VMState::Running);
 
