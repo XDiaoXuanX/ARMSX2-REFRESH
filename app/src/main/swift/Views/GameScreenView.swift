@@ -90,17 +90,21 @@ struct GameScreenView: View {
             compatibilityLabPanel
                 .presentationDetents([.medium, .large])
         }
-        .fileImporter(
-            isPresented: $showPNACHImporter,
-            allowedContentTypes: FileImportHandler.pnachContentTypes,
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
-                let message = fileImporter.importPNACHURLs(urls, asCheat: true)
-                presentSaveStateStatus(message)
-            case .failure(let error):
-                presentSaveStateStatus("PNACH import failed: \(error.localizedDescription)")
+        .sheet(isPresented: $showPNACHImporter) {
+            ImportDocumentPicker(
+                allowedContentTypes: FileImportHandler.pnachContentTypes,
+                allowsMultipleSelection: true
+            ) { result in
+                showPNACHImporter = false
+                switch result {
+                case .success(let urls):
+                    let message = fileImporter.importPNACHURLs(urls, asCheat: true)
+                    presentSaveStateStatus(message)
+                case .failure(let error):
+                    if (error as NSError).code != NSUserCancelledError {
+                        presentSaveStateStatus("PNACH import failed: \(error.localizedDescription)")
+                    }
+                }
             }
         }
         .overlay(alignment: .bottom) {

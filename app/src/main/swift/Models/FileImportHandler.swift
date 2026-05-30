@@ -33,7 +33,7 @@ final class FileImportHandler: @unchecked Sendable {
 
     static let biosContentTypes: [UTType] = broaderContentTypes(for: ["bin", "rom"])
     static let gameContentTypes: [UTType] = broaderContentTypes(for: ["iso", "chd", "img", "bin", "cue", "mdf", "cso", "zso", "gz", "elf"])
-    static let pnachContentTypes: [UTType] = broaderContentTypes(for: ["pnach"])
+    static let pnachContentTypes: [UTType] = Array(Set([.item, .data, .content, .text, .plainText] + contentTypes(for: ["pnach", "txt", "patch"])))
 
     private init() {}
 
@@ -197,9 +197,9 @@ final class FileImportHandler: @unchecked Sendable {
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
         let fileName = url.lastPathComponent
-        guard Self.pnachExtensions.contains(url.pathExtension.lowercased()) else {
-            NSLog("[ARMSX2 iOS Import] unsupported PNACH file: %@", fileName)
-            return .unsupported(fileName)
+        let ext = url.pathExtension.lowercased()
+        if !Self.pnachExtensions.contains(ext) {
+            NSLog("[ARMSX2 iOS Import] PNACH file has non-standard extension, attempting text import: %@", fileName)
         }
 
         guard let destinationPath, !destinationPath.isEmpty else {

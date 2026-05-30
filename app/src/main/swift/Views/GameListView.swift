@@ -36,6 +36,8 @@ struct GameListView: View {
     @State private var pendingGameName: String = ""
     @State private var pendingCoverGameName: String?
     @State private var pendingPNACHGameName: String?
+    @State private var gameInfoTarget: ISOEntry?
+    @State private var gameSettingsTarget: ISOEntry?
     @AppStorage("ARMSX2iOSGameLibraryLayout") private var libraryLayout = "grid"
 
     var body: some View {
@@ -223,6 +225,14 @@ struct GameListView: View {
                         pendingPNACHGameName = nil
                     }
                 }
+            }
+            .sheet(item: $gameInfoTarget) { game in
+                GameInfoPanel(game: game, coverStore: coverStore)
+                    .presentationDetents([.medium, .large])
+            }
+            .sheet(item: $gameSettingsTarget) { game in
+                PerGameSettingsPanel(game: game)
+                    .presentationDetents([.large])
             }
         }
         .onAppear { loadGames() }
@@ -469,6 +479,18 @@ struct GameListView: View {
     @ViewBuilder
     private func gameContextMenu(for game: ISOEntry) -> some View {
         Button {
+            gameInfoTarget = game
+        } label: {
+            Label("Game Info", systemImage: "info.circle")
+        }
+
+        Button {
+            gameSettingsTarget = game
+        } label: {
+            Label("Per-Game Settings", systemImage: "slider.horizontal.3")
+        }
+
+        Button {
             pendingPNACHGameName = game.name
             showPNACHImporter = true
         } label: {
@@ -602,6 +624,276 @@ struct GameListView: View {
         }
         let mb = Double(bytes) / 1_048_576
         return String(format: "%.0f MB", mb)
+    }
+}
+
+private struct GameInfoPanel: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let game: ISOEntry
+    let coverStore: CoverStore
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack(spacing: 14) {
+                        CoverThumbnailView(
+                            gameName: game.name,
+                            coverURL: game.coverURL,
+                            coverSignature: game.coverSignature,
+                            width: 84,
+                            height: 126
+                        )
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(coverStore.displayName(forGameName: game.name))
+                                .font(.headline)
+                            Text(game.name)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section("Disc") {
+                    LabeledContent("Region") {
+                        Text(regionDisplay)
+                    }
+                    LabeledContent("Serial") {
+                        Text(metadataValue("serial"))
+                            .textSelection(.enabled)
+                    }
+                    LabeledContent("CRC") {
+                        Text(metadataValue("crc"))
+                            .textSelection(.enabled)
+                    }
+                    LabeledContent("Format") {
+                        Text(game.name.pathExtensionLabel)
+                    }
+                    LabeledContent("Size") {
+                        Text(formatSize(game.size))
+                    }
+                }
+
+                Section("File") {
+                    Text(game.fileURL?.path ?? "File path unavailable")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            .navigationTitle("Game Info")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private var regionDisplay: String {
+        let region = metadataValue("region")
+        return "\(Self.regionFlag(for: region)) \(region)"
+    }
+
+    private func metadataValue(_ key: String) -> String {
+        let value = game.metadata[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? "Unknown" : value
+    }
+
+    private func formatSize(_ bytes: UInt64) -> String {
+        let gb = Double(bytes) / 1_073_741_824
+        if gb >= 1.0 {
+            return String(format: "%.1f GB", gb)
+        }
+        let mb = Double(bytes) / 1_048_576
+        return String(format: "%.0f MB", mb)
+    }
+
+    private static func regionFlag(for region: String) -> String {
+        let value = region.lowercased()
+        if value.contains("japan") || value.contains("ntsc-j") {
+            return "🇯🇵"
+        }
+        if value.contains("usa") || value.contains("america") || value.contains("ntsc-u") {
+            return "🇺🇸"
+        }
+        if value.contains("europe") || value.contains("pal") {
+            return "🇪🇺"
+        }
+        if value.contains("korea") {
+            return "🇰🇷"
+        }
+        if value.contains("china") {
+            return "🇨🇳"
+        }
+        if value.contains("australia") {
+            return "🇦🇺"
+        }
+        return "🌐"
+    }
+}
+
+private struct PerGameSettingsPanel: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let game: ISOEntry
+
+    @State private var enabled: Bool
+    @State private var upscaleMultiplier: Float
+    @State private var aspectRatio: String
+    @State private var textureFiltering: Int
+    @State private var blendingAccuracy: Int
+    @State private var enableCheats: Bool
+    @State private var enablePatches: Bool
+    @State private var statusMessage: String?
+
+    init(game: ISOEntry) {
+        self.game = game
+        let info = ARMSX2Bridge.gameSettings(forISO: game.name)
+        _enabled = State(initialValue: Self.boolValue(info["enabled"], defaultValue: false))
+        _upscaleMultiplier = State(initialValue: Self.floatValue(info["upscaleMultiplier"], defaultValue: 1.0))
+        _aspectRatio = State(initialValue: Self.normalizedAspect(info["aspectRatio"] as? String))
+        _textureFiltering = State(initialValue: Self.intValue(info["textureFiltering"], defaultValue: 2))
+        _blendingAccuracy = State(initialValue: Self.intValue(info["blendingAccuracy"], defaultValue: 1))
+        _enableCheats = State(initialValue: Self.boolValue(info["enableCheats"], defaultValue: false))
+        _enablePatches = State(initialValue: Self.boolValue(info["enablePatches"], defaultValue: true))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Toggle("Use Per-Game Overrides", isOn: $enabled)
+                    Text("Overrides are saved for this game only and apply on the next boot/reset of this title.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Graphics") {
+                    Picker("Internal Resolution", selection: $upscaleMultiplier) {
+                        Text("0.25x (Fastest)").tag(Float(0.25))
+                        Text("0.5x").tag(Float(0.5))
+                        Text("0.75x").tag(Float(0.75))
+                        Text("1x Native").tag(Float(1.0))
+                        Text("2x").tag(Float(2.0))
+                        Text("3x").tag(Float(3.0))
+                        Text("4x").tag(Float(4.0))
+                    }
+                    .disabled(!enabled)
+
+                    Picker("Aspect Ratio", selection: $aspectRatio) {
+                        Text("Auto 4:3 / 3:2").tag("Auto 4:3/3:2")
+                        Text("4:3").tag("4:3")
+                        Text("16:9").tag("16:9")
+                        Text("10:7").tag("10:7")
+                        Text("Stretch").tag("Stretch")
+                    }
+                    .disabled(!enabled)
+
+                    Picker("Texture Filtering", selection: $textureFiltering) {
+                        Text("Nearest").tag(0)
+                        Text("Bilinear Forced").tag(1)
+                        Text("Bilinear PS2 Default").tag(2)
+                        Text("Bilinear excl. Sprite").tag(3)
+                    }
+                    .disabled(!enabled)
+
+                    Picker("Blending Accuracy", selection: $blendingAccuracy) {
+                        Text("Minimum").tag(0)
+                        Text("Basic").tag(1)
+                        Text("Medium").tag(2)
+                        Text("High").tag(3)
+                        Text("Full").tag(4)
+                        Text("Ultra").tag(5)
+                    }
+                    .disabled(!enabled)
+                }
+
+                Section("Patches & Cheats") {
+                    Toggle("Enable PNACH Cheats", isOn: $enableCheats)
+                        .disabled(!enabled)
+                    Toggle("Enable GameDB Patches", isOn: $enablePatches)
+                        .disabled(!enabled)
+                    Text("Use the long-press PNACH importer to add 60 FPS patches or cheats for this game.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let statusMessage {
+                    Section {
+                        Text(statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Per-Game Settings")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        save()
+                    }
+                }
+            }
+        }
+    }
+
+    private func save() {
+        ARMSX2Bridge.setGameSettings(
+            forISO: game.name,
+            enabled: enabled,
+            upscaleMultiplier: upscaleMultiplier,
+            aspectRatio: aspectRatio,
+            textureFiltering: Int32(textureFiltering),
+            blendingAccuracy: Int32(blendingAccuracy),
+            enableCheats: enableCheats,
+            enablePatches: enablePatches
+        )
+        statusMessage = enabled ? "Saved for \(game.metadata["serial"] ?? game.name). Reset or relaunch the game to apply." : "Per-game overrides cleared."
+    }
+
+    private static func normalizedAspect(_ value: String?) -> String {
+        switch value {
+        case "Stretch", "4:3", "16:9", "10:7":
+            return value ?? "Auto 4:3/3:2"
+        default:
+            return "Auto 4:3/3:2"
+        }
+    }
+
+    private static func boolValue(_ value: Any?, defaultValue: Bool) -> Bool {
+        if let bool = value as? Bool {
+            return bool
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        return defaultValue
+    }
+
+    private static func intValue(_ value: Any?, defaultValue: Int) -> Int {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        return defaultValue
+    }
+
+    private static func floatValue(_ value: Any?, defaultValue: Float) -> Float {
+        if let number = value as? NSNumber {
+            return number.floatValue
+        }
+        return defaultValue
     }
 }
 

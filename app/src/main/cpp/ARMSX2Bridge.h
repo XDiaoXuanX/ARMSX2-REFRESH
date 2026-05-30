@@ -101,6 +101,16 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 + (nonnull NSString *)documentsDirectory;
 + (nonnull NSArray<NSString *> *)availableISOs;
 + (nonnull NSDictionary<NSString *, NSString *> *)gameMetadataForISO:(nonnull NSString *)isoName;
++ (nonnull NSDictionary<NSString *, id> *)gameSettingsForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(gameSettings(forISO:));
++ (void)setGameSettingsForISO:(nonnull NSString *)isoName
+                       enabled:(BOOL)enabled
+             upscaleMultiplier:(float)upscaleMultiplier
+                   aspectRatio:(nonnull NSString *)aspectRatio
+              textureFiltering:(int)textureFiltering
+              blendingAccuracy:(int)blendingAccuracy
+                  enableCheats:(BOOL)enableCheats
+                 enablePatches:(BOOL)enablePatches
+    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:blendingAccuracy:enableCheats:enablePatches:));
 + (void)changeDiscToISO:(nonnull NSString *)isoName completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(changeDisc(toISO:completion:));
 + (void)ejectDiscWithCompletion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(ejectDisc(completion:));
 

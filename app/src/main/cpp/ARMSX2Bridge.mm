@@ -407,6 +407,18 @@ static NSString* ARMSX2ResolveISOPath(NSString* isoName)
     return nil;
 }
 
+static BOOL ARMSX2PopulateGameListEntryForISO(NSString* isoName, GameList::Entry* entry, NSString** resolvedPath)
+{
+    NSString* path = ARMSX2ResolveISOPath(isoName);
+    if (resolvedPath)
+        *resolvedPath = path;
+
+    if (path.length == 0 || !entry)
+        return NO;
+
+    return GameList::PopulateEntryFromPath(path.UTF8String, entry) ? YES : NO;
+}
+
 static NSString* ARMSX2CompatibilityIdentityKey(NSString* serial, u32 crc)
 {
     NSString* normalizedSerial = [[serial ?: @"" stringByReplacingOccurrencesOfString:@"_" withString:@"-"] uppercaseString];
@@ -898,6 +910,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
             metadata[@"serial"] = serial;
         if (regionText && *regionText)
             metadata[@"region"] = @(regionText);
+        if (entry.crc != 0)
+            metadata[@"crc"] = [NSString stringWithFormat:@"%08X", entry.crc];
 
         NSLog(@"[ARMSX2 iOS Covers] metadata %@ title=%@ serial=%@ region=%@",
               isoName, metadata[@"title"] ?: @"", metadata[@"serial"] ?: @"", metadata[@"region"] ?: @"");
@@ -906,6 +920,111 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     }
 
     return metadata;
+}
+
++ (nonnull NSDictionary<NSString *, id> *)gameSettingsForISO:(nonnull NSString *)isoName {
+    GameList::Entry entry;
+    NSString* resolvedPath = nil;
+    const float globalUpscale = g_p44_settings_interface ? g_p44_settings_interface->GetFloatValue("EmuCore/GS", "upscale_multiplier", 1.0f) : 1.0f;
+    const std::string globalAspect = g_p44_settings_interface ? g_p44_settings_interface->GetStringValue("EmuCore/GS", "AspectRatio", "Auto 4:3/3:2") : std::string("Auto 4:3/3:2");
+    const int globalTextureFiltering = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "filter", 2) : 2;
+    const int globalBlendingAccuracy = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "accurate_blending_unit", 1) : 1;
+    const bool globalEnableCheats = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableCheats", false) : false;
+    const bool globalEnablePatches = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnablePatches", true) : true;
+    NSMutableDictionary<NSString*, id>* result = [@{
+        @"enabled": @NO,
+        @"path": @"",
+        @"serial": @"",
+        @"crc": @"",
+        @"upscaleMultiplier": @(globalUpscale),
+        @"aspectRatio": ARMSX2NSStringFromStdString(globalAspect),
+        @"textureFiltering": @(globalTextureFiltering),
+        @"blendingAccuracy": @(globalBlendingAccuracy),
+        @"enableCheats": @(globalEnableCheats),
+        @"enablePatches": @(globalEnablePatches),
+    } mutableCopy];
+
+    if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
+        NSLog(@"[ARMSX2Bridge] Game settings unavailable for %@ path=%@", isoName, resolvedPath ?: @"");
+        return result;
+    }
+
+    const std::string settingsPath = VMManager::GetGameSettingsPath(entry.serial, entry.crc);
+    result[@"path"] = ARMSX2NSStringFromStdString(settingsPath);
+    result[@"serial"] = ARMSX2NSStringFromStdString(entry.serial);
+    result[@"crc"] = [NSString stringWithFormat:@"%08X", entry.crc];
+
+    INISettingsInterface si(settingsPath);
+    if (!si.Load())
+        return result;
+
+    const bool hasKnownOverride =
+        si.GetBoolValue("ARMSX2iOS/PerGame", "Enabled", false) ||
+        si.ContainsValue("EmuCore/GS", "upscale_multiplier") ||
+        si.ContainsValue("EmuCore/GS", "AspectRatio") ||
+        si.ContainsValue("EmuCore/GS", "filter") ||
+        si.ContainsValue("EmuCore/GS", "accurate_blending_unit") ||
+        si.ContainsValue("EmuCore", "EnableCheats") ||
+        si.ContainsValue("EmuCore", "EnablePatches");
+
+    result[@"enabled"] = @(hasKnownOverride);
+    NSString* currentAspect = [result[@"aspectRatio"] isKindOfClass:NSString.class] ? result[@"aspectRatio"] : @"Auto 4:3/3:2";
+    result[@"upscaleMultiplier"] = @(si.GetFloatValue("EmuCore/GS", "upscale_multiplier", [result[@"upscaleMultiplier"] floatValue]));
+    result[@"aspectRatio"] = ARMSX2NSStringFromStdString(si.GetStringValue("EmuCore/GS", "AspectRatio", currentAspect.UTF8String));
+    result[@"textureFiltering"] = @(si.GetIntValue("EmuCore/GS", "filter", [result[@"textureFiltering"] intValue]));
+    result[@"blendingAccuracy"] = @(si.GetIntValue("EmuCore/GS", "accurate_blending_unit", [result[@"blendingAccuracy"] intValue]));
+    result[@"enableCheats"] = @(si.GetBoolValue("EmuCore", "EnableCheats", [result[@"enableCheats"] boolValue]));
+    result[@"enablePatches"] = @(si.GetBoolValue("EmuCore", "EnablePatches", [result[@"enablePatches"] boolValue]));
+    return result;
+}
+
++ (void)setGameSettingsForISO:(nonnull NSString *)isoName
+                       enabled:(BOOL)enabled
+             upscaleMultiplier:(float)upscaleMultiplier
+                   aspectRatio:(nonnull NSString *)aspectRatio
+              textureFiltering:(int)textureFiltering
+              blendingAccuracy:(int)blendingAccuracy
+                  enableCheats:(BOOL)enableCheats
+                 enablePatches:(BOOL)enablePatches {
+    GameList::Entry entry;
+    NSString* resolvedPath = nil;
+    if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
+        NSLog(@"[ARMSX2Bridge] Game settings save rejected for %@ path=%@", isoName, resolvedPath ?: @"");
+        return;
+    }
+
+    FileSystem::CreateDirectoryPath(EmuFolders::GameSettings.c_str(), false);
+
+    const std::string settingsPath = VMManager::GetGameSettingsPath(entry.serial, entry.crc);
+    INISettingsInterface si(settingsPath);
+    si.Load();
+
+    if (enabled) {
+        si.SetBoolValue("ARMSX2iOS/PerGame", "Enabled", true);
+        si.SetFloatValue("EmuCore/GS", "upscale_multiplier", upscaleMultiplier);
+        si.SetStringValue("EmuCore/GS", "AspectRatio", aspectRatio.UTF8String ?: "Auto 4:3/3:2");
+        si.SetIntValue("EmuCore/GS", "filter", textureFiltering);
+        si.SetIntValue("EmuCore/GS", "accurate_blending_unit", blendingAccuracy);
+        si.SetBoolValue("EmuCore", "EnableCheats", enableCheats);
+        si.SetBoolValue("EmuCore", "EnablePatches", enablePatches);
+    } else {
+        si.DeleteValue("ARMSX2iOS/PerGame", "Enabled");
+        si.DeleteValue("EmuCore/GS", "upscale_multiplier");
+        si.DeleteValue("EmuCore/GS", "AspectRatio");
+        si.DeleteValue("EmuCore/GS", "filter");
+        si.DeleteValue("EmuCore/GS", "accurate_blending_unit");
+        si.DeleteValue("EmuCore", "EnableCheats");
+        si.DeleteValue("EmuCore", "EnablePatches");
+        si.RemoveEmptySections();
+    }
+
+    Error error;
+    const bool saved = si.Save(&error);
+    NSLog(@"[ARMSX2Bridge] Game settings %@ iso=%@ serial=%@ crc=%08X path=%@ result=%d",
+          enabled ? @"saved" : @"cleared", isoName, ARMSX2NSStringFromStdString(entry.serial),
+          entry.crc, ARMSX2NSStringFromStdString(settingsPath), saved ? 1 : 0);
+    if (!saved)
+        NSLog(@"[ARMSX2Bridge] Game settings save error: %@", ARMSX2NSStringFromStdString(error.GetDescription()));
 }
 
 + (void)changeDiscToISO:(nonnull NSString *)isoName completion:(nullable ARMSX2SaveStateCompletion)completion {
@@ -1454,7 +1573,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     }
 
     GameList::Entry entry;
-    if (!GameList::PopulateEntryFromPath(path.UTF8String, &entry) || entry.serial.empty()) {
+    if (!GameList::PopulateEntryFromPath(path.UTF8String, &entry) || entry.crc == 0) {
         NSLog(@"[ARMSX2Bridge] PNACH path unavailable for %@: metadata missing", isoName);
         return nil;
     }
