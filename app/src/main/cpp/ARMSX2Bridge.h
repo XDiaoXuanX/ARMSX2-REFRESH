@@ -114,6 +114,10 @@ typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
 + (void)setINIFloat:(nonnull NSString *)section key:(nonnull NSString *)key value:(float)value;
 + (void)setINIString:(nonnull NSString *)section key:(nonnull NSString *)key value:(nonnull NSString *)value;
 
+// Compatibility Lab
++ (BOOL)getJITBisectFlag:(nonnull NSString *)key defaultValue:(BOOL)def;
++ (void)setJITBisectFlag:(nonnull NSString *)key value:(BOOL)value;
+
 // [P44] VM lifecycle for menu flow
 + (BOOL)isVMRunning;
 + (BOOL)hasBIOS;

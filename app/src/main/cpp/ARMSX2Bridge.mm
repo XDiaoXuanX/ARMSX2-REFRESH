@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #import "ARMSX2Bridge.h"
+#include "common/Darwin/DarwinMisc.h"
 #include <SDL3/SDL.h>
 
 extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
@@ -35,6 +36,26 @@ static NSDate* s_lastNVMSaveDate = nil;
 
 @implementation ARMSX2SaveStateSlotInfo
 @end
+
+static int* ARMSX2JITBisectFlagPtr(NSString* key)
+{
+    if ([key isEqualToString:@"COP1EverythingOnly"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_ONLY;
+    if ([key isEqualToString:@"COP1EverythingPlusLoadStore"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_LOADSTORE;
+    if ([key isEqualToString:@"COP1EverythingPlusMMI"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MMI;
+    if ([key isEqualToString:@"COP1EverythingPlusCOP2VU"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_COP2_VU;
+    if ([key isEqualToString:@"COP1EverythingPlusMultDiv"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MULTDIV;
+    if ([key isEqualToString:@"COP1EverythingPlusShifts"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_SHIFTS;
+    if ([key isEqualToString:@"COP1EverythingPlusMoves"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MOVES;
+    if ([key isEqualToString:@"COP1EverythingPlusIntegerALU"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_INTEGER_ALU;
+    if ([key isEqualToString:@"COP1EverythingPlusBranches"]) return &DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_BRANCHES;
+    return nullptr;
+}
+
+static void ARMSX2ApplyJITBisectFlag(NSString* key, BOOL enabled)
+{
+    if (int* flag = ARMSX2JITBisectFlagPtr(key))
+        *flag = enabled ? 1 : 0;
+}
 
 static NSString* ARMSX2NSStringFromStdString(const std::string& value)
 {
@@ -619,6 +640,28 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     if (!g_p44_settings_interface) return;
     g_p44_settings_interface->SetStringValue(section.UTF8String, key.UTF8String, value.UTF8String);
     g_p44_settings_interface->Save();
+}
+
+#pragma mark - Compatibility Lab
+
++ (BOOL)getJITBisectFlag:(nonnull NSString *)key defaultValue:(BOOL)def
+{
+    BOOL value = def;
+    if (g_p44_settings_interface)
+        value = g_p44_settings_interface->GetBoolValue("ARMSX2/JITBisect", key.UTF8String, def);
+
+    ARMSX2ApplyJITBisectFlag(key, value);
+    return value;
+}
+
++ (void)setJITBisectFlag:(nonnull NSString *)key value:(BOOL)value
+{
+    ARMSX2ApplyJITBisectFlag(key, value);
+    if (g_p44_settings_interface) {
+        g_p44_settings_interface->SetBoolValue("ARMSX2/JITBisect", key.UTF8String, value);
+        g_p44_settings_interface->Save();
+    }
+    NSLog(@"[ARMSX2Bridge] Compatibility Lab %@ %@", key, value ? @"ON" : @"OFF");
 }
 
 #pragma mark - VM lifecycle

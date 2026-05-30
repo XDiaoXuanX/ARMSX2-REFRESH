@@ -1259,6 +1259,17 @@ int DarwinMisc::iPSX2_REC_DIAG = [](){
 // controlled exclusively via PCSX2-iOS.ini [EmuCore/CPU] CoreType + Recompiler.
 int DarwinMisc::iPSX2_FORCE_EE_INTERP = 0;
 
+// [ARMSX2 iOS] Compatibility Lab flags ported from unsigned29/iPSX2.
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_ONLY = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_LOADSTORE = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MMI = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_COP2_VU = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MULTDIV = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_SHIFTS = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MOVES = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_INTEGER_ALU = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_BRANCHES = 0;
+
 int DarwinMisc::iPSX2_FORCE_JIT_VERIFY = [](){
     const char* gate = getenv("iPSX2_ENABLE_DIAG_FLAGS");
     const bool diag_enabled = (gate && gate[0] == '1' && gate[1] == '\0');

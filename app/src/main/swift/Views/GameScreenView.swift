@@ -93,6 +93,8 @@ struct GameScreenView: View {
                     Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
             }
+            Divider()
+            compatibilityLabSection
             if ARMSX2Bridge.hasValidSaveStateGame() {
                 Button {
                     showSaveStates = true
@@ -112,6 +114,65 @@ struct GameScreenView: View {
                 .foregroundStyle(.white.opacity(0.5))
                 .padding(6)
                 .background(.black.opacity(0.15), in: Circle())
+        }
+    }
+
+    private var compatibilityLabSection: some View {
+        Section("Compatibility Lab") {
+            compatibilityLabToggle(
+                "COP1EverythingOnly",
+                title: "COP1 Everything Only",
+                systemImage: "function"
+            )
+            compatibilityLabToggle(
+                "COP1EverythingPlusLoadStore",
+                title: "COP1 Everything + EE Load/Store",
+                systemImage: "arrow.left.arrow.right"
+            )
+            compatibilityLabToggle(
+                "COP1EverythingPlusMMI",
+                title: "COP1 Everything + EE MMI",
+                systemImage: "rectangle.3.group"
+            )
+            compatibilityLabToggle(
+                "COP1EverythingPlusCOP2VU",
+                title: "COP1 Everything + EE COP2/VU Macro",
+                systemImage: "cube.transparent"
+            )
+            compatibilityLabToggle(
+                "COP1EverythingPlusMultDiv",
+                title: "COP1 Everything + EE Mult/Div",
+                systemImage: "multiply"
+            )
+            compatibilityLabToggle(
+                "COP1EverythingPlusShifts",
+                title: "COP1 Everything + EE Shifts",
+                systemImage: "arrow.left.and.right"
+            )
+            compatibilityLabToggle(
+                "COP1EverythingPlusMoves",
+                title: "COP1 Everything + EE Moves/HI-LO",
+                systemImage: "arrow.triangle.swap"
+            )
+            compatibilityLabToggle(
+                "COP1EverythingPlusIntegerALU",
+                title: "COP1 Everything + EE Integer ALU",
+                systemImage: "plus.forwardslash.minus"
+            )
+            compatibilityLabToggle(
+                "COP1EverythingPlusBranches",
+                title: "COP1 Everything + EE Branches/Jumps",
+                systemImage: "arrow.triangle.branch"
+            )
+        }
+    }
+
+    private func compatibilityLabToggle(_ key: String, title: String, systemImage: String) -> some View {
+        Toggle(isOn: Binding(
+            get: { ARMSX2Bridge.getJITBisectFlag(key, defaultValue: false) },
+            set: { ARMSX2Bridge.setJITBisectFlag(key, value: $0) }
+        )) {
+            Label(title, systemImage: systemImage)
         }
     }
 

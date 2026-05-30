@@ -640,6 +640,71 @@ static void probe_eeload_slti()
 	}
 }
 
+// [ARMSX2 iOS] Compatibility Lab: COP1/FPU + EE rescue bisect.
+// Ported from unsigned29/iPSX2 so testers can selectively route opcode families
+// through the interpreter while keeping the rest of the EE JIT path active.
+static bool iPSX2_ShouldInterpFallbackCurrentOpcode(const OPCODE& opcode)
+{
+#ifdef __APPLE__
+	const u32 raw = cpuRegs.code;
+	const u32 primary = (raw >> 26) & 0x3fu;
+	const u32 funct = raw & 0x3fu;
+
+	const bool preset_cop1_only = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_ONLY != 0;
+	const bool preset_loadstore = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_LOADSTORE != 0;
+	const bool preset_mmi = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MMI != 0;
+	const bool preset_cop2_vu = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_COP2_VU != 0;
+	const bool preset_multdiv = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MULTDIV != 0;
+	const bool preset_shifts = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_SHIFTS != 0;
+	const bool preset_moves = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MOVES != 0;
+	const bool preset_integer_alu = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_INTEGER_ALU != 0;
+	const bool preset_branches = DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_BRANCHES != 0;
+
+	const bool any_preset = preset_cop1_only || preset_loadstore || preset_mmi || preset_cop2_vu ||
+		preset_multdiv || preset_shifts || preset_moves || preset_integer_alu || preset_branches;
+
+	if (!any_preset)
+		return false;
+
+	// Base for every preset: mirror the COP1/FPU Everything fallback.
+	if (primary == 0x11u)
+		return true;
+
+	if (preset_loadstore && (opcode.flags & IS_MEMORY))
+		return true;
+
+	if (preset_mmi && primary == 0x1cu)
+		return true;
+
+	if (preset_cop2_vu && (primary == 0x12u || primary == 0x32u || primary == 0x3au))
+		return true;
+
+	if (preset_multdiv && primary == 0x00u &&
+		(funct == 0x18u || funct == 0x19u || funct == 0x1au || funct == 0x1bu ||
+		 funct == 0x1cu || funct == 0x1du || funct == 0x1eu || funct == 0x1fu))
+		return true;
+
+	if (preset_shifts && primary == 0x00u &&
+		(funct == 0x00u || funct == 0x02u || funct == 0x03u ||
+		 funct == 0x04u || funct == 0x06u || funct == 0x07u ||
+		 funct == 0x38u || funct == 0x3au || funct == 0x3bu ||
+		 funct == 0x3cu || funct == 0x3eu || funct == 0x3fu))
+		return true;
+
+	if (preset_moves && primary == 0x00u &&
+		(funct == 0x0au || funct == 0x0bu ||
+		 funct == 0x10u || funct == 0x11u || funct == 0x12u || funct == 0x13u))
+		return true;
+
+	if (preset_integer_alu && (opcode.flags & IS_ALU))
+		return true;
+
+	if (preset_branches && (opcode.flags & IS_BRANCH))
+		return true;
+#endif
+	return false;
+}
+
 static void recRecompile(const u32 startpc);
 static void dyna_block_discard(u32 start, u32 sz);
 static void dyna_page_reset(u32 start, u32 sz);
@@ -3682,7 +3747,15 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 			}
 		}
 		s_nBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
-		if (opcode.recompile) {
+		const bool compatibility_lab_fallback = opcode.interpret && iPSX2_ShouldInterpFallbackCurrentOpcode(opcode);
+		if (__builtin_expect(compatibility_lab_fallback, 0)) {
+			iFlushCall(FLUSH_INTERPRETER);
+			if (opcode.flags & IS_BRANCH)
+				recBranchCall(opcode.interpret);
+			else
+				recCall(opcode.interpret);
+			armEmitPerInstCycleAdd(opcode.cycles);
+		} else if (opcode.recompile) {
 			// [V3.3a/b backport 2026-05-04] non-branch opcode を iv2 byte-exact interp fallback。
 			// branch family は v1 emit 維持 (PC writeback / dispatch / delay slot framework 整合性)。
 			const u32 op_v12 = cpuRegs.code;
