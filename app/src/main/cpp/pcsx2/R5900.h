@@ -209,7 +209,7 @@ struct R5900cpu
 extern R5900cpu *Cpu;
 extern R5900cpu intCpu;
 extern R5900cpu recCpu;
-#ifdef PCSX2_ARM64_DYNAREC
+#if defined(PCSX2_ARM64_DYNAREC)
 extern R5900cpu jitA64Cpu;
 #endif
 

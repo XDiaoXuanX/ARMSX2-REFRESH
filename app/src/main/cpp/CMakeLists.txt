@@ -44,15 +44,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		set(CMAKE_OSX_SYSROOT "iphonesimulator")
 	endif()
 	set(CMAKE_OSX_ARCHITECTURES "arm64")
-	if(ARMSX2_MAC_CATALYST)
-		set(USE_OPENGL OFF CACHE BOOL "Enable OpenGL renderer" FORCE)
-		set(SDL_OPENGL OFF CACHE BOOL "Enable SDL OpenGL support" FORCE)
-		set(SDL_OPENGLES OFF CACHE BOOL "Enable SDL OpenGL ES support" FORCE)
-	endif()
+	set(USE_OPENGL OFF CACHE BOOL "Enable OpenGL renderer" FORCE)
+	set(SDL_OPENGL OFF CACHE BOOL "Enable SDL OpenGL support" FORCE)
+	set(SDL_OPENGLES OFF CACHE BOOL "Enable SDL OpenGL ES support" FORCE)
 endif()
 
 # Project Name
 project(ARMSX2iOS VERSION ${ARMSX2_VERSION} LANGUAGES C CXX)
+
+add_compile_definitions(ARMSX2_VERSION_STR="${ARMSX2_VERSION}")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 	add_compile_definitions(_M_ARM64=1)

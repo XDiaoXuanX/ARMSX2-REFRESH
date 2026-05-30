@@ -11,6 +11,7 @@
 
 #include "Sif.h"
 #include "DEV9/DEV9.h"
+#include "SifRingBuffer.h"
 
 using namespace R3000A;
 
@@ -133,6 +134,18 @@ void spu2DMA7Irq()
 #ifndef DISABLE_PSX_GPU_DMAS
 void psxDma2(u32 madr, u32 bcr, u32 chcr) // GPU
 {
+	// [iter555] @@PSXDMA2_LOG@@ DMA2 callverify (max 10回)
+	{
+		static int s_dma2_log_n = 0;
+		if (s_dma2_log_n < 10) {
+			s_dma2_log_n++;
+			u32 w0 = iopMemRead32(madr & 0x1FFFFFFFu);
+			u32 w1 = iopMemRead32((madr + 4u) & 0x1FFFFFFFu);
+			u32 w2 = iopMemRead32((madr + 8u) & 0x1FFFFFFFu);
+			Console.WriteLn("@@PSXDMA2_LOG@@ #%d MADR=%08x BCR=%08x CHCR=%08x data[0]=%08x [1]=%08x [2]=%08x",
+				s_dma2_log_n, madr, bcr, chcr, w0, w1, w2);
+		}
+	}
 	//DevCon.Warning("SIF2 IOP CHCR = %x MADR = %x BCR = %x first 16bits %x", chcr, madr, bcr, iopMemRead16(madr));
 	sif2.iop.busy = true;
 	sif2.iop.end = false;
@@ -201,7 +214,19 @@ void psxDMA8Interrupt()
 
 void psxDma9(u32 madr, u32 bcr, u32 chcr)
 {
+	// [iter63] @@PSXDMA9_IOP@@ – IOP SIF0 DMA activation
+	{
+		static u32 s_psxdma9_n = 0;
+		s_psxdma9_n++;
+		if (s_psxdma9_n <= 50 || (s_psxdma9_n % 500 == 0))
+		{
+			Console.WriteLn("@@PSXDMA9_IOP@@ n=%u madr=%08x bcr=%08x chcr=%08x tadr=%08x iop_cyc=%u",
+				s_psxdma9_n, madr, bcr, chcr, HW_DMA9_TADR, psxRegs.cycle);
+		}
+	}
+
 	SIF_LOG("IOP: dmaSIF0 chcr = %lx, madr = %lx, bcr = %lx, tadr = %lx", chcr, madr, bcr, HW_DMA9_TADR);
+	SifRing::Record(SifRing::PSXDMA9, cpuRegs.cycle, psxRegs.cycle, madr, HW_DMA9_TADR);
 
 	sif0.iop.busy = true;
 	sif0.iop.end = false;
@@ -211,7 +236,16 @@ void psxDma9(u32 madr, u32 bcr, u32 chcr)
 
 void psxDma10(u32 madr, u32 bcr, u32 chcr)
 {
+	// [iter665] @@PSXDMA10_IOP@@ — IOP SIF1 (EE→IOP data receive) DMA bootdetect
+	// Removal condition: SIF bind completion after confirmed
+	{
+		static int s_d10_n = 0;
+		if (s_d10_n < 20)
+			Console.WriteLn("@@PSXDMA10_IOP@@ n=%d madr=%08x bcr=%08x chcr=%08x iop_pc=%08x",
+				s_d10_n++, madr, bcr, chcr, psxRegs.pc);
+	}
 	SIF_LOG("IOP: dmaSIF1 chcr = %lx, madr = %lx, bcr = %lx", chcr, madr, bcr);
+	SifRing::Record(SifRing::PSXDMA10, cpuRegs.cycle, psxRegs.cycle, madr, chcr);
 
 	sif1.iop.busy = true;
 	sif1.iop.end = false;

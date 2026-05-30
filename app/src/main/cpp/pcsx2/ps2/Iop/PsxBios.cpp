@@ -54,7 +54,41 @@ bool psxBiosCall()
     // TODO: Tracing
     // TODO (maybe, psx is hardly a priority): HLE framework
 
-    switch (((psxRegs.pc << 4) & 0xf00) | (psxRegs.GPR.n.t1 & 0xff)) {
+    const u32 biosKey = ((psxRegs.pc << 4) & 0xf00) | (psxRegs.GPR.n.t1 & 0xff);
+
+    // [P12] @@PSX_BIOS_TRACE@@ — PS1 BIOS A0/B0/C0 callトレース (cap=500)
+    // 目的: interpretermodeでの BIOS 自然シーケンスを記録し、JIT との差異を特定
+    // Removal condition: JIT modeで BIOS browser描画after confirmed
+    {
+        static int s_bios_trace_n = 0;
+        if (s_bios_trace_n < 500) {
+            const char tbl = (psxRegs.pc & 0x1fffffffU) == 0xa0 ? 'A'
+                           : (psxRegs.pc & 0x1fffffffU) == 0xb0 ? 'B' : 'C';
+            ++s_bios_trace_n;
+            Console.WriteLn("@@PSX_BIOS_TRACE@@ n=%d %c0[%02x] a0=%08x a1=%08x v0=%08x ra=%08x cyc=%u",
+                s_bios_trace_n, tbl, psxRegs.GPR.n.t1 & 0xff,
+                psxRegs.GPR.n.a0, psxRegs.GPR.n.a1,
+                psxRegs.GPR.n.v0, psxRegs.GPR.n.ra, psxRegs.cycle);
+        }
+    }
+
+    // [P12] HLE: A0[0xa1] SystemErrorBootOrDiskFailure
+    // SCPH-70000 BIOS does not implement this (self-referencing trampoline → infinite loop).
+    // PS1DRV calls it after CD-ROM check fails (no disc).
+    // HLE: return immediately so IOP can proceed to browser display.
+    // Removal condition: IOP が A0[0xa1] loopを脱出し BIOS browser描画after confirmed
+    if (biosKey == 0xaa1) {
+        static int s_a0a1_cnt = 0;
+        if (++s_a0a1_cnt <= 5) {
+            Console.WriteLn("@@HLE_A0_0xA1@@ n=%d SystemErrorBootOrDiskFailure a0=%08x a1=%08x ra=%08x pc=%08x",
+                s_a0a1_cnt, psxRegs.GPR.n.a0, psxRegs.GPR.n.a1, psxRegs.GPR.n.ra, psxRegs.pc);
+        }
+        psxRegs.GPR.n.v0 = 0;
+        psxRegs.pc = psxRegs.GPR.n.ra;
+        return true;
+    }
+
+    switch (biosKey) {
         case 0xa03:
         case 0xb35:
             // write(fd, data, size)

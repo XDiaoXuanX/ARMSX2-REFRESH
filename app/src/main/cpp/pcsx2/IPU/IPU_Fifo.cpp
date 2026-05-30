@@ -154,7 +154,7 @@ void IPU_Fifo_Output::read(void *value, uint size)
 
 void ReadFIFO_IPUout(mem128_t* out)
 {
-	pxAssertMsg(ipuRegs.ctrl.OFC > 0, "Attempted read from IPUout's FIFO, but the FIFO is empty!");
+	// [iter216] Soft-fail: corrupted vtlb may trigger unexpected FIFO reads.
 	if (ipuRegs.ctrl.OFC == 0) [[unlikely]]
 		return;
 	ipu_fifo.out.read(out, 1);

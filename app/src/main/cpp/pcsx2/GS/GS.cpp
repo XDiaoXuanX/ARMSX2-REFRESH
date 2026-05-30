@@ -21,10 +21,22 @@
 #include "GS/Renderers/HW/GSRendererHW.h"
 #include "GS/Renderers/HW/GSTextureReplacements.h"
 #include "VMManager.h"
+#include "R5900.h"
+#include "Dmac.h"
+#include "vtlb.h"
+
+extern "C" void vtlb_LogVTLBAccess(u32 addr, u32 pc, bool is_write);
 
 #ifdef ENABLE_OPENGL
 #include "GS/Renderers/OpenGL/GSDeviceOGL.h"
 #endif
+
+// [iPSX2]
+extern "C" void LogUnified(const char* fmt, ...);
+
+// [TEMP_DIAG] per-path GS transfer counter — read by Counters.cpp
+// Removal condition: BIOS browserafter confirmed
+volatile uint32_t g_gs_xfer_count[4] = {};
 
 #ifdef __APPLE__
 #include "GS/Renderers/Metal/GSMetalCPPAccessible.h"
@@ -140,6 +152,9 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 			return false;
 	}
 
+	// [iPSX2] GS Open Start
+	LogUnified("@@GS_OPEN@@ renderer=%d api=%s\n", (int)renderer, GSDevice::RenderAPIToString(new_api));
+
 	bool okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
 	if (okay)
 	{
@@ -162,9 +177,14 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 	}
 
 	GSConfig.OsdShowGPU = GSConfig.OsdShowGPU && g_gs_device->SetGPUTimingEnabled(true);
+	// [TEMP_DIAG] Force GPU timing for profiling
+	g_gs_device->SetGPUTimingEnabled(true);
 
 	Console.WriteLn(Color_StrongGreen, "%s Graphics Driver Info:", GSDevice::RenderAPIToString(new_api));
 	Console.WriteLn(g_gs_device->GetDriverInfo());
+
+	// [iPSX2] GS Init OK
+	LogUnified("@@GS_INIT_OK@@ backend=%s device_ok=1\n", GSDevice::RenderAPIToString(new_api));
 
 	return true;
 }
@@ -185,8 +205,8 @@ static void GSClampUpscaleMultiplier(Pcsx2Config::GSOptions& config)
 	if (config.UpscaleMultiplier <= static_cast<float>(max_upscale_multiplier))
 	{
 		// Shouldn't happen, but just in case.
-		if (config.UpscaleMultiplier < 0.25)
-			config.UpscaleMultiplier = 0.25;
+		if (config.UpscaleMultiplier < 1.0f)
+			config.UpscaleMultiplier = 1.0f;
 		return;
 	}
 
@@ -348,6 +368,18 @@ bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* b
 	bool res = OpenGSDevice(renderer, true, false, vsync_mode, allow_present_throttle);
 	if (res)
 	{
+#if TARGET_OS_IPHONE
+		// [iter254] iOS: Allow both SW and HW renderer via env var
+		{
+			const char* force_sw = getenv("iPSX2_FORCE_SW_RENDERER");
+			if (force_sw && force_sw[0] == '1') {
+				Console.WriteLn("@@GS_RENDERER@@ forcing SW renderer (env)");
+				renderer = GSRendererType::SW;
+			} else {
+				Console.WriteLn("@@GS_RENDERER@@ using renderer=%d (Metal HW)", (int)renderer);
+			}
+		}
+#endif
 		res = OpenGSRenderer(renderer, basemem);
 		if (!res)
 			CloseGSDevice(true);
@@ -362,6 +394,7 @@ bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* b
 		return false;
 	}
 
+	fprintf(stderr, "@@GS_PROOF@@ init_done=1\n");
 	return true;
 }
 
@@ -415,27 +448,146 @@ void GSReadLocalMemoryUnsync(u8* mem, u32 qwc, u64 BITBLITBUF, u64 TRXPOS, u64 T
 
 void GSgifTransfer(const u8* mem, u32 size)
 {
+	static int tr_log = 0;
+    if (tr_log == 0) fprintf(stderr, "@@GS_PROOF@@ first_gif_transfer=1 size=%d\n", size);
+	g_gs_xfer_count[3]++; // GSgifTransfer (PATH3 variant)
+	// [TEMP_DIAG] Dump GIF data at GSgifTransfer level for JIT/Interp comparison
+	// Removal condition: BIOS browserafter confirmed
+	u32 xn = g_gs_xfer_count[3];
+	// [TEMP_DIAG] Dump key registers (TEX0, RGBAQ, PRIM) from GSgifTransfer
+	// Removal condition: BIOS browserafter confirmed
+	if (xn == 3000 && size >= 2) {
+		const u32* d = reinterpret_cast<const u32*>(mem);
+		u32 nloop = d[0] & 0x7FFF;
+		Console.WriteLn("@@GIF_XFER@@ xn=%u size=%u nloop=%u tag=[%08x_%08x_%08x_%08x]",
+			xn, size, nloop, d[3], d[2], d[1], d[0]);
+		// Dump all A+D register writes, focus on reg address and data
+		for (u32 i = 0; i < nloop && (i+1) < (u32)size; i++) {
+			u32 off = (i + 1) * 4; // skip GIF tag
+			u8 reg_addr = d[off + 2] & 0xFF;
+			u64 reg_data = (u64)d[off] | ((u64)d[off+1] << 32);
+			// Only log interesting registers: PRIM(0), RGBAQ(1), ST(2), XYZ2(5), TEX0(6/7), ALPHA(42), FRAME(4c/4d)
+			if (reg_addr <= 0x07 || reg_addr == 0x42 || reg_addr == 0x47 || reg_addr == 0x4c) {
+				Console.WriteLn("@@GIF_REG@@ xn=%u i=%u reg=0x%02x data=%08x_%08x",
+					xn, i, reg_addr, d[off+1], d[off]);
+			}
+		}
+	}
+	tr_log++;
 	g_gs_renderer->Transfer<3>(mem, size);
 }
 
 void GSgifTransfer1(u8* mem, u32 addr)
 {
+	static int tr1_log = 0;
+	if (tr1_log < 10) Console.WriteLn("Debug: GSgifTransfer1 called (addr: %d)", addr);
+	tr1_log++;
+	g_gs_xfer_count[0]++; // PATH1
 	g_gs_renderer->Transfer<0>(const_cast<u8*>(mem) + addr, (0x4000 - addr) / 16);
 }
 
 void GSgifTransfer2(u8* mem, u32 size)
 {
+	static int tr2_log = 0;
+	if (tr2_log < 10) Console.WriteLn("Debug: GSgifTransfer2 called (size: %d)", size);
+	tr2_log++;
+	g_gs_xfer_count[1]++; // PATH2
 	g_gs_renderer->Transfer<1>(const_cast<u8*>(mem), size);
 }
 
 void GSgifTransfer3(u8* mem, u32 size)
 {
+	static int tr_log = 0;
+	if (tr_log < 10) Console.WriteLn("Debug: GSgifTransfer3 called (size: %d)", size);
+	tr_log++;
+	g_gs_xfer_count[2]++; // PATH3
 	g_gs_renderer->Transfer<2>(const_cast<u8*>(mem), size);
 }
 
 void GSvsync(u32 field, bool registers_written)
 {
+    static bool first_vsync = true;
+    static int gs_vsync_n = 0;
+    gs_vsync_n++;
+    // [TEMP_DIAG] report per-vsync draw count from GS thread
+    extern std::atomic<uint32_t> g_sw_draw_count;
+    extern volatile uint32_t g_gif_fifo_write_count;
+    static u32 gs_last_draw = 0;
+    static u32 gs_last_xfer = 0;
+    static u32 gs_last_fifo = 0;
+    if (gs_vsync_n <= 120 || (gs_vsync_n % 60) == 0) {
+        u32 cur_draw = g_sw_draw_count.load(std::memory_order_relaxed);
+        u32 cur_xfer = g_gs_xfer_count[3];
+        u32 cur_fifo = g_gif_fifo_write_count;
+        extern uint32_t getVU0ExecCount();
+        extern uint32_t getVU1ExecCount();
+        extern uint32_t getVif1XferCalls();
+        extern uint32_t getVif1CmdsTotal();
+        extern uint32_t getVif1CmdMscal();
+        extern uint32_t getVif1CmdUnpack();
+        extern uint32_t getVif1CmdDirect();
+        extern uint32_t getVif1CmdNop();
+        extern uint32_t getVif1CmdOther();
+        extern std::atomic<uint32_t> g_hw_draw_count;
+        u32 cur_hw = g_hw_draw_count.load(std::memory_order_relaxed);
+        Console.WriteLn("@@GS_FRAME@@ v=%d sw=%u hw=%u xfer=%u fifo=%u "
+            "vu1x=%u vif1xf=%u cmd=%u nop=%u unp=%u msc=%u dir=%u oth=%u",
+            gs_vsync_n, cur_draw, cur_hw, cur_xfer, cur_fifo,
+            getVU1ExecCount(),
+            getVif1XferCalls(), getVif1CmdsTotal(),
+            getVif1CmdNop(), getVif1CmdUnpack(),
+            getVif1CmdMscal(), getVif1CmdDirect(), getVif1CmdOther());
+        gs_last_draw = cur_draw;
+        gs_last_xfer = cur_xfer;
+        gs_last_fifo = cur_fifo;
+    }
+    if (first_vsync) {
+        fprintf(stderr, "@@GS_PROOF@@ first_vsync=1\n");
+        first_vsync = false;
+    }
+    // Added loop iteration logging for BIOS polling loop (first 64 iterations)
+    static int bios_loop_iter = 0;
+    if (cpuRegs.pc == 0xbfc0207c && bios_loop_iter < 64) {
+        u32 t0 = cpuRegs.GPR.n.t0.UL[0];
+        u32 t1 = cpuRegs.GPR.n.t1.UL[0];
+        u32 t2 = cpuRegs.GPR.n.t2.UL[0];
+        DevCon.Error("@@CP0HACK@@ POLL i=%d pc=%08x t0=%08x t1=%08x t2=%08x", bios_loop_iter, cpuRegs.pc, t0, t1, t2);
+        // Log VTLB info for addresses accessed by this iteration
+        // CRASH FIX: vtlb_LogVTLBAccess access VTLB structures which is unsafe from MTGS thread!
+        // vtlb_LogVTLBAccess(t0, cpuRegs.pc, false); // read at t0
+        // vtlb_LogVTLBAccess(t0 + 4, cpuRegs.pc, false); // read at t0+4
+        // vtlb_LogVTLBAccess(t1, cpuRegs.pc, false); // read/write SIF register
+        bios_loop_iter++;
+    }
+
+    // [iPSX2] PC Watchdog (in VSync)
+    static int s_watch_count = 0;
+    if (s_watch_count < 20 && (s_watch_count % 5) == 0) { // Log every 5th vsync, max 20 logs
+        LogUnified("@@PC_WATCH@@ pc=%08x\n", cpuRegs.pc);
+    }
+    s_watch_count++;
+
+
 	// Update this here because we need to check if the pending draw affects the current frame, so our regs need to be updated.
+	// [iter233] @@MTGS_REGS_PROBE@@ m_regs の PMODE/DISPLAY2 値をverify
+	{
+		static u32 s_mtgs_probe_n = 0;
+		if (s_mtgs_probe_n < 15) {
+			auto& d0 = g_gs_renderer->PCRTCDisplays.PCRTCDisplays[0];
+			auto& d1 = g_gs_renderer->PCRTCDisplays.PCRTCDisplays[1];
+			fprintf(stderr, "@@MTGS_REGS_PROBE@@ n=%u pmode=%016llx en1=%d en2=%d d0rect=[%d,%d,%d,%d] d0en=%d d0fbw=%d d1en=%d vmode=%d int=%d\n",
+				s_mtgs_probe_n,
+				(unsigned long long)g_gs_renderer->m_regs->PMODE.U64,
+				(int)g_gs_renderer->m_regs->PMODE.EN1,
+				(int)g_gs_renderer->m_regs->PMODE.EN2,
+				d0.displayRect.x, d0.displayRect.y, d0.displayRect.z, d0.displayRect.w,
+				(int)d0.enabled, (int)d0.FBW,
+				(int)d1.enabled,
+				g_gs_renderer->PCRTCDisplays.videomode,
+				(int)g_gs_renderer->PCRTCDisplays.interlaced);
+			s_mtgs_probe_n++;
+		}
+	}
 	g_gs_renderer->PCRTCDisplays.SetVideoMode(g_gs_renderer->GetVideoMode());
 	g_gs_renderer->PCRTCDisplays.EnableDisplays(g_gs_renderer->m_regs->PMODE, g_gs_renderer->m_regs->SMODE2, g_gs_renderer->isReallyInterlaced());
 	g_gs_renderer->PCRTCDisplays.CheckSameSource();
@@ -504,6 +656,11 @@ void GSEndCapture()
 
 void GSPresentCurrentFrame()
 {
+	static int pres_log = 0;
+	if (pres_log < 10) {
+		LogUnified("@@GS_PRESENT@@ frame=%d\n", pres_log);
+		pres_log++;
+	}
 	g_gs_renderer->PresentCurrentFrame();
 }
 
@@ -943,9 +1100,6 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#ifdef __APPLE__
-#include <TargetConditionals.h>
-#endif
 #ifdef __ANDROID__
 #include <android/sharedmem.h>
 #endif
@@ -956,33 +1110,27 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 {
 	pxAssert(s_shm_fd == -1);
 
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	const char* file_name = "/GS.mem";
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	// iOS sandbox blocks shm_open and /tmp — use app sandbox temp dir
 	const char* tmpdir = getenv("TMPDIR");
-	if (!tmpdir)
-		tmpdir = "/tmp";
-
+	if (!tmpdir) tmpdir = "/var/mobile/Containers/Data/Application";
 	char tmppath[1024];
 	snprintf(tmppath, sizeof(tmppath), "%s/GS.mem.XXXXXX", tmpdir);
 	s_shm_fd = mkstemp(tmppath);
 	if (s_shm_fd != -1)
 	{
-		unlink(tmppath);
+		unlink(tmppath); // unlink immediately, fd keeps file alive
 	}
 	else
 	{
-		Console.Error("@@GS_MMAP_FAIL@@ mkstemp path=%s errno=%d (%s)", tmppath, errno, strerror(errno));
+		fprintf(stderr, "Failed to create GS temp file: %s\n", strerror(errno));
 		return nullptr;
 	}
 
 	if (ftruncate(s_shm_fd, repeat * size) < 0)
-	{
-		Console.Error("@@GS_MMAP_FAIL@@ ftruncate size=0x%zx errno=%d (%s)", repeat * size, errno, strerror(errno));
-		close(s_shm_fd);
-		s_shm_fd = -1;
-		return nullptr;
-	}
+		fprintf(stderr, "Failed to reserve GS memory: %s\n", strerror(errno));
 #elif !defined(__ANDROID__)
-	const char* file_name = "/GS.mem";
 	s_shm_fd = shm_open(file_name, O_RDWR | O_CREAT | O_EXCL, 0600);
 	if (s_shm_fd != -1)
 	{
@@ -997,7 +1145,6 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 	if (ftruncate(s_shm_fd, repeat * size) < 0)
 		fprintf(stderr, "Failed to reserve memory due to %s\n", strerror(errno));
 #else
-	const char* file_name = "/GS.mem";
     s_shm_fd = ASharedMemory_create(file_name, repeat * size);
     if (s_shm_fd < 0)
     {
@@ -1006,16 +1153,7 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
     }
 #endif
 	void* fifo = mmap(nullptr, size * repeat, PROT_READ | PROT_WRITE, MAP_SHARED, s_shm_fd, 0);
-	if (fifo == MAP_FAILED)
-	{
-		Console.Error("@@GS_MMAP_FAIL@@ initial size=0x%zx repeat=%zu total=0x%zx fd=%d errno=%d (%s)",
-			size, repeat, size * repeat, s_shm_fd, errno, strerror(errno));
-		close(s_shm_fd);
-		s_shm_fd = -1;
-		return nullptr;
-	}
-
-	Console.WriteLn("@@GS_MMAP@@ fifo=%p size=0x%zx repeat=%zu total=0x%zx fd=%d",
+	Console.WriteLn("@@GS_MMAP@@ fifo=%p size=0x%zx repeat=%zu total=0x%zx shm_fd=%d",
 		fifo, size, repeat, size * repeat, s_shm_fd);
 
 	for (size_t i = 1; i < repeat; i++)
@@ -1023,16 +1161,10 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 		void* base = (u8*)fifo + size * i;
 		u8* next = (u8*)mmap(base, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s_shm_fd, 0);
 		if (next != base)
-		{
-			Console.Error("@@GS_MMAP_FAIL@@ repeat=%zu base=%p next=%p errno=%d (%s)",
-				i, base, static_cast<void*>(next), errno, strerror(errno));
-			munmap(fifo, size * repeat);
-			close(s_shm_fd);
-			s_shm_fd = -1;
-			return nullptr;
-		}
-
-		Console.WriteLn("@@GS_MMAP_OK@@ repeat=%zu base=%p", i, base);
+			Console.Error("@@GS_MMAP_FAIL@@ i=%zu base=%p next=%p errno=%d (%s)",
+				i, base, (void*)next, errno, strerror(errno));
+		else
+			Console.WriteLn("@@GS_MMAP_OK@@ i=%zu base=%p", i, base);
 	}
 
 	return fifo;

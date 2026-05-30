@@ -1,14 +1,433 @@
-
 // Set SDL_MAIN_HANDLED to prevent SDL from redefining main()
 #define SDL_MAIN_HANDLED
+
+#if defined(iPSX2_MACOS)
+// ============================================================================
+// [P63] macOS native build — full PCSX2 initialization + SDL Metal window
+// ============================================================================
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#import <Cocoa/Cocoa.h>
+#include <sys/stat.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <algorithm>
+
+#include "common/Console.h"
+#include "common/FileSystem.h"
+#include "common/Path.h"
+#include "common/WindowInfo.h"
+#include "pcsx2/VMManager.h"
+#include "pcsx2/Config.h"
+#include "pcsx2/Host.h"
+#include "pcsx2/GS/GS.h"
+#include "pcsx2/INISettingsInterface.h"
+#include "pcsx2/ImGui/ImGuiManager.h"
+#include "pcsx2/CDVD/CDVDcommon.h"
+
+// --- Global state ---
+static SDL_Window* s_macos_window = nullptr;
+static INISettingsInterface* s_macos_settings = nullptr;
+static std::atomic<bool> s_vm_running{false};
+static std::atomic<bool> s_vm_quit{false};
+
+// Host::AcquireRenderWindow — real implementation for macOS Metal
+namespace Host {
+    SDL_Window* g_sdl_window = nullptr;
+}
+
+std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window) {
+    if (!g_sdl_window) {
+        Console.Error("[P63] AcquireRenderWindow: g_sdl_window is NULL");
+        return std::nullopt;
+    }
+    WindowInfo wi = {};
+    wi.type = WindowInfo::Type::MacOS;
+
+    SDL_PropertiesID props = SDL_GetWindowProperties(g_sdl_window);
+    NSWindow* nswin = (__bridge NSWindow*)SDL_GetPointerProperty(props,
+        SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+    if (!nswin) {
+        Console.Error("[P63] AcquireRenderWindow: no NSWindow from SDL");
+        return std::nullopt;
+    }
+    wi.window_handle = (__bridge void*)[nswin contentView];
+
+    int w = 0, h = 0;
+    SDL_GetWindowSizeInPixels(g_sdl_window, &w, &h);
+    wi.surface_width = (u32)w;
+    wi.surface_height = (u32)h;
+    wi.surface_scale = SDL_GetWindowDisplayScale(g_sdl_window);
+
+    SDL_DisplayID display = SDL_GetDisplayForWindow(g_sdl_window);
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display);
+    wi.surface_refresh_rate = mode ? mode->refresh_rate : 60.0f;
+
+    Console.WriteLn("[P63] AcquireRenderWindow: %ux%u scale=%.2f",
+        wi.surface_width, wi.surface_height, wi.surface_scale);
+    return wi;
+}
+
+// --- Helper: setup directories ---
+static void SetupDirectories(const std::string& dataRoot) {
+    const char* dirs[] = {"bios", "iso", "logs", "memcards", "savestates",
+                          "snaps", "cheats", "patches", "cache", "covers",
+                          "gamesettings", "textures", "inputprofiles", "videos"};
+    mkdir(dataRoot.c_str(), 0755);
+    for (auto d : dirs)
+        mkdir((dataRoot + "/" + d).c_str(), 0755);
+
+    EmuFolders::DataRoot = dataRoot;
+    EmuFolders::AppRoot = dataRoot;
+    EmuFolders::Resources = dataRoot;
+    EmuFolders::Bios = dataRoot + "/bios";
+    EmuFolders::Logs = dataRoot + "/logs";
+    EmuFolders::Savestates = dataRoot + "/savestates";
+    EmuFolders::MemoryCards = dataRoot + "/memcards";
+    EmuFolders::Snapshots = dataRoot + "/snaps";
+    EmuFolders::Cheats = dataRoot + "/cheats";
+    EmuFolders::Patches = dataRoot + "/patches";
+    EmuFolders::Cache = dataRoot + "/cache";
+    EmuFolders::Covers = dataRoot + "/covers";
+    EmuFolders::GameSettings = dataRoot + "/gamesettings";
+    EmuFolders::Textures = dataRoot + "/textures";
+    EmuFolders::InputProfiles = dataRoot + "/inputprofiles";
+    EmuFolders::Videos = dataRoot + "/videos";
+}
+
+// --- Helper: find BIOS in bios/ directory ---
+static bool FindAndConfigureBIOS(const std::string& biosDir) {
+    // Check existing config first
+    if (!EmuConfig.BaseFilenames.Bios.empty()) {
+        std::string path = Path::Combine(biosDir, EmuConfig.BaseFilenames.Bios);
+        if (FileSystem::FileExists(path.c_str())) {
+            Console.WriteLn("[P63] BIOS from config: %s", EmuConfig.BaseFilenames.Bios.c_str());
+            return true;
+        }
+    }
+    // Auto-scan for .bin files
+    FileSystem::FindResultsArray results;
+    if (FileSystem::FindFiles(biosDir.c_str(), "*", FILESYSTEM_FIND_FILES, &results)) {
+        for (const auto& fd : results) {
+            if (fd.Size >= 1024*1024 && fd.Size <= 50*1024*1024) {
+                std::string fn(Path::GetFileName(fd.FileName));
+                std::string ext = fn.size() >= 4 ? fn.substr(fn.size() - 4) : "";
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".bin" || ext == ".rom") {
+                    EmuConfig.BaseFilenames.Bios = fn;
+                    if (s_macos_settings) {
+                        s_macos_settings->SetStringValue("Filenames", "BIOS", fn.c_str());
+                        s_macos_settings->Save();
+                    }
+                    Console.WriteLn("[P63] BIOS auto-detected: %s", fn.c_str());
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// --- Helper: initialize settings ---
+static void InitSettings(const std::string& dataRoot) {
+    std::string iniPath = dataRoot + "/PCSX2-macOS.ini";
+    s_macos_settings = new INISettingsInterface(iniPath);
+    if (!s_macos_settings->Load()) {
+        Console.WriteLn("[P63] Creating new config: %s", iniPath.c_str());
+        s_macos_settings->SetIntValue("EmuCore/CPU", "CoreType", 0);
+        s_macos_settings->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
+        s_macos_settings->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
+        s_macos_settings->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
+        s_macos_settings->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
+        s_macos_settings->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
+        s_macos_settings->SetBoolValue("EmuCore/CPU", "EnableSparseMemory", true);
+        s_macos_settings->SetStringValue("SPU2/Output", "Backend", "SDL");
+        s_macos_settings->SetIntValue("EmuCore/GS", "VsyncQueueSize", 8);
+        s_macos_settings->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
+        s_macos_settings->Save();
+    }
+    Host::Internal::SetBaseSettingsLayer(s_macos_settings);
+}
+
+// --- OSD title bar update ---
+#include "pcsx2/PerformanceMetrics.h"
+static std::string s_titlebar_game;
+
+static void UpdateWindowTitle() {
+    if (!s_macos_window) return;
+    char buf[256];
+    int fps = (int)PerformanceMetrics::GetFPS();
+    int speed = (int)PerformanceMetrics::GetSpeed();
+    if (!s_titlebar_game.empty())
+        snprintf(buf, sizeof(buf), "iPSX2 — %s | %d FPS | %d%%", s_titlebar_game.c_str(), fps, speed);
+    else
+        snprintf(buf, sizeof(buf), "iPSX2 — BIOS | %d FPS | %d%%", fps, speed);
+    SDL_SetWindowTitle(s_macos_window, buf);
+}
+
+// --- Build boot parameters from INI ---
+static VMBootParameters BuildBootParams() {
+    VMBootParameters bp;
+    bp.fast_boot = false;
+    std::string isoDir = EmuFolders::DataRoot + "/iso";
+    std::string isoFilename = s_macos_settings->GetStringValue("GameISO", "BootISO", "");
+    bool fastBoot = s_macos_settings->GetBoolValue("GameISO", "FastBoot", false);
+    if (!isoFilename.empty()) {
+        std::string isoPath = isoDir + "/" + isoFilename;
+        if (!FileSystem::FileExists(isoPath.c_str())) {
+            std::string rootPath = EmuFolders::DataRoot + "/" + isoFilename;
+            if (FileSystem::FileExists(rootPath.c_str()))
+                isoPath = rootPath;
+        }
+        if (FileSystem::FileExists(isoPath.c_str())) {
+            bp.filename = isoPath;
+            bp.source_type = CDVD_SourceType::Iso;
+            bp.fast_boot = fastBoot;
+            Console.WriteLn("[P63] ISO: %s fast_boot=%d", isoPath.c_str(), fastBoot);
+        }
+    }
+    return bp;
+}
+
+// --- VM thread (persistent, with restart support) ---
+static void VMThreadFunc() {
+    Console.WriteLn("[P63] VM thread: CPUThreadInitialize...");
+    if (!VMManager::Internal::CPUThreadInitialize()) {
+        Console.Error("[P63] CPUThreadInitialize failed!");
+        s_vm_running.store(false);
+        return;
+    }
+
+    // Set ImGui font path
+    std::string fontPath = Path::Combine(EmuFolders::Resources, "fonts/Roboto-Regular.ttf");
+    if (!FileSystem::FileExists(fontPath.c_str()))
+        fontPath = Path::Combine(EmuFolders::DataRoot, "fonts/Roboto-Regular.ttf");
+    ImGuiManager::SetFontPathAndRange(std::move(fontPath), {});
+
+    // Persistent boot loop — handles VM restart after PS2LOGO→game transitions
+    while (!s_vm_quit.load()) {
+        if (EmuConfig.BaseFilenames.Bios.empty() ||
+            !FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str())) {
+            Console.Error("[P63] BIOS not found!");
+            break;
+        }
+
+        VMBootParameters boot_params = BuildBootParams();
+        Console.WriteLn("[P63] Booting with BIOS=%s", EmuConfig.BaseFilenames.Bios.c_str());
+
+        if (VMManager::Initialize(boot_params)) {
+            Console.WriteLn("[P63] VM initialized, entering run loop...");
+            VMManager::SetState(VMState::Running);
+
+            // Update title with game name
+            s_titlebar_game = s_macos_settings->GetStringValue("GameISO", "BootISO", "");
+
+            while (!s_vm_quit.load()) {
+                VMState state = VMManager::GetState();
+                if (state == VMState::Stopping || state == VMState::Shutdown)
+                    break;
+                if (state == VMState::Running)
+                    VMManager::Execute();
+                else
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            Console.WriteLn("[P63] VM run loop exited (state=%d, quit=%d)",
+                (int)VMManager::GetState(), s_vm_quit.load() ? 1 : 0);
+
+            if (!s_vm_quit.load()) {
+                // VM stopped but app still running — restart (PS2LOGO→game transition)
+                Console.WriteLn("[P63] VM restarting...");
+                VMManager::Shutdown(false);
+                continue;
+            }
+
+            VMManager::Shutdown(false);
+        } else {
+            Console.Error("[P63] VMManager::Initialize failed!");
+        }
+        break;
+    }
+
+    VMManager::Internal::CPUThreadShutdown();
+    s_vm_running.store(false);
+    Console.WriteLn("[P63] VM thread exited.");
+}
+
+// --- macOS main ---
+int main(int argc, char* argv[]) {
+    @autoreleasepool {
+        // 1. Data root
+        const char* home = getenv("HOME");
+        std::string dataRoot = std::string(home ? home : "/tmp") + "/Documents/iPSX2";
+        SetupDirectories(dataRoot);
+
+        // 2. Logging
+        std::string logPath = dataRoot + "/pcsx2_log.txt";
+        freopen(logPath.c_str(), "w", stderr);
+        dup2(fileno(stderr), fileno(stdout));
+        setvbuf(stderr, NULL, _IONBF, 0);
+        setvbuf(stdout, NULL, _IONBF, 0);
+
+        fprintf(stderr, "[P63] iPSX2 macOS native build starting...\n");
+        fprintf(stderr, "[P63] DataRoot: %s\n", dataRoot.c_str());
+        fprintf(stderr, "[P63] Log: %s\n", logPath.c_str());
+
+        // 3. Settings
+        InitSettings(dataRoot);
+        VMManager::Internal::LoadStartupSettings();
+        VMManager::ApplySettings();
+
+        // 4. BIOS
+        if (!FindAndConfigureBIOS(EmuFolders::Bios)) {
+            fprintf(stderr, "[P63] ERROR: No BIOS found in %s/bios/\n", dataRoot.c_str());
+            fprintf(stderr, "[P63] Copy a PS2 BIOS .bin file there and restart.\n");
+            // Still open window to show the user something
+        }
+
+        // 5. SDL + Window
+        SDL_SetMainReady();
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD) < 0) {
+            fprintf(stderr, "[P63] SDL_Init failed: %s\n", SDL_GetError());
+            return 1;
+        }
+        s_macos_window = SDL_CreateWindow("iPSX2 macOS",
+            1280, 720, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE);
+        if (!s_macos_window) {
+            fprintf(stderr, "[P63] SDL_CreateWindow failed: %s\n", SDL_GetError());
+            return 1;
+        }
+        Host::g_sdl_window = s_macos_window;
+        Console.WriteLn("[P63] SDL window created.");
+
+        // 6. Setup macOS native menu bar
+        @autoreleasepool {
+            NSMenu* menuBar = [[NSMenu alloc] init];
+
+            // App menu
+            NSMenuItem* appMenuItem = [[NSMenuItem alloc] init];
+            NSMenu* appMenu = [[NSMenu alloc] initWithTitle:@"iPSX2"];
+            [appMenu addItemWithTitle:@"About iPSX2" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+            [appMenu addItem:[NSMenuItem separatorItem]];
+            [appMenu addItemWithTitle:@"Quit iPSX2" action:@selector(terminate:) keyEquivalent:@"q"];
+            [appMenuItem setSubmenu:appMenu];
+            [menuBar addItem:appMenuItem];
+
+            // Emulation menu
+            NSMenuItem* emuMenuItem = [[NSMenuItem alloc] init];
+            NSMenu* emuMenu = [[NSMenu alloc] initWithTitle:@"Emulation"];
+            [emuMenu addItemWithTitle:@"Pause / Resume" action:nil keyEquivalent:@"p"];
+            [emuMenu addItemWithTitle:@"Reset" action:nil keyEquivalent:@"r"];
+            [emuMenu addItem:[NSMenuItem separatorItem]];
+            // CPU settings submenu
+            NSMenuItem* cpuItem = [[NSMenuItem alloc] init];
+            NSMenu* cpuMenu = [[NSMenu alloc] initWithTitle:@"CPU"];
+            [cpuMenu addItemWithTitle:@"EE: JIT Recompiler" action:nil keyEquivalent:@""];
+            [cpuMenu addItemWithTitle:@"EE: Interpreter" action:nil keyEquivalent:@""];
+            [cpuMenu addItem:[NSMenuItem separatorItem]];
+            [cpuMenu addItemWithTitle:@"IOP Recompiler" action:nil keyEquivalent:@""];
+            [cpuMenu addItemWithTitle:@"VU0 Recompiler" action:nil keyEquivalent:@""];
+            [cpuMenu addItemWithTitle:@"VU1 Recompiler" action:nil keyEquivalent:@""];
+            [cpuItem setSubmenu:cpuMenu];
+            [emuMenu addItem:cpuItem];
+            // Speedhacks submenu
+            NSMenuItem* hackItem = [[NSMenuItem alloc] init];
+            NSMenu* hackMenu = [[NSMenu alloc] initWithTitle:@"Speed Hacks"];
+            [hackMenu addItemWithTitle:@"MTVU (Multi-Threaded VU1)" action:nil keyEquivalent:@""];
+            [hackMenu addItemWithTitle:@"Instant VU1" action:nil keyEquivalent:@""];
+            [hackMenu addItemWithTitle:@"Fastmem" action:nil keyEquivalent:@""];
+            [hackItem setSubmenu:hackMenu];
+            [emuMenu addItem:hackItem];
+            [emuMenuItem setSubmenu:emuMenu];
+            [menuBar addItem:emuMenuItem];
+
+            // GS menu
+            NSMenuItem* gsMenuItem = [[NSMenuItem alloc] init];
+            NSMenu* gsMenu = [[NSMenu alloc] initWithTitle:@"Graphics"];
+            [gsMenu addItemWithTitle:@"Renderer: Metal" action:nil keyEquivalent:@""];
+            [gsMenu addItem:[NSMenuItem separatorItem]];
+            [gsMenu addItemWithTitle:@"Show FPS" action:nil keyEquivalent:@""];
+            [gsMenu addItemWithTitle:@"Show CPU Usage" action:nil keyEquivalent:@""];
+            [gsMenuItem setSubmenu:gsMenu];
+            [menuBar addItem:gsMenuItem];
+
+            // Window menu
+            NSMenuItem* winMenuItem = [[NSMenuItem alloc] init];
+            NSMenu* winMenu = [[NSMenu alloc] initWithTitle:@"Window"];
+            [winMenu addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+            [winMenu addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+            [winMenu addItem:[NSMenuItem separatorItem]];
+            [winMenu addItemWithTitle:@"Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
+            [winMenuItem setSubmenu:winMenu];
+            [menuBar addItem:winMenuItem];
+
+            [NSApp setMainMenu:menuBar];
+        }
+
+        // 7. Launch VM thread (if BIOS found)
+        std::thread vmThread;
+        if (!EmuConfig.BaseFilenames.Bios.empty()) {
+            s_vm_running.store(true);
+            vmThread = std::thread(VMThreadFunc);
+        }
+
+        // 8. Main event loop (must run on main thread for Cocoa/Metal)
+        bool running = true;
+        uint32_t titleUpdateCounter = 0;
+        while (running) {
+            SDL_Event event;
+            while (SDL_PollEvent(&event)) {
+                switch (event.type) {
+                    case SDL_EVENT_QUIT:
+                        running = false;
+                        break;
+                    case SDL_EVENT_WINDOW_RESIZED: {
+                        int w = event.window.data1, h = event.window.data2;
+                        Console.WriteLn("[P63] Window resized: %dx%d", w, h);
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
+
+            // Update window title bar with OSD info (~1Hz)
+            if (++titleUpdateCounter >= 60) {
+                titleUpdateCounter = 0;
+                UpdateWindowTitle();
+            }
+
+            // Check if VM thread has exited
+            if (!s_vm_running.load() && vmThread.joinable()) {
+                // VM finished — don't quit the app, let user close window
+            }
+
+            SDL_Delay(16);
+        }
+
+        // 9. Shutdown
+        Console.WriteLn("[P63] Quit requested, shutting down...");
+        s_vm_quit.store(true);
+        if (vmThread.joinable())
+            vmThread.join();
+
+        SDL_DestroyWindow(s_macos_window);
+        SDL_Quit();
+        Console.WriteLn("[P63] Clean exit.");
+        return 0;
+    }
+}
+#else // TARGET_OS_IPHONE — original iOS code below
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_metal.h>
 
 // SwiftUI integration — import auto-generated Swift header
-#if __has_include("ARMSX2iOS-Swift.h")
-#import "ARMSX2iOS-Swift.h"
+#if __has_include("ARMSX2-Swift.h")
+#import "ARMSX2-Swift.h"
 #define ARMSX2_HAS_SWIFTUI 1
 #else
 #define ARMSX2_HAS_SWIFTUI 0
@@ -18,15 +437,8 @@
 // ... other includes ...
 #include <unistd.h>
 #include <cstdlib>
-#include <cstdarg>
-#include <cstdio>
-#include <cstring>
 #include <string>
-#include <string_view>
 #include <iostream>
-#include <algorithm>
-#include <deque>
-#include <future>
 
 #include "common/ProgressCallback.h"
 #include "pcsx2/Input/InputManager.h"
@@ -64,18 +476,8 @@ struct rc_client_t;
 
 // iOS specific headers
 #import <UIKit/UIKit.h>
-#import <QuartzCore/QuartzCore.h>
 #include <mach-o/dyld.h>
-#include "common/Darwin/ApplePlatform.h"
-#include "common/Darwin/DarwinMisc.h" // For ARMSX2_CRASH_DIAG
-
-static void ARMSX2UncaughtExceptionHandler(NSException *exception)
-{
-    fprintf(stderr, "@@IOS_UNCAUGHT_NS_EXCEPTION@@ name=%s reason=%s\n",
-        exception.name ? [exception.name UTF8String] : "(null)",
-        exception.reason ? [exception.reason UTF8String] : "(null)");
-    fflush(stderr);
-}
+#include "common/Darwin/DarwinMisc.h"
 
 // Global Log View
 static UITextView* g_logView = nil;
@@ -88,30 +490,15 @@ extern void GSResizeDisplayWindow(int width, int height, float scale);
 
 @interface ARMSX2GameView : UIView
 @end
-static int g_iosRendererForView = static_cast<int>(GSRendererType::Metal);
 @implementation ARMSX2GameView
-+ (Class)layerClass {
-#if ARMSX2_APPLE_MAC_RUNTIME
-    return [CAMetalLayer class];
-#else
-    return (g_iosRendererForView == static_cast<int>(GSRendererType::OGL)) ? [CAEAGLLayer class] : [CAMetalLayer class];
-#endif
-}
++ (Class)layerClass { return [CAMetalLayer class]; }
 - (void)layoutSubviews {
     [super layoutSubviews];
+    // Frame is set by SwiftUI — only update Metal drawable size
     CGFloat scale = self.contentScaleFactor;
-    if ([self.layer isKindOfClass:[CAMetalLayer class]]) {
-        CAMetalLayer *mtl = (CAMetalLayer *)self.layer;
-        mtl.drawableSize = CGSizeMake(self.bounds.size.width * scale,
-                                      self.bounds.size.height * scale);
-    }
-#if !ARMSX2_APPLE_MAC_RUNTIME
-    else if ([self.layer isKindOfClass:[CAEAGLLayer class]]) {
-        CAEAGLLayer *eagl = (CAEAGLLayer *)self.layer;
-        eagl.contentsScale = scale;
-        eagl.opaque = YES;
-    }
-#endif
+    CAMetalLayer *mtl = (CAMetalLayer *)self.layer;
+    mtl.drawableSize = CGSizeMake(self.bounds.size.width * scale,
+                                   self.bounds.size.height * scale);
     int w = (int)(self.bounds.size.width * scale);
     int h = (int)(self.bounds.size.height * scale);
     float s = (float)scale;
@@ -132,30 +519,6 @@ static std::atomic<bool> s_requestVMBoot{false};     // signal VM thread to boot
 static std::mutex s_vmMutex;
 static std::condition_variable s_vmCV;
 static bool s_vmThreadCreated = false;               // guarded by s_vmMutex
-
-static std::mutex s_cpuTaskMutex;
-static std::deque<std::function<void()>> s_cpuTasks;
-static std::thread::id s_cpuThreadId;
-
-static bool ARMSX2IsCPUThread()
-{
-    std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
-    return s_cpuThreadId == std::this_thread::get_id();
-}
-
-static void ARMSX2DrainCPUThreadTasks()
-{
-    std::deque<std::function<void()>> tasks;
-    {
-        std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
-        tasks.swap(s_cpuTasks);
-    }
-
-    for (std::function<void()>& task : tasks) {
-        if (task)
-            task();
-    }
-}
 
 // Gamepad button mapping — 16 PS2 buttons → SDL_GamepadButton
 std::atomic<bool> s_captureMode{false};
@@ -210,61 +573,12 @@ void LogToScreen(const char* str) {
     });
 }
 
-extern "C" void LogUnified(const char* fmt, ...) {
-    char stack_buffer[4096];
-    va_list args;
-    va_start(args, fmt);
-    va_list args_copy;
-    va_copy(args_copy, args);
-    const int length = vsnprintf(stack_buffer, sizeof(stack_buffer), fmt, args);
-    va_end(args);
-
-    if (length < 0) {
-        va_end(args_copy);
-        return;
-    }
-
-    const char* text = stack_buffer;
-    std::string heap_buffer;
-    if (static_cast<size_t>(length) >= sizeof(stack_buffer)) {
-        heap_buffer.resize(static_cast<size_t>(length) + 1);
-        vsnprintf(&heap_buffer[0], heap_buffer.size(), fmt, args_copy);
-        text = heap_buffer.c_str();
-    }
-    va_end(args_copy);
-
-    fputs(text, stderr);
-    fflush(stderr);
-
-#if ARMSX2_APPLE_MAC_RUNTIME
-    static FILE* s_catalyst_trace_file = nullptr;
-    static bool s_catalyst_trace_file_opened = false;
-    if (!s_catalyst_trace_file_opened) {
-        s_catalyst_trace_file = fopen("/tmp/armsx2_maccatalyst_trace.log", "a");
-        s_catalyst_trace_file_opened = true;
-    }
-    if (s_catalyst_trace_file) {
-        fputs(text, s_catalyst_trace_file);
-        fflush(s_catalyst_trace_file);
-    }
-
-    if (std::strstr(text, "@@MAC_") || std::strstr(text, "@@MTL_") ||
-        std::strstr(text, "@@PHASE@@") || std::strstr(text, "@@LOG_")) {
-        NSString* message = [NSString stringWithUTF8String:text];
-        if (message)
-            NSLog(@"%@", message);
-    }
-#endif
-}
-
 // ... Host Stubs (Keep existing ones) ...
 
 // We need to forward declare the Host stubs here or ensure they are present.
 // For brevity, I will include the critical parts and stubs.
 
 // -- Host Implementation Start --
-
-static UIWindow* g_hostWindow = nil;
 
 namespace Host
 {
@@ -275,12 +589,12 @@ namespace Host
         event.type = SDL_EVENT_QUIT;
         SDL_PushEvent(&event);
     }
-
+    
     // ... [Include all other Host stubs from previous ios_main.mm] ...
     // Note: I will paste the stubs in the actual write call to ensure compilation.
+    
 
-
-
+    
     void RunOnMainThread(std::function<void()> func, bool wait) {
         if (wait) {
             dispatch_sync(dispatch_get_main_queue(), ^{ func(); });
@@ -303,31 +617,26 @@ namespace Host
         vprintf(fmt, args);
         va_end(args);
     }
-    void LoadSettings(SettingsInterface&, std::unique_lock<std::mutex>&) {}
-    void RequestResetSettings(bool) {}
+    void LoadSettings(SettingsInterface&, std::unique_lock<std::mutex>&) {} 
+    void RequestResetSettings(bool) {} 
     const char* GetTranslatedStringImpl(const char* key) { return key; }
     u32 GetDisplayRefreshRate() { return 60; }
     std::optional<WindowInfo> AcquireRenderWindow(bool recreate_window) {
         Console.WriteLn("Host::AcquireRenderWindow(recreate=%d) called.", recreate_window);
-
+        if (!g_sdl_window) {
+            Console.Error("Host::AcquireRenderWindow: g_sdl_window is NULL");
+            return std::nullopt;
+        }
+        
         __block WindowInfo wi = {};
-#if ARMSX2_APPLE_MAC_CATALYST
-        wi.type = WindowInfo::Type::MacCatalyst;
-#else
         wi.type = WindowInfo::Type::iOS;
-#endif
-
+        
         // SDL calls that interact with UIKit must run on the main thread
         dispatch_sync(dispatch_get_main_queue(), ^{
-            UIWindow* window = g_hostWindow;
-            if (!window && g_sdl_window) {
-                SDL_PropertiesID props = SDL_GetWindowProperties(g_sdl_window);
-                window = (__bridge UIWindow*)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
-            }
-            if (!window && g_gameRenderView.window) {
-                window = g_gameRenderView.window;
-            }
-
+            // SDL3 properties for UIKit
+            SDL_PropertiesID props = SDL_GetWindowProperties(g_sdl_window);
+            UIWindow* window = (__bridge UIWindow*)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
+            
             if (window) {
 // Use dedicated game render view if available (sized for portrait)
                  if (g_gameRenderView) {
@@ -345,16 +654,20 @@ namespace Host
 
 // Get render size from the actual render view
             UIView* renderView = (__bridge UIView*)wi.window_handle;
-            CGFloat scale = renderView.window.screen.scale ?: renderView.contentScaleFactor;
+            CGFloat scale = renderView.contentScaleFactor;
             wi.surface_width = static_cast<u32>(renderView.bounds.size.width * scale);
             wi.surface_height = static_cast<u32>(renderView.bounds.size.height * scale);
-            wi.surface_scale = scale;
-
-            UIScreen* screen = window ? window.windowScene.screen : renderView.window.screen;
-            wi.surface_refresh_rate = screen ? static_cast<float>(screen.maximumFramesPerSecond) : 60.0f;
+            wi.surface_scale = SDL_GetWindowDisplayScale(g_sdl_window);
+            
+            SDL_DisplayID display = SDL_GetDisplayForWindow(g_sdl_window);
+            const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display);
+            if (mode)
+                wi.surface_refresh_rate = mode->refresh_rate;
+            else
+                wi.surface_refresh_rate = 60.0f;
         });
-
-        Console.WriteLn("Host::AcquireRenderWindow: Returning WindowInfo (Type=%d, View=%p, Size=%ux%u, Scale=%.2f)",
+            
+        Console.WriteLn("Host::AcquireRenderWindow: Returning WindowInfo (Type=%d, View=%p, Size=%ux%u, Scale=%.2f)", 
             (int)wi.type, wi.window_handle, wi.surface_width, wi.surface_height, wi.surface_scale);
 
         return wi;
@@ -365,8 +678,6 @@ namespace Host
     void OnVMResumed() {}
     void OnVMStarted() {}
     void OnVMStarting() {}
-    void SetDefaultUISettings(SettingsInterface&) {}
-    void RequestResizeHostDisplay(s32, s32) {}
     void EndTextInput() {}
     bool IsFullscreen() { return true; }
     void SetMouseMode(bool, bool) {}
@@ -375,29 +686,7 @@ namespace Host
     void SetFullscreen(bool) {}
     void BeginTextInput() {}
     bool ConfirmMessage(std::string_view, std::string_view) { return true; }
-    void RunOnCPUThread(std::function<void()> function, bool block)
-    {
-        if (!function)
-            return;
-
-        if (ARMSX2IsCPUThread() || !s_vmThreadActive.load()) {
-            function();
-            return;
-        }
-
-        if (block) {
-            auto task = std::make_shared<std::packaged_task<void()>>(std::move(function));
-            std::future<void> done = task->get_future();
-            {
-                std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
-                s_cpuTasks.emplace_back([task = std::move(task)]() { (*task)(); });
-            }
-            done.wait();
-        } else {
-            std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
-            s_cpuTasks.emplace_back(std::move(function));
-        }
-    }
+    void RunOnCPUThread(std::function<void()>, bool) {}
     void ReportInfoAsync(std::string_view, std::string_view) {}
     void ReportErrorAsync(std::string_view title, std::string_view msg) {
         Console.Error("Host::ReportErrorAsync: %s - %s", std::string(title).c_str(), std::string(msg).c_str());
@@ -419,8 +708,6 @@ namespace Host
     void OnAchievementsRefreshed() {}
     void PumpMessagesOnCPUThread()
     {
-        ARMSX2DrainCPUThreadTasks();
-
 // Check for VM shutdown request (safe: runs on CPU thread)
         if (s_requestVMStop.load()) {
             Console.WriteLn("[UI] PumpMessages: setting VM state to Stopping");
@@ -611,6 +898,28 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled) {
         SDL_SetWindowFullscreen(Host::g_sdl_window, enabled);
 }
 
+static void ARMSX2EnsureGameRenderViewOnMain(const char* reason) {
+    if (g_gameRenderView)
+        return;
+
+    g_gameRenderView = [[ARMSX2GameView alloc] initWithFrame:CGRectZero];
+    g_gameRenderView.backgroundColor = [UIColor blackColor];
+    g_gameRenderView.clipsToBounds = YES;
+    [g_gameRenderView setNeedsLayout];
+    Console.WriteLn("[Layout] Game render view prepared for SwiftUI (reason=%s)",
+        reason ? reason : "unknown");
+}
+
+extern "C" void ARMSX2_PrepareGameRenderViewForCurrentRenderer(const char* reason) {
+    if ([NSThread isMainThread]) {
+        ARMSX2EnsureGameRenderViewOnMain(reason);
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            ARMSX2EnsureGameRenderViewOnMain(reason);
+        });
+    }
+}
+
 namespace Common {
     bool PlaySoundAsync(const char*) { return false; }
 }
@@ -661,34 +970,29 @@ namespace FileSystem {
 namespace CocoaTools {
     void InhibitAppNap(const std::string&) {}
     void UninhibitAppNap() {}
-    std::optional<std::string> GetBundlePath() { return std::string([[NSBundle mainBundle].bundlePath UTF8String]); }
-    std::optional<std::string> GetNonTranslocatedBundlePath() { return GetBundlePath(); }
-    std::optional<std::string> GetResourcePath() {
-        NSString* path = [[NSBundle mainBundle] resourcePath];
-        return path ? std::optional<std::string>(std::string([path UTF8String])) : std::nullopt;
-    }
-
+    std::string GetBundlePath() { return [[NSBundle mainBundle].bundlePath UTF8String]; }
+    
     void* CreateMetalLayer(WindowInfo* wi) {
         if (!Host::g_sdl_window) return nullptr;
-
+        
         // Return existing layer if we already have it
         if (wi->surface_handle) {
             return SDL_Metal_GetLayer((SDL_MetalView)wi->surface_handle);
         }
-
+        
         // Create the Metal view
         SDL_MetalView view = SDL_Metal_CreateView(Host::g_sdl_window);
         if (!view) {
             Console.Error("SDL_Metal_CreateView failed: %s", SDL_GetError());
             return nullptr;
         }
-
+        
         void* layer = SDL_Metal_GetLayer(view);
         wi->surface_handle = view; // Store view handle to destroy later
         Console.WriteLn("Created Metal Layer: %p from View: %p", layer, view);
         return layer;
     }
-
+    
     void DestroyMetalLayer(WindowInfo* wi) {
         if (wi->surface_handle) {
             Console.WriteLn("Destroying Metal View: %p", wi->surface_handle);
@@ -730,410 +1034,79 @@ bool PCAPAdapter::ValidateEtherFrame(NetPacket*) { return false; }
 #include "pcsx2/INISettingsInterface.h"
 
 static INISettingsInterface* s_settings_interface = nullptr;
-static std::string s_iosSettingsPath;
 // Expose to ARMSX2Bridge.mm via extern
 INISettingsInterface* g_p44_settings_interface = nullptr;
-
-static int ARMSX2GetConfiguredRendererForView()
-{
-    const int fallback = static_cast<int>(GSRendererType::Metal);
-#if ARMSX2_APPLE_MAC_RUNTIME
-    return fallback;
-#endif
-    const int renderer = s_settings_interface ?
-        s_settings_interface->GetIntValue("EmuCore/GS", "Renderer", fallback) :
-        fallback;
-
-    switch (static_cast<GSRendererType>(renderer)) {
-        case GSRendererType::Metal:
-        case GSRendererType::OGL:
-        case GSRendererType::SW:
-        case GSRendererType::Null:
-            return renderer;
-        default:
-            return fallback;
-    }
-}
-
-static void ARMSX2PrepareGameRenderViewForRendererOnMain(int renderer, const char* reason)
-{
-    (void)reason;
-#if ARMSX2_APPLE_MAC_RUNTIME
-    renderer = static_cast<int>(GSRendererType::Metal);
-#endif
-    g_iosRendererForView = renderer;
-
-#if ARMSX2_APPLE_MAC_RUNTIME
-    Class expectedLayer = [CAMetalLayer class];
-#else
-    Class expectedLayer = (renderer == static_cast<int>(GSRendererType::OGL)) ? [CAEAGLLayer class] : [CAMetalLayer class];
-#endif
-    if (g_gameRenderView && [g_gameRenderView.layer isKindOfClass:expectedLayer]) {
-        return;
-    }
-
-    UIView* oldView = g_gameRenderView;
-    CGRect frame = oldView ? oldView.frame : CGRectZero;
-    if (oldView.superview)
-        [oldView removeFromSuperview];
-
-    g_gameRenderView = [[ARMSX2GameView alloc] initWithFrame:frame];
-    g_gameRenderView.backgroundColor = [UIColor blackColor];
-    g_gameRenderView.clipsToBounds = YES;
-    [g_gameRenderView setNeedsLayout];
-}
-
-static void ARMSX2PrepareGameRenderViewForRenderer(int renderer, const char* reason)
-{
-    if ([NSThread isMainThread])
-        ARMSX2PrepareGameRenderViewForRendererOnMain(renderer, reason);
-    else
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            ARMSX2PrepareGameRenderViewForRendererOnMain(renderer, reason);
-        });
-}
-
-static void ARMSX2PrepareGameRenderViewForCurrentRenderer(const char* reason)
-{
-    ARMSX2PrepareGameRenderViewForRenderer(ARMSX2GetConfiguredRendererForView(), reason);
-}
-
-extern "C" void ARMSX2_PrepareGameRenderViewForCurrentRenderer(const char* reason)
-{
-    ARMSX2PrepareGameRenderViewForCurrentRenderer(reason);
-}
-
-static int ARMSX2ClampINIInt(INISettingsInterface* si, const char* section, const char* key, int default_value, int min_value, int max_value)
-{
-    const int value = si->GetIntValue(section, key, default_value);
-    const int clamped = std::clamp(value, min_value, max_value);
-    if (value != clamped || !si->ContainsValue(section, key))
-        si->SetIntValue(section, key, clamped);
-    return clamped;
-}
-
-static void ARMSX2LogIOSSettingsSnapshot(const char* tag, INISettingsInterface* si)
-{
-    if (!si) {
-        fprintf(stderr, "@@IOS_SETTINGS@@ tag=%s settings=null\n", tag);
-        fflush(stderr);
-        return;
-    }
-
-    const std::string spu2Backend = si->GetStringValue("SPU2/Output", "Backend", "(missing)");
-    const int cpuCore = si->GetIntValue("EmuCore/CPU", "CoreType", -999);
-    const bool arm64Dynarec = si->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
-    const bool recEE = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", false);
-    const bool recIOP = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", false);
-    const bool recVU0 = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", false);
-    const bool recVU1 = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", false);
-    const bool extraMemory = si->GetBoolValue("EmuCore/CPU", "ExtraMemory", false);
-    const bool fastmem = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", false);
-    const int gsRenderer = si->GetIntValue("EmuCore/GS", "Renderer", -999);
-    const int vsyncQueue = si->GetIntValue("EmuCore/GS", "VsyncQueueSize", -999);
-    const bool mtvu = si->GetBoolValue("EmuCore/Speedhacks", "MTVU", false);
-    const bool vuThread = si->GetBoolValue("EmuCore/Speedhacks", "vuThread", false);
-    const std::string bootISO = si->GetStringValue("GameISO", "BootISO", "");
-    const std::string biosName = si->GetStringValue("Filenames", "BIOS", "");
-#if ARMSX2_APPLE_MAC_RUNTIME
-    const bool jitAvailable = true;
-    const bool noJitActive = false;
-#else
-    const bool forceEEInterp = (DarwinMisc::ARMSX2_FORCE_EE_INTERP != 0);
-    const bool forceJit = (DarwinMisc::ARMSX2_FORCE_JIT != 0);
-    const bool jitAvailable = forceJit || (!forceEEInterp && DarwinMisc::IsJITAvailable());
-    const bool noJitActive = forceEEInterp || (!forceJit && !jitAvailable) || cpuCore == 1;
-#endif
-
-    fprintf(stderr,
-        "@@IOS_SETTINGS@@ tag=%s si=%p config_path=%s data_root=%s bios_dir=%s boot_iso=\"%s\" bios_name=\"%s\" spu2_backend=%s cpu_core=%d arm64_dynarec=%d rec_ee=%d rec_iop=%d rec_vu0=%d rec_vu1=%d fastmem=%d extra_memory=%d gs_renderer=%d vsync_queue=%d mtvu=%d vu_thread=%d jit_available=%d no_jit_active=%d\n",
-        tag, si, s_iosSettingsPath.c_str(), EmuFolders::DataRoot.c_str(), EmuFolders::Bios.c_str(), bootISO.c_str(),
-        biosName.c_str(), spu2Backend.c_str(), cpuCore, arm64Dynarec ? 1 : 0, recEE ? 1 : 0, recIOP ? 1 : 0,
-        recVU0 ? 1 : 0, recVU1 ? 1 : 0, fastmem ? 1 : 0, extraMemory ? 1 : 0, gsRenderer, vsyncQueue,
-        mtvu ? 1 : 0, vuThread ? 1 : 0, jitAvailable ? 1 : 0, noJitActive ? 1 : 0);
-    fflush(stderr);
-    Console.WriteLn(
-        "@@IOS_SETTINGS@@ tag=%s si=%p config_path=%s data_root=%s bios_dir=%s boot_iso=\"%s\" bios_name=\"%s\" spu2_backend=%s cpu_core=%d arm64_dynarec=%d rec_ee=%d rec_iop=%d rec_vu0=%d rec_vu1=%d fastmem=%d extra_memory=%d gs_renderer=%d vsync_queue=%d mtvu=%d vu_thread=%d jit_available=%d no_jit_active=%d",
-        tag, si, s_iosSettingsPath.c_str(), EmuFolders::DataRoot.c_str(), EmuFolders::Bios.c_str(), bootISO.c_str(),
-        biosName.c_str(), spu2Backend.c_str(), cpuCore, arm64Dynarec ? 1 : 0, recEE ? 1 : 0, recIOP ? 1 : 0,
-        recVU0 ? 1 : 0, recVU1 ? 1 : 0, fastmem ? 1 : 0, extraMemory ? 1 : 0, gsRenderer, vsyncQueue,
-        mtvu ? 1 : 0, vuThread ? 1 : 0, jitAvailable ? 1 : 0, noJitActive ? 1 : 0);
-}
-
-static constexpr const char* ARMSX2_IOS_JIT_SECTION = "ARMSX2iOS/JIT";
-static constexpr const char* ARMSX2_IOS_AUTO_NO_JIT_FALLBACK_KEY = "AutoNoJitFallback";
-
-static bool ARMSX2LooksLikeAutoNoJitFallback(INISettingsInterface* si)
-{
-    if (!si)
-        return false;
-
-    return si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1 &&
-           !si->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true) &&
-           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true) &&
-           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true) &&
-           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true) &&
-           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true) &&
-           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
-}
-
-static bool ARMSX2WasAutoNoJitFallback(INISettingsInterface* si)
-{
-    return si &&
-           si->GetBoolValue(ARMSX2_IOS_JIT_SECTION, ARMSX2_IOS_AUTO_NO_JIT_FALLBACK_KEY, false) &&
-           ARMSX2LooksLikeAutoNoJitFallback(si);
-}
-
-static void ARMSX2SetAutoNoJitFallback(INISettingsInterface* si)
-{
-    if (si)
-        si->SetBoolValue(ARMSX2_IOS_JIT_SECTION, ARMSX2_IOS_AUTO_NO_JIT_FALLBACK_KEY, true);
-}
-
-static void ARMSX2ClearAutoNoJitFallback(INISettingsInterface* si)
-{
-    if (si)
-        si->DeleteValue(ARMSX2_IOS_JIT_SECTION, ARMSX2_IOS_AUTO_NO_JIT_FALLBACK_KEY);
-}
-
-static void ARMSX2RestoreIOSJitDefaults(INISettingsInterface* si)
-{
-    if (!si)
-        return;
-
-    si->SetIntValue("EmuCore/CPU", "CoreType", 2);
-    si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
-    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
-    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
-    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
-    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
-    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
-}
-
-static const char* ARMSX2NormalizeGSAspectRatio(std::string_view value)
-{
-    if (value == "Stretch" || value == "0")
-        return "Stretch";
-    if (value == "Auto 4:3/3:2" || value == "1")
-        return "Auto 4:3/3:2";
-    if (value == "4:3" || value == "2")
-        return "4:3";
-    if (value == "16:9" || value == "3")
-        return "16:9";
-    if (value == "10:7" || value == "4")
-        return "10:7";
-    return nullptr;
-}
-
-static const char* ARMSX2NormalizeGSFMVAspectRatioSwitch(std::string_view value)
-{
-    if (value == "Off" || value == "0")
-        return "Off";
-    if (value == "Auto 4:3/3:2" || value == "1")
-        return "Auto 4:3/3:2";
-    if (value == "4:3" || value == "2")
-        return "4:3";
-    if (value == "16:9" || value == "3")
-        return "16:9";
-    if (value == "10:7" || value == "4")
-        return "10:7";
-    return nullptr;
-}
-
-static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
-{
-    if (!si)
-        return;
-
-#if ARMSX2_APPLE_MAC_RUNTIME
-    const bool jit_unavailable = false;
-    const bool no_jit_active =
-        false;
-#else
-    const bool force_ee_interp = (DarwinMisc::ARMSX2_FORCE_EE_INTERP != 0);
-    const bool force_jit = (DarwinMisc::ARMSX2_FORCE_JIT != 0);
-    const bool jit_unavailable = !force_ee_interp && !force_jit && !DarwinMisc::IsJITAvailable();
-    const bool no_jit_active = force_ee_interp || jit_unavailable;
-#endif
-
-#if !ARMSX2_APPLE_MAC_RUNTIME
-    if (!no_jit_active && ARMSX2WasAutoNoJitFallback(si)) {
-        ARMSX2RestoreIOSJitDefaults(si);
-        ARMSX2ClearAutoNoJitFallback(si);
-        Console.WriteLn("@@IOS_SETTINGS@@ migrated stale no-JIT fallback settings to JIT defaults");
-    } else if (!no_jit_active) {
-        ARMSX2ClearAutoNoJitFallback(si);
-    }
-#endif
-
-    const bool interpreter_requested =
-#if ARMSX2_APPLE_MAC_RUNTIME
-        false;
-#else
-        si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1 || no_jit_active;
-#endif
-    if (interpreter_requested) {
-        if (jit_unavailable)
-            ARMSX2SetAutoNoJitFallback(si);
-        DarwinMisc::ForceNoJitMode();
-        si->SetIntValue("EmuCore/CPU", "CoreType", 1);
-        si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", false);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEECache", false);
-    } else {
-#if ARMSX2_APPLE_MAC_RUNTIME
-        si->SetIntValue("EmuCore/CPU", "CoreType", 2);
-        si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
-        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
-#else
-        const int configured_core_type = si->GetIntValue("EmuCore/CPU", "CoreType", 2);
-        if (!si->ContainsValue("EmuCore/CPU", "CoreType"))
-            si->SetIntValue("EmuCore/CPU", "CoreType", 2);
-        if (configured_core_type == 2 || !si->ContainsValue("EmuCore/CPU", "UseArm64Dynarec"))
-            si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableEE"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableIOP"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableVU0"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableVU1"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
-        if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableFastmem"))
-            si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
-#endif
-    }
-    si->SetBoolValue("EmuCore/CPU", "EnableSparseMemory", true);
-    si->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
-
-    si->SetStringValue("SPU2/Output", "Backend", "SDL");
-#if ARMSX2_APPLE_MAC_RUNTIME
-    si->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
-#else
-    const int configured_renderer = si->GetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
-    switch (static_cast<GSRendererType>(configured_renderer)) {
-        case GSRendererType::Metal:
-        case GSRendererType::OGL:
-        case GSRendererType::SW:
-        case GSRendererType::Null:
-            si->SetIntValue("EmuCore/GS", "Renderer", configured_renderer);
-            break;
-        default:
-            si->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
-            break;
-    }
-#endif
-    const std::string configured_aspect_ratio = si->GetStringValue("EmuCore/GS", "AspectRatio", "");
-    const char* normalized_aspect_ratio = ARMSX2NormalizeGSAspectRatio(configured_aspect_ratio);
-    if (!normalized_aspect_ratio) {
-        Console.Warning("@@IOS_SETTINGS@@ invalid AspectRatio=\"%s\" fallback=\"Auto 4:3/3:2\"",
-            configured_aspect_ratio.c_str());
-        normalized_aspect_ratio = "Auto 4:3/3:2";
-    }
-    if (configured_aspect_ratio != normalized_aspect_ratio)
-        si->SetStringValue("EmuCore/GS", "AspectRatio", normalized_aspect_ratio);
-
-    const std::string configured_fmv_aspect = si->GetStringValue("EmuCore/GS", "FMVAspectRatioSwitch", "");
-    const char* normalized_fmv_aspect = ARMSX2NormalizeGSFMVAspectRatioSwitch(configured_fmv_aspect);
-    if (!normalized_fmv_aspect) {
-        Console.Warning("@@IOS_SETTINGS@@ invalid FMVAspectRatioSwitch=\"%s\" fallback=\"Off\"",
-            configured_fmv_aspect.c_str());
-        normalized_fmv_aspect = "Off";
-    }
-    if (configured_fmv_aspect != normalized_fmv_aspect)
-        si->SetStringValue("EmuCore/GS", "FMVAspectRatioSwitch", normalized_fmv_aspect);
-    ARMSX2ClampINIInt(si, "EmuCore/GS", "VsyncQueueSize", 2, 0, 8);
-    ARMSX2ClampINIInt(si, "EmuCore/GS", "deinterlace_mode", static_cast<int>(GSInterlaceMode::Automatic), 0, static_cast<int>(GSInterlaceMode::Count) - 1);
-    ARMSX2ClampINIInt(si, "EmuCore/GS", "accurate_blending_unit", static_cast<int>(AccBlendLevel::Basic), 0, static_cast<int>(AccBlendLevel::Maximum));
-    ARMSX2ClampINIInt(si, "EmuCore/GS", "filter", static_cast<int>(BiFiltering::PS2), 0, static_cast<int>(BiFiltering::Forced_But_Sprite));
-    ARMSX2ClampINIInt(si, "EmuCore/GS", "CASMode", static_cast<int>(GSCASMode::Disabled), 0, static_cast<int>(GSCASMode::SharpenAndResize));
-    ARMSX2ClampINIInt(si, "EmuCore/GS", "CASSharpness", 50, 0, 100);
-    ARMSX2ClampINIInt(si, "EmuCore/GS", "dithering_ps2", 2, 0, 3);
-    si->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
-    si->SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
-}
-
-static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
-{
-#if ARMSX2_APPLE_MAC_RUNTIME
-    return false;
-#else
-    if (ARMSX2WasAutoNoJitFallback(si))
-        return false;
-    return si && si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1;
-#endif
-}
 
 //
 // -- IOS AppDelegate & SceneDelegate --
 //
 
-@interface ARMSX2SceneDelegate : UIResponder <UIWindowSceneDelegate, UIDocumentPickerDelegate>
+@interface PCSX2SceneDelegate : UIResponder <UIWindowSceneDelegate, UIDocumentPickerDelegate>
 @property (strong, nonatomic) UIWindow *window;
 @property (strong, nonatomic) UIButton *startBiosButton;
 @end
 
-@implementation ARMSX2SceneDelegate
+@implementation PCSX2SceneDelegate
 
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions {
     if (![scene isKindOfClass:[UIWindowScene class]]) return;
-
+    
     UIWindowScene *windowScene = (UIWindowScene *)scene;
-
+    
     // --- SDL Initialization ---
     static bool s_initialized = false;
-	if (!s_initialized) {
-		SDL_SetMainReady();
-		if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
-			NSLog(@"SDL_Init failed: %s", SDL_GetError());
-			return;
-		}
+    if (!s_initialized) {
+        SDL_SetMainReady();
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD) < 0) {
+            NSLog(@"SDL_Init failed: %s", SDL_GetError());
+            return;
+        }
         s_initialized = true;
     }
-
-    // --- Setup ARMSX2 Environment ---
+    
+    // --- Setup PCSX2 Environment ---
     // (Moved to AppDelegate)
     // We still need local variables if used below, but EmuFolders are global.
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *documentsDirectory = [paths objectAtIndex:0];
     std::string dataRoot = [documentsDirectory UTF8String];
-
+    
     // Re-ensure EmuFolders (idempotent)
     EmuFolders::DataRoot = dataRoot;
     EmuFolders::Bios = dataRoot + "/bios";
     // ...
-
-    Console.WriteLn("ARMSX2 iOS: Initializing logic in SceneDelegate...");
-
+    
+    Console.WriteLn("PCSX2 iOS: Initializing logic in SceneDelegate...");
+    
     // Settings Initialization
     if (!s_settings_interface) {
-        NSString *iniPathString = [documentsDirectory stringByAppendingPathComponent:@"ARMSX2-iOS.ini"];
-        NSString *legacyIniPathString = [documentsDirectory stringByAppendingPathComponent:@"PCSX2-iOS.ini"];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if (![fm fileExistsAtPath:iniPathString] && [fm fileExistsAtPath:legacyIniPathString]) {
-            [fm copyItemAtPath:legacyIniPathString toPath:iniPathString error:nil];
-        }
-
-        std::string iniPath = [iniPathString UTF8String];
-        s_iosSettingsPath = iniPath;
+        std::string iniPath = dataRoot + "/PCSX2-iOS.ini";
         s_settings_interface = new INISettingsInterface(iniPath);
         if (!static_cast<INISettingsInterface*>(s_settings_interface)->Load()) {
             Console.WriteLn("Creating new config at %s", iniPath.c_str());
+            
+            // [iPSX2] Standard Defaults: JIT Enabled (if supported), EE/IOP/VU Recompilers ON
+            s_settings_interface->SetIntValue("EmuCore/CPU", "CoreType", 0); // Recompiler
+            s_settings_interface->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU", "EnableSparseMemory", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
+
+            // Audio
+            s_settings_interface->SetStringValue("SPU2/Output", "Backend", "SDL");
+
+            // GS
+            s_settings_interface->SetIntValue("EmuCore/GS", "VsyncQueueSize", 8);
+
+            // Speedhacks
+            s_settings_interface->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
+            
+            Console.WriteLn("@@CFG_DEFAULTS@@ created=1 CoreType=0 UseArm64Dynarec=false EnableEE=1");
+            s_settings_interface->Save();
         }
-        fprintf(stderr, "@@IOS_SETTINGS_FILE@@ path=%s loaded=1 legacy_path=%s\n", iniPath.c_str(), [legacyIniPathString UTF8String]);
-        ARMSX2LogIOSSettingsSnapshot("after_ini_load_before_defaults", s_settings_interface);
-        ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
-        ARMSX2LogIOSSettingsSnapshot("after_initial_runtime_defaults", s_settings_interface);
-        Console.WriteLn("@@CFG_DEFAULTS@@ applied iOS runtime defaults");
-        s_settings_interface->Save();
         Host::Internal::SetBaseSettingsLayer(s_settings_interface);
         g_p44_settings_interface = s_settings_interface; // expose to Bridge
 // Load gamepad button mapping from INI
@@ -1150,12 +1123,10 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
     if (!s_settings_interface->ContainsValue("EmuCore/CPU", "ExtraMemory")) {
         s_settings_interface->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
     }
-    ARMSX2LogIOSSettingsSnapshot("before_runtime_defaults", s_settings_interface);
-    ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
-    ARMSX2LogIOSSettingsSnapshot("after_runtime_defaults", s_settings_interface);
     s_settings_interface->Save();
     [self checkAndConfigureBIOS];
 
+    // GS Renderer: Metal fixed on iOS. Only override if not already Metal.
 #if DEBUG
     if (const char* null_gs_env = getenv("ARMSX2_NULL_GS"); null_gs_env && atoi(null_gs_env)) {
         EmuConfig.GS.Renderer = GSRendererType::Null;
@@ -1163,81 +1134,36 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
     } else
 #endif
     {
-#if ARMSX2_APPLE_MAC_RUNTIME
         EmuConfig.GS.Renderer = GSRendererType::Metal;
-        s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
-#else
-        const int renderer_value = s_settings_interface->GetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
-        switch (static_cast<GSRendererType>(renderer_value)) {
-            case GSRendererType::Metal:
-            case GSRendererType::OGL:
-            case GSRendererType::SW:
-            case GSRendererType::Null:
-                EmuConfig.GS.Renderer = static_cast<GSRendererType>(renderer_value);
-                break;
-            default:
-                EmuConfig.GS.Renderer = GSRendererType::Metal;
-                break;
-        }
-#endif
     }
-    g_iosRendererForView = static_cast<int>(EmuConfig.GS.Renderer);
     s_settings_interface->Save();
 
-    @try {
-        fprintf(stderr, "@@IOS_VM_CALL@@ LoadStartupSettings begin\n");
-        fflush(stderr);
-        VMManager::Internal::LoadStartupSettings();
-        fprintf(stderr, "@@IOS_VM_CALL@@ LoadStartupSettings end\n");
-        ARMSX2LogIOSSettingsSnapshot("before_vm_apply_settings", s_settings_interface);
-        fprintf(stderr, "@@IOS_VM_CALL@@ ApplySettings begin\n");
-        fflush(stderr);
-        VMManager::ApplySettings();
-        fprintf(stderr, "@@IOS_VM_CALL@@ ApplySettings end\n");
-        fflush(stderr);
-    } @catch (NSException *exception) {
-        fprintf(stderr, "@@IOS_EXCEPTION@@ scope=VMSettings name=%s reason=%s\n",
-            exception.name ? [exception.name UTF8String] : "(null)",
-            exception.reason ? [exception.reason UTF8String] : "(null)");
-        fflush(stderr);
-        @throw;
-    }
-
-#if ARMSX2_APPLE_MAC_RUNTIME
-    UIViewController* catalystRootVC = [[UIViewController alloc] init];
-    catalystRootVC.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    UIWindow *uiWindow = [[UIWindow alloc] initWithWindowScene:windowScene];
-    uiWindow.rootViewController = catalystRootVC;
-    if (windowScene.sizeRestrictions) {
-        windowScene.sizeRestrictions.minimumSize = CGSizeMake(900.0, 600.0);
-    }
-#else
+    VMManager::Internal::LoadStartupSettings();
+    VMManager::ApplySettings();
+    
     // --- Create SDL Window ---
-    SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE;
-    if (EmuConfig.GS.Renderer != GSRendererType::OGL)
-        window_flags = static_cast<SDL_WindowFlags>(window_flags | SDL_WINDOW_METAL);
-    Host::g_sdl_window = SDL_CreateWindow("ARMSX2 iOS", 1280, 720, window_flags);
+    Host::g_sdl_window = SDL_CreateWindow("PCSX2 iOS", 1280, 720, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE);
     if (!Host::g_sdl_window) {
         Console.Error("Failed to create SDL window: %s", SDL_GetError());
         return;
     }
-
+    
     // --- Attach UIWindow ---
     UIWindow *uiWindow = (__bridge UIWindow*)SDL_GetPointerProperty(SDL_GetWindowProperties(Host::g_sdl_window), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
-#endif
     if (uiWindow) {
         Console.WriteLn("Attaching UIWindow to Scene...");
         uiWindow.windowScene = windowScene;
         self.window = uiWindow;
-        g_hostWindow = uiWindow;
         self.window.backgroundColor = [UIColor systemGroupedBackgroundColor];
         [self.window makeKeyAndVisible];
 
 // Create game render view — SwiftUI MetalGameView (UIViewRepresentable) manages placement
-        ARMSX2PrepareGameRenderViewForRenderer(static_cast<int>(EmuConfig.GS.Renderer), "scene_connect");
+        g_gameRenderView = [[ARMSX2GameView alloc] initWithFrame:CGRectZero];
+        g_gameRenderView.backgroundColor = [UIColor blackColor];
+        g_gameRenderView.clipsToBounds = YES;
         // Do NOT addSubview here — SwiftUI's MetalGameView handles view hierarchy
         Console.WriteLn("[Layout] Game render view created (SwiftUI-managed)");
-
+        
 // Debug-only UI elements
 #if DEBUG
         if (rootVC) {
@@ -1251,7 +1177,7 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
         }
 #endif
     }
-
+    
     // --- [UI] Startup Logic: Show menu first, boot on user action ---
 #if ARMSX2_HAS_SWIFTUI
     {
@@ -1290,19 +1216,22 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
     // queue:nil = synchronous delivery, so background colors are set BEFORE
     // SwiftUI re-renders the game overlay (avoids gray flash)
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ARMSX2iOSRequestVMBoot"
-                                                  object:nil
-                                                   queue:nil
-                                              usingBlock:^(NSNotification * _Nonnull note) {
+                                                      object:nil
+                                                       queue:nil
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
         Console.WriteLn("[UI] VM boot requested from UI (rootVC=%p)", s_rootVC);
-        ARMSX2PrepareGameRenderViewForCurrentRenderer("vm_boot_request");
         if (s_rootVC) s_rootVC.view.backgroundColor = [UIColor blackColor];
+#if TARGET_OS_SIMULATOR
+        [self startVMThread];
+#else
         [self checkJITAndStartVM];
+#endif
     }];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ARMSX2iOSRequestVMShutdown"
-                                                  object:nil
-                                                   queue:nil
-                                              usingBlock:^(NSNotification * _Nonnull note) {
+                                                      object:nil
+                                                       queue:nil
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
         Console.WriteLn("[UI] VM shutdown requested from UI");
         s_requestVMStop.store(true);
     }];
@@ -1312,9 +1241,9 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
     // rootVC stays black after first boot — eliminates white flash during VM restart.
 
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ARMSX2iOSVMDidShutdown"
-                                                  object:nil
-                                                   queue:nil
-                                              usingBlock:^(NSNotification * _Nonnull note) {
+                                                      object:nil
+                                                       queue:nil
+                                                  usingBlock:^(NSNotification * _Nonnull note) {
         // No rootVC background change — SwiftUI handles menu bg
     }];
 
@@ -1351,7 +1280,11 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
 #else
     // Fallback: no SwiftUI — auto-boot like before
     if (!EmuConfig.BaseFilenames.Bios.empty() && FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str())) {
+#if TARGET_OS_SIMULATOR
+        [self startVMThread];
+#else
         [self checkJITAndStartVM];
+#endif
     } else {
         Console.Warning("No valid BIOS found. Showing selection UI.");
         if (self.startBiosButton) {
@@ -1365,25 +1298,25 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
 - (void)checkAndConfigureBIOS {
     std::string dataRoot = EmuFolders::DataRoot;
     std::string biosDir = dataRoot + "/bios";
-
-    // 0. [ARMSX2 iOS] Check Env Var Override (ARMSX2_BIOS_PATH)
+    
+    // 0. [iPSX2] Check Env Var Override (ARMSX2_BIOS_PATH)
     const char* envBios = getenv("ARMSX2_BIOS_PATH");
     // Simulator: use ARMSX2_BIOS_PATH env var or auto-scan Documents/bios/
     // Real device: BIOS must be placed in Documents/bios/ via Files app
     Console.WriteLn("@@BIOS_DIR@@ path=\"%s\"", biosDir.c_str());
-
+    
     if (envBios) {
         bool exists = FileSystem::FileExists(envBios);
         Console.WriteLn("@@BIOS_ENV@@ exists=%d", exists ? 1 : 0);
-
+        
         if (exists) {
             // Copy to EmuFolders::Bios to ensure sandbox compliance
             struct stat st = {0};
             if (stat(biosDir.c_str(), &st) == -1) mkdir(biosDir.c_str(), 0755);
-
+            
             std::string fileName(Path::GetFileName(envBios));
             std::string destPath = Path::Combine(biosDir, fileName);
-
+            
             // Only copy if source != dest
             if (std::string(envBios) != destPath) {
                 FILE *src = fopen(envBios, "rb");
@@ -1400,7 +1333,7 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
                      if (dst) fclose(dst);
                 }
             }
-
+            
             EmuConfig.BaseFilenames.Bios = fileName;
             if (s_settings_interface) {
                 s_settings_interface->SetStringValue("Filenames", "BIOS", EmuConfig.BaseFilenames.Bios.c_str());
@@ -1471,7 +1404,7 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
     std::string bundleDir = [resourcePath UTF8String];
     FileSystem::FindResultsArray bundleResults;
 
-    // [ARMSX2 iOS] Support "BiosFiles" folder reference
+    // [iPSX2] Support "BiosFiles" folder reference
     std::string bfDir = bundleDir + "/BiosFiles";
     if (FileSystem::FindFiles(bfDir.c_str(), "*", FILESYSTEM_FIND_FILES, &bundleResults)) {
         for (const auto& fd : bundleResults) {
@@ -1496,7 +1429,7 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
                  Console.WriteLn("Found BIOS in Bundle: %s. Copying...", fd.FileName.c_str());
                  std::string srcPath = bundleDir + "/" + fd.FileName;
                  std::string destPath = biosDir + "/" + fd.FileName;
-
+                 
                  struct stat st = {0};
                  if (stat(biosDir.c_str(), &st) == -1) mkdir(biosDir.c_str(), 0755);
 
@@ -1516,7 +1449,7 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
              }
         }
     }
-
+    
     Console.Warning("No BIOS found automatically.");
     EmuConfig.BaseFilenames.Bios.clear();
 }
@@ -1533,33 +1466,38 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
-
+    
     NSURL *url = urls.firstObject;
     Console.WriteLn("User picked file: %s", [[url path] UTF8String]);
-
+    
     // Copy to Documents/bios
     std::string biosDir = EmuFolders::DataRoot + "/bios";
     struct stat st = {0};
     if (stat(biosDir.c_str(), &st) == -1) mkdir(biosDir.c_str(), 0755);
-
+    
     NSString *destPath = [NSString stringWithFormat:@"%s/%@", biosDir.c_str(), [url lastPathComponent]];
     NSError *error = nil;
-
+    
     // Remove if exists
     [[NSFileManager defaultManager] removeItemAtPath:destPath error:nil];
-
+    
     if ([[NSFileManager defaultManager] copyItemAtURL:url toURL:[NSURL fileURLWithPath:destPath] error:&error]) {
         Console.WriteLn("Imported BIOS to: %s", [destPath UTF8String]);
-
+        
         std::string fileName = [[destPath lastPathComponent] UTF8String];
         EmuConfig.BaseFilenames.Bios = fileName;
-
+        
         // Hide button and start VM
         dispatch_async(dispatch_get_main_queue(), ^{
             self.startBiosButton.hidden = YES;
         });
-
+        
+#if TARGET_OS_SIMULATOR
+        [self startVMThread];
+#else
         [self checkJITAndStartVM];
+#endif
+
     } else {
         Console.Error("Failed to import BIOS: %s", [[error localizedDescription] UTF8String]);
         Host::ReportErrorAsync("Import Failed", [[error localizedDescription] UTF8String]);
@@ -1569,183 +1507,84 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
 // JIT availability check for real device — fallback to Interpreter if JIT unavailable
 // CS_DEBUGGED check only (DolphiniOS approach) — no blocking, runs on main thread
 - (void)checkJITAndStartVM {
-#if ARMSX2_APPLE_IOS_DEVICE
-    const bool force_ee_interp = (DarwinMisc::ARMSX2_FORCE_EE_INTERP != 0);
-    const bool force_jit = (DarwinMisc::ARMSX2_FORCE_JIT != 0);
-    const bool jit_available = force_jit || (!force_ee_interp && DarwinMisc::IsJITAvailable());
-    const bool jit_unavailable = !force_ee_interp && !force_jit && !jit_available;
-    const bool config_interpreter = ARMSX2IOSConfigRequestsInterpreter(s_settings_interface);
-    const char* fallback_reason =
-        force_ee_interp ? "env_force_ee_interp" :
-        (config_interpreter ? "config_interpreter" :
-        (jit_unavailable ? "jit_unavailable" : "none"));
-
-    Console.WriteLn("@@JIT_GATE@@ force_ee_interp=%d force_jit=%d jit_available=%d config_interpreter=%d fallback_reason=%s",
-        force_ee_interp ? 1 : 0, force_jit ? 1 : 0, jit_available ? 1 : 0, config_interpreter ? 1 : 0,
-        fallback_reason);
-
-    if (!jit_available || force_ee_interp || config_interpreter) {
-        if (s_settings_interface) {
-            if (jit_unavailable)
-                ARMSX2SetAutoNoJitFallback(s_settings_interface);
-            ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
-            s_settings_interface->Save();
-        }
-        DarwinMisc::ForceNoJitMode();
-        Console.WriteLn("@@JIT_GATE@@ interpreter requested — starting VM with JIT disabled");
-        [self startVMThread];
-        return;
-    }
-
-    if (jit_available) {
-        if (s_settings_interface) {
-            ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
-            s_settings_interface->Save();
-        }
+#if !TARGET_OS_SIMULATOR
+    if (DarwinMisc::IsJITAvailable()) {
         Console.WriteLn("@@JIT_GATE@@ JIT available — starting VM in JIT mode");
         [self startVMThread];
         return;
     }
 
     Console.Warning("@@JIT_GATE@@ JIT NOT available — falling back to Interpreter mode");
-    DarwinMisc::ForceNoJitMode();
-    if (s_settings_interface) {
-        ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
-        s_settings_interface->Save();
-    }
-    Console.WriteLn("@@JIT_GATE@@ ARMSX2 no-JIT mode forced");
+    DarwinMisc::iPSX2_FORCE_EE_INTERP = 1;
+    Console.WriteLn("@@JIT_GATE@@ iPSX2_FORCE_EE_INTERP forced to 1");
     [self startVMThread];
 #else
-#if ARMSX2_APPLE_MAC_RUNTIME
-    LogUnified("@@MAC_VM_JIT_GATE@@ enter settings=%p\n", s_settings_interface);
-#endif
-    if (DarwinMisc::IsJITAvailable()) {
-        if (s_settings_interface) {
-            ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
-            s_settings_interface->Save();
-        }
-#if ARMSX2_APPLE_MAC_RUNTIME
-        LogUnified("@@MAC_VM_JIT_GATE@@ map_jit_available starting\n");
-#endif
-        Console.WriteLn("@@JIT_GATE@@ MAP_JIT available — starting VM in JIT mode");
-        [self startVMThread];
-        return;
-    }
-
-#if ARMSX2_APPLE_MAC_RUNTIME
-    LogUnified("@@MAC_VM_JIT_GATE@@ map_jit_unavailable\n");
-#endif
-    Console.Error("@@JIT_GATE@@ MAP_JIT unavailable — not starting VM");
-    Host::ReportErrorAsync("JIT Unavailable", "MAP_JIT failed. For Mac Catalyst, make sure the build is signed with the allow-jit entitlement.");
+    [self startVMThread];
 #endif
 }
 
 - (void)startVMThread {
     {
         std::lock_guard<std::mutex> lk(s_vmMutex);
-#if ARMSX2_APPLE_MAC_RUNTIME
-        LogUnified("@@MAC_VM_START_REQUEST@@ active=%d created=%d request_boot=%d request_stop=%d\n",
-            s_vmThreadActive.load() ? 1 : 0, s_vmThreadCreated ? 1 : 0,
-            s_requestVMBoot.load() ? 1 : 0, s_requestVMStop.load() ? 1 : 0);
-#endif
         if (s_vmThreadActive.load()) {
             Console.WriteLn("[VM] startVMThread: VM already active, ignoring");
-#if ARMSX2_APPLE_MAC_RUNTIME
-            LogUnified("@@MAC_VM_START_REQUEST@@ ignored_already_active\n");
-#endif
             return;
         }
 
+        // Signal the persistent thread to boot
         s_requestVMBoot.store(true);
         s_requestVMStop.store(false);
 
         if (s_vmThreadCreated) {
             Console.WriteLn("[VM] startVMThread: signaling existing VM thread");
-#if ARMSX2_APPLE_MAC_RUNTIME
-            LogUnified("@@MAC_VM_START_REQUEST@@ signal_existing_thread\n");
-#endif
             s_vmCV.notify_one();
             return;
         }
 
+        // First call: create the persistent thread
         s_vmThreadCreated = true;
     }
 
     Console.WriteLn("[VM] Creating persistent VM thread...");
-#if ARMSX2_APPLE_MAC_RUNTIME
-    LogUnified("@@MAC_VM_THREAD_CREATE@@ new_thread=1\n");
-#endif
 
     std::thread vmThread([]() {
-        {
-            std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
-            s_cpuThreadId = std::this_thread::get_id();
-        }
-
-#if ARMSX2_APPLE_MAC_RUNTIME
-        LogUnified("@@MAC_VM_THREAD_ENTER@@\n");
-#endif
+        // === ONE-TIME INIT (runs once per app lifetime) ===
         Console.WriteLn("[VM] VM Thread: CPUThreadInitialize (once)...");
         if (!VMManager::Internal::CPUThreadInitialize()) {
             Console.Error("VM Thread: CPUThreadInitialize failed.");
-#if ARMSX2_APPLE_MAC_RUNTIME
-            LogUnified("@@MAC_VM_CPU_THREAD_INIT@@ ok=0\n");
-#endif
             std::lock_guard<std::mutex> lk(s_vmMutex);
             s_vmThreadCreated = false;
             return;
         }
-#if ARMSX2_APPLE_MAC_RUNTIME
-        LogUnified("@@MAC_VM_CPU_THREAD_INIT@@ ok=1\n");
-#endif
 
+        // Set ImGui font path (once)
         std::string fontPath = Path::Combine(EmuFolders::Resources, "fonts/Roboto-Regular.ttf");
         ImGuiManager::SetFontPathAndRange(std::move(fontPath), {});
 
+        // === PERSISTENT BOOT LOOP ===
         bool auto_boot_first = (getenv("ARMSX2_AUTO_BOOT") && atoi(getenv("ARMSX2_AUTO_BOOT")) == 1)
                             || (getenv("ARMSX2_BOOT_ELF") != nullptr);
         while (true) {
+            // Wait for boot signal (or auto-boot on first iteration)
             {
                 std::unique_lock<std::mutex> lk(s_vmMutex);
                 if (auto_boot_first) {
                     Console.WriteLn("[AutoBoot] @@AUTO_BOOT@@ skipping UI wait, auto-boot enabled");
                     auto_boot_first = false;
-#if ARMSX2_APPLE_MAC_RUNTIME
-                    LogUnified("@@MAC_VM_WAIT@@ auto_boot_first\n");
-#endif
                 } else {
                     Console.WriteLn("[VM] VM Thread: waiting for boot request...");
-#if ARMSX2_APPLE_MAC_RUNTIME
-                    LogUnified("@@MAC_VM_WAIT@@ begin request_boot=%d\n", s_requestVMBoot.load() ? 1 : 0);
-#endif
                     s_vmCV.wait(lk, [] { return s_requestVMBoot.load(); });
-#if ARMSX2_APPLE_MAC_RUNTIME
-                    LogUnified("@@MAC_VM_WAIT@@ woke request_boot=%d request_stop=%d\n",
-                        s_requestVMBoot.load() ? 1 : 0, s_requestVMStop.load() ? 1 : 0);
-#endif
                 }
                 s_requestVMBoot.store(false);
             }
 
             Console.WriteLn("[VM] VM Thread: boot signal received, preparing boot params...");
-#if ARMSX2_APPLE_MAC_RUNTIME
-            LogUnified("@@MAC_VM_BOOT_SIGNAL@@ active_before=%d\n", s_vmThreadActive.load() ? 1 : 0);
-#endif
             s_vmThreadActive.store(true);
 
+            // --- Build boot parameters from INI ---
             VMBootParameters boot_params;
             boot_params.fast_boot = false;
             {
-                if (!s_settings_interface) {
-#if ARMSX2_APPLE_MAC_RUNTIME
-                    LogUnified("@@MAC_VM_BOOT_ABORT@@ reason=no_settings_interface\n");
-#endif
-                    s_vmThreadActive.store(false);
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
-                    });
-                    continue;
-                }
                 std::string isoDir = EmuFolders::DataRoot + "/iso";
                 std::string defaultISO = "";
                 std::string isoFilename = s_settings_interface->GetStringValue("GameISO", "BootISO", defaultISO.c_str());
@@ -1780,19 +1619,13 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
                 } else {
                     Console.WriteLn("@@ISO_BOOT@@ no ISO='%s', falling back to BIOS only", isoFilename.c_str());
                 }
-#if ARMSX2_APPLE_MAC_RUNTIME
-                const bool mac_fast_boot_value = boot_params.fast_boot.value_or(false);
-                LogUnified("@@MAC_VM_BOOT_ISO@@ iso_name=%s iso_path=%s source_type=%d fast_boot=%d\n",
-                    isoFilename.c_str(), isoPath.c_str(),
-                    boot_params.source_type.has_value() ? static_cast<int>(*boot_params.source_type) : -1,
-                    mac_fast_boot_value ? 1 : 0);
-#endif
             }
 
             if (getenv("ARMSX2_AUTO_BOOT_BIOS")) {
                 Console.WriteLn("@@AUTO_BOOT_BIOS@@ enabled=1 action=triggered");
                 boot_params.fast_boot = false;
             }
+            // ps2autotests: boot ELF directly via env var
             if (const char* testElf = getenv("ARMSX2_BOOT_ELF")) {
                 boot_params.elf_override = testElf;
                 boot_params.source_type = CDVD_SourceType::NoDisc;
@@ -1800,171 +1633,73 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
                 Console.WriteLn("@@BOOT_ELF@@ elf=%s", testElf);
             }
 
-            const std::string bios_path = Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios);
-			const std::string selected_game_path =
-				!boot_params.elf_override.empty() ? boot_params.elf_override :
-				(!boot_params.filename.empty() ? boot_params.filename : std::string());
-			const bool boot_arm64_dynarec =
-				s_settings_interface ? s_settings_interface->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", EmuConfig.Cpu.CoreType == 2) :
-				(EmuConfig.Cpu.CoreType == 2);
-#if ARMSX2_APPLE_MAC_RUNTIME
-			const bool boot_jit_available = true;
-			const bool boot_no_jit_active = false;
-			const char* boot_fallback_reason = "none";
-#else
-            const bool boot_force_ee_interp = (DarwinMisc::ARMSX2_FORCE_EE_INTERP != 0);
-            const bool boot_force_jit = (DarwinMisc::ARMSX2_FORCE_JIT != 0);
-            const bool boot_jit_available = boot_force_jit || (!boot_force_ee_interp && DarwinMisc::IsJITAvailable());
-            const bool boot_no_jit_active = boot_force_ee_interp || (!boot_force_jit && !boot_jit_available) || EmuConfig.Cpu.CoreType == 1;
-            const char* boot_fallback_reason =
-                boot_force_ee_interp ? "env_force_ee_interp" :
-                (EmuConfig.Cpu.CoreType == 1 ? "config_interpreter" :
-                (!boot_jit_available ? "jit_unavailable" : "none"));
-#endif
-            Console.WriteLn(
-                "@@IOS_BOOT_DIAG@@ config_path=%s data_root=%s bios_dir=%s bios_name=\"%s\" bios_path=%s bios_exists=%d game_path=%s renderer=%d core_type=%d arm64_dynarec=%d ee_rec=%d iop_rec=%d vu0_rec=%d vu1_rec=%d fastmem=%d jit_available=%d no_jit_active=%d fallback_reason=%s",
-				s_iosSettingsPath.c_str(), EmuFolders::DataRoot.c_str(), EmuFolders::Bios.c_str(),
-				EmuConfig.BaseFilenames.Bios.c_str(), bios_path.c_str(), FileSystem::FileExists(bios_path.c_str()) ? 1 : 0,
-				selected_game_path.c_str(), static_cast<int>(EmuConfig.GS.Renderer), EmuConfig.Cpu.CoreType,
-				boot_arm64_dynarec ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0,
-				EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0,
-				EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableFastmem ? 1 : 0,
-				boot_jit_available ? 1 : 0, boot_no_jit_active ? 1 : 0, boot_fallback_reason);
-#if ARMSX2_APPLE_MAC_RUNTIME
-            const bool mac_fast_boot_value = boot_params.fast_boot.value_or(false);
-            LogUnified("@@MAC_VM_BOOT_PARAMS@@ filename=%s elf=%s source_type=%d fast_boot=%d bios_name=%s bios_path=%s bios_exists=%d renderer=%d cpu_core=%d rec_ee=%d rec_iop=%d rec_vu0=%d rec_vu1=%d\n",
-                boot_params.filename.c_str(), boot_params.elf_override.c_str(),
-                boot_params.source_type.has_value() ? static_cast<int>(*boot_params.source_type) : -1,
-                mac_fast_boot_value ? 1 : 0,
-                EmuConfig.BaseFilenames.Bios.c_str(), bios_path.c_str(),
-                FileSystem::FileExists(bios_path.c_str()) ? 1 : 0,
-                static_cast<int>(EmuConfig.GS.Renderer), EmuConfig.Cpu.CoreType,
-                EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0,
-                EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0);
-#endif
-            if (EmuConfig.BaseFilenames.Bios.empty() || !FileSystem::FileExists(bios_path.c_str())) {
+            // BIOS sanity check
+            if (EmuConfig.BaseFilenames.Bios.empty() || !FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str())) {
                 Console.Error("CRITICAL: BIOS verification failed inside VM thread.");
-#if ARMSX2_APPLE_MAC_RUNTIME
-                LogUnified("@@MAC_VM_BOOT_ABORT@@ reason=bios_verification_failed\n");
-#endif
                 Host::ReportErrorAsync("BIOS Error", "Validation failed.");
                 s_vmThreadActive.store(false);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
                 });
-                continue;
+                continue; // back to wait loop
             }
 
-#if ARMSX2_APPLE_MAC_RUNTIME
-            LogUnified("@@MAC_VM_INITIALIZE_BEGIN@@ state=%d\n", static_cast<int>(VMManager::GetState()));
-#endif
-            const bool initialized = VMManager::Initialize(boot_params);
-#if ARMSX2_APPLE_MAC_RUNTIME
-            LogUnified("@@MAC_VM_INITIALIZE_END@@ ok=%d state=%d\n", initialized ? 1 : 0, static_cast<int>(VMManager::GetState()));
-#endif
-
-            if (initialized) {
+            // --- Initialize & Execute VM ---
+            if (VMManager::Initialize(boot_params)) {
                 Console.WriteLn("[VM] VM initialized successfully");
                 VMManager::SetState(VMState::Running);
-#if ARMSX2_APPLE_MAC_RUNTIME
-                LogUnified("@@MAC_VM_SET_RUNNING@@ state=%d\n", static_cast<int>(VMManager::GetState()));
-#endif
 
-                u64 execute_count = 0;
                 while (true) {
                     if (s_requestVMStop.load()) {
                         Console.WriteLn("[VM] VM Thread: stop requested from UI.");
-#if ARMSX2_APPLE_MAC_RUNTIME
-                        LogUnified("@@MAC_VM_EXEC_LOOP_EXIT@@ reason=stop_requested count=%llu state=%d\n",
-                            static_cast<unsigned long long>(execute_count), static_cast<int>(VMManager::GetState()));
-#endif
                         break;
                     }
                     VMState state = VMManager::GetState();
                     if (state == VMState::Stopping || state == VMState::Shutdown) {
                         Console.WriteLn("[VM] VM Thread: shutdown signal received.");
-#if ARMSX2_APPLE_MAC_RUNTIME
-                        LogUnified("@@MAC_VM_EXEC_LOOP_EXIT@@ reason=state count=%llu state=%d\n",
-                            static_cast<unsigned long long>(execute_count), static_cast<int>(state));
-#endif
                         break;
                     } else if (state == VMState::Running) {
-#if ARMSX2_APPLE_MAC_RUNTIME
-                        if (execute_count < 8 || ((execute_count % 120) == 0))
-                            LogUnified("@@MAC_VM_EXECUTE_ENTER@@ count=%llu state=%d\n",
-                                static_cast<unsigned long long>(execute_count), static_cast<int>(state));
-#endif
                         VMManager::Execute();
-#if ARMSX2_APPLE_MAC_RUNTIME
-                        if (execute_count < 8 || ((execute_count % 120) == 0))
-                            LogUnified("@@MAC_VM_EXECUTE_RETURN@@ count=%llu state=%d\n",
-                                static_cast<unsigned long long>(execute_count), static_cast<int>(VMManager::GetState()));
-#endif
-                        execute_count++;
                     } else {
-                        ARMSX2DrainCPUThreadTasks();
-#if ARMSX2_APPLE_MAC_RUNTIME
-                        static unsigned s_mac_vm_sleep_log_count = 0;
-                        if (s_mac_vm_sleep_log_count < 16 || ((s_mac_vm_sleep_log_count % 120) == 0))
-                            LogUnified("@@MAC_VM_EXEC_SLEEP@@ count=%u state=%d\n", s_mac_vm_sleep_log_count, static_cast<int>(state));
-                        s_mac_vm_sleep_log_count++;
-#endif
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
                 }
 
                 Console.WriteLn("[VM] VM Thread: shutting down VM...");
-#if ARMSX2_APPLE_MAC_RUNTIME
-                LogUnified("@@MAC_VM_SHUTDOWN_BEGIN@@ state=%d\n", static_cast<int>(VMManager::GetState()));
-#endif
                 VMManager::Shutdown(false);
-#if ARMSX2_APPLE_MAC_RUNTIME
-                LogUnified("@@MAC_VM_SHUTDOWN_END@@ state=%d\n", static_cast<int>(VMManager::GetState()));
-#endif
             } else {
                 Console.Error("VM Thread: VMManager::Initialize failed!");
-#if ARMSX2_APPLE_MAC_RUNTIME
-                LogUnified("@@MAC_VM_INITIALIZE_FAILED@@ state=%d\n", static_cast<int>(VMManager::GetState()));
-#endif
                 Host::ReportErrorAsync("Startup Error", "VM Initialization Failed.");
             }
 
+            // --- Post-shutdown: reset state, notify UI ---
             s_vmThreadActive.store(false);
             s_requestVMStop.store(false);
             Console.WriteLn("[VM] VM Thread: shutdown complete, posting notification");
-#if ARMSX2_APPLE_MAC_RUNTIME
-            LogUnified("@@MAC_VM_POST_SHUTDOWN_NOTIFY@@ active=%d created=%d\n",
-                s_vmThreadActive.load() ? 1 : 0, s_vmThreadCreated ? 1 : 0);
-#endif
             dispatch_async(dispatch_get_main_queue(), ^{
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
             });
-        }
+        } // end while(true) boot loop
+
+        // Note: CPUThreadShutdown() is never reached because the thread persists.
+        // It would only be needed if we added an app-termination signal.
     });
     vmThread.detach();
 }
 
 - (void)sceneDidDisconnect:(UIScene *)scene {
-    Console.WriteLn("@@IOS_LIFECYCLE@@ sceneDidDisconnect vm_state=%d active=%d",
-        static_cast<int>(VMManager::GetState()), s_vmThreadActive.load() ? 1 : 0);
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene {
-    Console.WriteLn("@@IOS_LIFECYCLE@@ sceneDidBecomeActive vm_state=%d active=%d",
-        static_cast<int>(VMManager::GetState()), s_vmThreadActive.load() ? 1 : 0);
 }
 
 - (void)sceneWillResignActive:(UIScene *)scene {
 // NVM save when app loses focus
     extern void cdvdSaveNVRAM();
     cdvdSaveNVRAM();
-    Console.WriteLn("@@IOS_LIFECYCLE@@ sceneWillResignActive vm_state=%d active=%d saved_nvram=1",
-        static_cast<int>(VMManager::GetState()), s_vmThreadActive.load() ? 1 : 0);
 }
 
 - (void)sceneWillEnterForeground:(UIScene *)scene {
-    Console.WriteLn("@@IOS_LIFECYCLE@@ sceneWillEnterForeground vm_state=%d active=%d",
-        static_cast<int>(VMManager::GetState()), s_vmThreadActive.load() ? 1 : 0);
 }
 
 - (void)sceneDidEnterBackground:(UIScene *)scene {
@@ -1974,28 +1709,25 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
     // happens when iOS terminates the app via SIGTERM.
     extern void cdvdSaveNVRAM();
     cdvdSaveNVRAM();
-    Console.WriteLn("@@IOS_LIFECYCLE@@ sceneDidEnterBackground vm_state=%d active=%d saved_nvram=1",
-        static_cast<int>(VMManager::GetState()), s_vmThreadActive.load() ? 1 : 0);
+    Console.WriteLn("[NVM] NVM saved on sceneDidEnterBackground");
 }
 
 @end
 
 
-@interface ARMSX2AppDelegate : UIResponder <UIApplicationDelegate>
+@interface PCSX2AppDelegate : UIResponder <UIApplicationDelegate>
 @end
 
-@implementation ARMSX2AppDelegate
+@implementation PCSX2AppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    NSSetUncaughtExceptionHandler(&ARMSX2UncaughtExceptionHandler);
-
     // Override point for customization after application launch.
-
-    // --- Setup ARMSX2 Environment (Moved from SceneDelegate) ---
+    
+    // --- Setup PCSX2 Environment (Moved from SceneDelegate) ---
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *documentsDirectory = [paths objectAtIndex:0];
     NSString *resourcePath = [[NSBundle mainBundle] resourcePath];
-
+    
     std::string dataRoot = [documentsDirectory UTF8String];
     EmuFolders::DataRoot = dataRoot;
     EmuFolders::AppRoot = [resourcePath UTF8String];
@@ -2007,46 +1739,49 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
     // --- Unified Logging Redirection ---
     // Force stderr and stdout to pcsx2_log.txt
     std::string logPath = dataRoot + "/pcsx2_log.txt";
-
+    
     // Redirect stderr to file
     if (freopen(logPath.c_str(), "w", stderr) == NULL) { // "w" clears old logs
         printf("Reopen stderr failed\n");
     }
-
+    
     // Redirect stdout to stderr
     if (dup2(fileno(stderr), fileno(stdout)) == -1) {
         fprintf(stderr, "Redirection of stdout failed\n");
     }
-
+    
     // Disable buffering
     setvbuf(stderr, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
-
-    // [ARMSX2 iOS] Register File Descriptor for Signal Handler
+    
+    // [iPSX2] Register File Descriptor for Signal Handler
     // We use the raw file descriptor of stderr (which is now our log file)
     DarwinMisc::SetCrashLogFD(fileno(stderr));
-
+    
     // Log Proof Tag
     fprintf(stderr, "@@LOG_SINK@@ unified=1 path=%s pid=%d\n", logPath.c_str(), getpid());
-#if ARMSX2_APPLE_MAC_RUNTIME
-    std::remove("/tmp/armsx2_maccatalyst_trace.log");
-#endif
-    LogUnified("@@LOG_UNIFIED_READY@@ path=%s extra=/tmp/armsx2_maccatalyst_trace.log pid=%d\n", logPath.c_str(), getpid());
     NSString* bundleID = [[NSBundle mainBundle] bundleIdentifier];
     fprintf(stderr, "@@BUNDLE_ID@@ %s\n", bundleID ? [bundleID UTF8String] : "(null)");
-    fprintf(stderr, "@@BUILD_ID@@ %s_%s_%s\n", ARMSX2_GIT_HASH, __DATE__, __TIME__);
-
-    // [ARMSX2 iOS] Unification Validation
+#ifndef ARMSX2_VERSION_STR
+#define ARMSX2_VERSION_STR "dev"
+#endif
+#ifndef ARMSX2_GIT_HASH
+#define ARMSX2_GIT_HASH "unknown"
+#endif
+    fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
+        ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
+    
+    // [iPSX2] Unification Validation
     // @@BIOS_GATE@@ build_id=2026-01-14_13-30-00 bundle=(from_nsbundle)
     NSString* bID = [[NSBundle mainBundle] bundleIdentifier];
     const char* cBundle = bID ? [bID UTF8String] : "(null)";
     fprintf(stderr, "@@BIOS_GATE@@ build_id=2026-01-17_PROBE bundle=%s\n", cBundle);
     fprintf(stderr, "@@LOG_UNIFIED@@ pcsx2_log.txt includes emulog output; emulog.txt disabled=1\n");
-
+    
 // DYLD Map — debug builds only
 #if DEBUG
     {
-        fprintf(stderr, "@@CFG@@ ARMSX2_CRASH_DIAG=1 (DYLD Dump Enabled)\n");
+        fprintf(stderr, "@@CFG@@ iPSX2_CRASH_DIAG=1 (DYLD Dump Enabled)\n");
         uint32_t count = _dyld_image_count();
         for (uint32_t i = 0; i < count; i++) {
             const char* name = _dyld_get_image_name(i);
@@ -2058,11 +1793,11 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
 #endif
     fflush(stderr);
 
-    // Enable emulator console output only (std::cout/cerr will now go to file)
+    // Enable PCSX2 Console Output only (std::cout/cerr will now go to file)
     Log::SetConsoleOutputLevel(LOGLEVEL::LOGLEVEL_INFO);
-
-    Console.WriteLn("ARMSX2 iOS: AppDelegate didFinishLaunching.");
-
+    
+    Console.WriteLn("PCSX2 iOS: AppDelegate didFinishLaunching.");
+    
     return YES;
 }
 
@@ -2070,7 +1805,7 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
     // Called when a new scene session is being created.
     // Use this method to select a configuration to create the new scene with.
     UISceneConfiguration *config = [[UISceneConfiguration alloc] initWithName:@"Default Configuration" sessionRole:connectingSceneSession.role];
-    config.delegateClass = [ARMSX2SceneDelegate class];
+    config.delegateClass = [PCSX2SceneDelegate class];
     return config;
 }
 
@@ -2091,9 +1826,10 @@ static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
 
 int main(int argc, char * argv[]) {
     // InstallSignalHandler(); // Removed
-
+    
     @autoreleasepool {
         // SDL_MAIN_HANDLED is set, so we use standard main()
-        return UIApplicationMain(argc, argv, nil, NSStringFromClass([ARMSX2AppDelegate class]));
+        return UIApplicationMain(argc, argv, nil, NSStringFromClass([PCSX2AppDelegate class]));
     }
 }
+#endif // iPSX2_MACOS

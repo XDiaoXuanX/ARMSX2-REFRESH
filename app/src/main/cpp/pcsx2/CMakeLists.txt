@@ -26,9 +26,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 	set(_M_ARM64 TRUE)
 	target_compile_definitions(PCSX2_FLAGS INTERFACE
 		"_M_ARM64=1"
-		"PCSX2_ARM64_DYNAREC=1"
 	)
 endif()
+
 target_compile_options(PCSX2_FLAGS INTERFACE "${PCSX2_WARNINGS}")
 
 # Check that people use the good file
@@ -519,7 +519,6 @@ set(pcsx2GSSources
 	GS/Renderers/Common/GSDevice.cpp
 	GS/Renderers/Common/GSDirtyRect.cpp
 	GS/Renderers/Common/GSFunctionMap.cpp
-	GS/Renderers/Common/GSGPUProfile.cpp
 	GS/Renderers/Common/GSRenderer.cpp
 	GS/Renderers/Common/GSTexture.cpp
 	GS/Renderers/Common/GSVertexTrace.cpp
@@ -561,7 +560,6 @@ set(pcsx2GSHeaders
 	GS/Renderers/Common/GSDirtyRect.h
 	GS/Renderers/Common/GSFastList.h
 	GS/Renderers/Common/GSFunctionMap.h
-	GS/Renderers/Common/GSGPUProfile.h
 	GS/Renderers/Common/GSRenderer.h
 	GS/Renderers/Common/GSTexture.h
 	GS/Renderers/Common/GSVertex.h
@@ -607,14 +605,6 @@ if(USE_OPENGL)
 		GS/Renderers/OpenGL/GSDeviceOGL.cpp
 		GS/Renderers/OpenGL/GSTextureOGL.cpp
 	)
-	if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-		set(IOS_GLAD_SOURCE "${CMAKE_SOURCE_DIR}/3rdparty/glad/src/glad.c")
-		list(APPEND pcsx2GSSources "${IOS_GLAD_SOURCE}")
-		set_source_files_properties("${IOS_GLAD_SOURCE}" PROPERTIES
-			COMPILE_FLAGS "-I${CMAKE_SOURCE_DIR}/3rdparty/glad/include")
-		target_include_directories(PCSX2_FLAGS INTERFACE "${CMAKE_SOURCE_DIR}/3rdparty/glad/include")
-		target_include_directories(PCSX2 PRIVATE "${CMAKE_SOURCE_DIR}/3rdparty/glad/include")
-	endif()
 	list(APPEND pcsx2GSHeaders
 		GS/Renderers/OpenGL/GLContext.h
 		GS/Renderers/OpenGL/GLProgram.h
@@ -624,9 +614,7 @@ if(USE_OPENGL)
 		GS/Renderers/OpenGL/GSDeviceOGL.h
 		GS/Renderers/OpenGL/GSTextureOGL.h
 	)
-	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-		target_link_libraries(PCSX2_FLAGS INTERFACE glad)
-	endif()
+	target_link_libraries(PCSX2_FLAGS INTERFACE glad)
 
 	if(WIN32)
 		list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextWGL.cpp)
@@ -641,14 +629,6 @@ if(USE_OPENGL)
 			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGL.h)
 			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEGLAndroid.cpp)
 			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGLAndroid.h)
-		elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEAGL.mm)
-			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEAGL.h)
-			target_link_libraries(PCSX2_FLAGS INTERFACE
-				"-framework OpenGLES"
-				"-framework QuartzCore"
-				"-framework UIKit"
-			)
 		endif()
 
 		if(X11_API)
@@ -1043,6 +1023,7 @@ set(pcsx2x86Sources
 	x86/ix86-32/iR5900Shift.cpp
 	x86/ix86-32/iR5900Templates.cpp
 	x86/ix86-32/recVTLB.cpp
+	x86/microVU.cpp
 #	x86/Vif_Dynarec.cpp
 #	x86/Vif_UnpackSSE.cpp
 	)
@@ -1089,6 +1070,7 @@ set(pcsx2x86Headers
 	)
 
 # ARM64
+# ARM64
 set(pcsx2arm64Sources
 	arm64/Vif_Dynarec.cpp
 	arm64/Vif_UnpackNEON.cpp
@@ -1119,7 +1101,7 @@ set(pcsx2arm64RecSources
 	x86/ix86-32/iR5900Shift.cpp
 	x86/ix86-32/iR5900Templates.cpp
 	x86/ix86-32/recVTLB.cpp
-	x86/microVU.cpp
+    x86/microVU.cpp
 )
 
 set(pcsx2arm64Headers
@@ -1142,9 +1124,11 @@ if(_M_X86)
 	list(APPEND pcsx2LTOSources ${pcsx2x86Sources} ${pcsx2x86Headers})
 #	target_link_libraries(PCSX2_FLAGS INTERFACE zydis)
 elseif(_M_ARM64)
+	message(STATUS "DEBUG: _M_ARM64 is TRUE")
+	message(STATUS "DEBUG: pcsx2arm64RecSources: ${pcsx2arm64RecSources}")
 	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers} ${pcsx2arm64RecSources})
 	target_link_libraries(PCSX2_FLAGS INTERFACE vixl)
-	target_compile_definitions(PCSX2_FLAGS INTERFACE ARMSX2_REAL_REC=1)
+	target_compile_definitions(PCSX2_FLAGS INTERFACE iPSX2_REAL_REC=1)
 endif()
 
 if(LTO_PCSX2_CORE)
@@ -1220,15 +1204,24 @@ if(APPLE OR BSD)
 		${pcsx2LinuxHeaders})
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+# [P63] macOS stubs (guarded by #if iPSX2_MACOS inside file)
+if(iPSX2_MACOS_BUILD)
+	target_sources(PCSX2 PRIVATE MacOSStubs.cpp)
+endif()
+
+# [V34] QA probe module — automated JIT vs Interpreter regression gate
+target_sources(PCSX2 PRIVATE QAProbe.cpp QAProbe.h)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR iPSX2_MACOS_BUILD)
+	# Force name-only linking for system libraries to avoid SDK path mismatch
 	set(ZLIB_LINK "z")
 	set(BZIP2_LINK "bz2")
 	set(LIBC_LIBRARIES "m")
-	set(PNG_LINK "")
+	set(PNG_LINK "") # No PNG for iOS/macOS native
 else()
 	set(ZLIB_LINK ZLIB::ZLIB)
-	set(BZIP2_LINK "")
-	set(PNG_LINK "")
+	set(BZIP2_LINK BZip2::BZip2)
+	set(PNG_LINK PNG::PNG)
 endif()
 
 target_link_libraries(PCSX2_FLAGS INTERFACE
@@ -1307,7 +1300,7 @@ elseif(ANDROID)
 		${log-lib}
 	)
 else()
-	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT iPSX2_MACOS_BUILD)
 		target_link_libraries(PCSX2_FLAGS INTERFACE
 			PCAP::PCAP
 		)
@@ -1362,7 +1355,7 @@ endfunction()
 if (NOT APPLE)
 	if (NOT ANDROID)
 		set_target_properties(PCSX2 PROPERTIES
-			OUTPUT_NAME pcsx2
+			OUTPUT_NAME iPSX2iOS
 		)
 	endif()
 endif()
@@ -1514,10 +1507,17 @@ function(setup_main_executable target)
 			MACOSX_BUNDLE true
 			MACOSX_BUNDLE_INFO_PLIST "${PCSX2_SOURCE_DIR}/Resources/Info.plist.in"
 			XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${PCSX2_SOURCE_DIR}/Resources/PCSX2.entitlements"
-			OUTPUT_NAME PCSX2
+			OUTPUT_NAME iPSX2iOS
 			# Fixes complaints when Xcode tries to sign for running locally about MoltenVK not being signed
 			XCODE_ATTRIBUTE_OTHER_CODE_SIGN_FLAGS --deep
 		)
+
+		if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+			set_target_properties(${target} PROPERTIES
+				XCODE_ATTRIBUTE_SDKROOT iphoneos
+				XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "iphoneos iphonesimulator"
+			)
+		endif()
 
 		pcsx2_resource(${target} ${PCSX2_SOURCE_DIR}/Resources/PCSX2.icns ${PCSX2_SOURCE_DIR}/Resources)
 

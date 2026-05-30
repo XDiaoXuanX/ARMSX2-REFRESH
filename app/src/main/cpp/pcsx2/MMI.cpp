@@ -136,6 +136,21 @@ void PLZCW() {
 	if (!_Rd_)
 		return;
 
+	// [iter666] @@PLZCW_PROBE@@ DMAC dispatch 検証
+	// Removal condition: DMAC dispatch 正常after confirmed
+	{
+		s32 in0 = cpuRegs.GPR.r[_Rs_].SL[0];
+		if (in0 >= 1 && in0 <= 16) {
+			static int s_n = 0;
+			if (s_n < 20) {
+				u32 out0 = Common::CountLeadingSignBits(in0) - 1;
+				Console.WriteLn("@@PLZCW_PROBE@@ n=%d pc=%08x rs=%d rd=%d in0=%08x CLSB=%u out=%u",
+					s_n++, cpuRegs.pc, _Rs_, _Rd_, (u32)in0,
+					Common::CountLeadingSignBits(in0), out0);
+			}
+		}
+	}
+
 	// Return the leading sign bits, excluding the original bit
 	cpuRegs.GPR.r[_Rd_].UL[0] = Common::CountLeadingSignBits(cpuRegs.GPR.r[_Rs_].SL[0]) - 1;
 	cpuRegs.GPR.r[_Rd_].UL[1] = Common::CountLeadingSignBits(cpuRegs.GPR.r[_Rs_].SL[1]) - 1;

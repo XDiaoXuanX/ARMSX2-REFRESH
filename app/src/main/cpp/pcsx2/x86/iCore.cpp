@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Config.h"
+#include "Common.h"
 #include "R3000A.h"
 #include "Vif.h"
 #include "VU.h"
+#include "x86/iCore.h"
 #include "x86/iCore.h"
 #include "x86/iR5900.h"
 
@@ -15,7 +17,20 @@ using namespace x86Emitter;
 u16 g_x86AllocCounter = 0;
 u16 g_xmmAllocCounter = 0;
 
+u32 g_current_diag_pc = 0;
+
 EEINST* g_pCurInstInfo = NULL;
+
+// Helper for JIT runtime verification
+extern "C" void recLogWritebackVerify(u32 guestReg) {
+    if (guestReg < 32) {
+        Console.WriteLn("@@WB_VERIFY@@ guestReg=%d val=%08x", guestReg, cpuRegs.GPR.r[guestReg].UL[0]);
+    }
+}
+
+extern "C" void recDumpTwoHostRegs(u64 valA, u64 valB, int idxA, int idxB) {
+    Console.WriteLn("@@REG_DUMP@@ A[x%d]=%016llx B[x%d]=%016llx", idxA, valA, idxB, valB);
+}
 
 _xmmregs xmmregs[iREGCNT_XMM], s_saveXMMregs[iREGCNT_XMM];
 
@@ -28,10 +43,84 @@ void _initXMMregs()
 {
 	std::memset(xmmregs, 0, sizeof(xmmregs));
 	g_xmmAllocCounter = 0;
+    
+    // Phase A: One-time JIT verification log (early in startup)
+    static bool s_jitVerifyLogged = false;
+    if (!s_jitVerifyLogged) {
+        s_jitVerifyLogged = true;
+#if defined(__APPLE__) && defined(__aarch64__)
+        Console.WriteLn("@@JIT_VERIFY@@ iREGCNT_GPR=%u expected=5 build=%s iOS_ARM64_VIXL", 
+                        iREGCNT_GPR, __FILE__);
+        // Phase B: Verify HostGprPhys mapping (expected: 0->19, 1->20, 4->24)
+        Console.WriteLn("@@JIT_VERIFY@@ HostGprPhys(0)=%d HostGprPhys(1)=%d HostGprPhys(4)=%d",
+                        HostGprPhys(0), HostGprPhys(1), HostGprPhys(4));
+#else
+        Console.WriteLn("@@JIT_VERIFY@@ iREGCNT_GPR=%u build=%s", iREGCNT_GPR, __FILE__);
+#endif
+    }
+    
+    static bool s_log_init = false;
+    if (!s_log_init) {
+        s_log_init = true;
+        Console.WriteLn("@@REG_LIMIT@@ _initXMMregs: iREGCNT_GPR=%d iREGCNT_XMM=%d", iREGCNT_GPR, iREGCNT_XMM);
+    }
+}
+
+// Phase 0: Detection Logic (Dev Build Only)
+// Checks if the slot value being used for HostGprPhys conversion is suspicious
+// Phase 0: Detection Logic (Dev Build Only)
+// Checks if the slot value being used for HostGprPhys conversion is suspicious
+void CheckSuspiciousSlotPhase0(int slot)
+{
+#ifdef PCSX2_DEVBUILD
+    static bool s_warned_slot = false;
+    if (!s_warned_slot) {
+        // In Phase 0, iREGCNT_GPR is 25. If slot >= 25, it's definitely not a slot index.
+        // Also check for negative
+        if (slot < 0 || slot >= (int)iREGCNT_GPR) {
+            s_warned_slot = true;
+            Console.WriteLn("@@PHASE0_DETECT@@ Suspicious slot value: %d (>= iREGCNT_GPR=%d)", slot, iREGCNT_GPR);
+        }
+    }
+#endif
+}
+
+// Phase 2: Strict Error Reporting (Used when ENABLE_SLOT7_GUARD is ON)
+extern u32 g_current_diag_pc;
+extern bool g_recompilingDelaySlot;
+void ReportInvalidSlotPhase2(int slot) {
+    // This function is only called when we detected an invalid slot in HostGprPhys
+    // [iter331] JIT compile中の EE PC と delay slot フラグを記録して SLOT_FAIL occur箇所を特定
+    Console.WriteLn("@@SLOT_FAIL@@ Invalid slot index: %d. Expected 0-%d. diag_pc=%08x opcode=%08x delay=%d",
+        slot, (int)iREGCNT_GPR - 1, g_current_diag_pc, cpuRegs.code, (int)g_recompilingDelaySlot);
+    if (slot >= 19) {
+         Console.WriteLn("@@SLOT_FAIL@@ Value %d looks like a physical register index! Direct use of physical register detected.", slot);
+    }
+    // Fail Fast in Dev builds
+    pxAssert(slot >= 0 && slot < (int)iREGCNT_GPR);
 }
 
 bool _isAllocatableX86reg(int x86reg)
 {
+	// ==========================================
+	// iOS/ARM64 VIXL: Slot based allocation (Phase 3)
+	// With iREGCNT_GPR on iOS/ARM64, x86reg IS the slot number (0..iREGCNT_GPR-1)
+	// All slots are allocatable.
+	// ==========================================
+#if defined(__aarch64__) && defined(__APPLE__)
+    // In Phase 3, x86reg is a slot index (0..iREGCNT_GPR-1).
+    // All defined slots map to valid physical registers via HostGprPhys.
+    if (x86reg >= 0 && x86reg < (int)iREGCNT_GPR) return true;
+    return false;
+#elif defined(__aarch64__)
+    // Legacy / Android Logic (Physical register based)
+    // Allowed: x19, x20, x21, x22, x23, x24, x26 (callee-saved, not reserved)
+    static constexpr int kAllocatableRegs[] = {19, 20, 21, 22, 23, 24, 26};
+    for (int r : kAllocatableRegs) {
+        if (x86reg == r) return true;
+    }
+    return false;
+#else
 	// we use rax, rcx and rdx as scratch (they have special purposes...)
 	if (x86reg <= 2)
 		return false;
@@ -63,7 +152,40 @@ bool _isAllocatableX86reg(int x86reg)
 		return false;
 
 	return true;
+#endif
 }
+
+// ==========================================
+// PHASE 2: Reserved register detection
+// ==========================================
+#ifdef PCSX2_DEVBUILD
+static void AssertValidPhysGpr(int phys, const char* context, u32 pc = 0)
+{
+    // Check for reserved registers (x25, x27, x28, x29, x30, x31)
+    // These are used for: RFASTMEMBASE, RSTATE_CPU, RSTATE_PSX, recLUT, LR, SP
+    if (phys == 25 || phys == 27 || phys == 28 || phys == 29 || phys >= 30) {
+        Console.Error("@@REG_RESERVED@@ phys=%d context=%s pc=%08x", phys, context, pc);
+        pxFailRel("Reserved ARM64 register accessed! See @@REG_RESERVED@@ log.");
+    }
+    
+    // Check for clearly invalid values (too low or negative)
+#if defined(__aarch64__) && defined(__APPLE__)
+    if (phys >= 0 && phys < 19) {
+        // This could be a value that wasn't allocated by _isAllocatableX86reg
+        // Log for debugging but don't crash - it might be a scratch register
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            Console.Warning("@@REG_LOW@@ phys=%d in %s pc=%08x (expected 19-26, could be scratch)", phys, context, pc);
+        }
+    }
+#endif
+}
+#else
+#define AssertValidPhysGpr(phys, context, ...) ((void)0)
+#endif
+
+
 
 bool _hasX86reg(int type, int reg, int required_mode /*= 0*/)
 {
@@ -379,7 +501,7 @@ int _allocGPRtoXMMreg(int gprreg, int mode)
 				{
 					RALOG("Moving dirty guest reg %d from GPR %d to XMM %d\n", gprreg, hostx86reg, xmmreg);
 //					xPINSR.Q(xRegisterSSE(xmmreg), xRegister64(hostx86reg), 0);
-                    armAsm->Ins(a64::QRegister(xmmreg).V2D(), 0, a64::XRegister(hostx86reg));
+                    armAsm->Ins(a64::QRegister(xmmreg).V2D(), 0, a64::XRegister(HostGprPhys(hostx86reg)));
 					_freeX86regWithoutWriteback(hostx86reg);
 					xmmregs[xmmreg].mode |= MODE_WRITE;
 				}
@@ -579,17 +701,61 @@ void _clearNeededXMMregs()
     }
 }
 
+// Forward declaration
+void _deleteGPRtoXMMreg(int reg, int flush);
+
 // Flush is 0: _freeXMMreg. Flush in memory if MODE_WRITE. Clear inuse
 // Flush is 1: Flush in memory. But register is still valid
 // Flush is 2: like 0 ...
 // Flush is 3: drop register content
 void _deleteGPRtoX86reg(int reg, int flush)
 {
+    // [TEMP_DIAG][REMOVE_AFTER=EE_T0_LOOP_ROOTCAUSE_CONFIRMED]
+    // Core register allocator path must not call Console logging here; it can re-enter codepaths
+    // during JIT compilation and destabilize allocation state (observed SIGABRT/assert).
+
     u32 i;
-	for (i = 0; i < iREGCNT_XMM; ++i)
+	for (i = 0; i < iREGCNT_GPR; ++i)
 	{
+        // Diagnosis: Confirm Scan Reach (Filtered for T0)
+        if (false && i == 21 && reg == 8) {
+            static bool s_log_scan21 = false;
+            if (!s_log_scan21) {
+                s_log_scan21 = true;
+                Console.WriteLn("@@SCAN_21_T0@@ guestpc=%08x i=21 inuse=%d type=%d reg=%d mode=%x", 
+                    g_current_diag_pc, x86regs[i].inuse, x86regs[i].type, x86regs[i].reg, x86regs[i].mode);
+            }
+        }
+
 		if (x86regs[i].inuse && x86regs[i].type == X86TYPE_GPR && x86regs[i].reg == reg)
 		{
+            // Diagnosis D: Delete Logic Decision (Detailed)
+            if (false && reg == 8) {
+                static bool s_log_del = false;
+                if (!s_log_del) {
+                    s_log_del = true;
+                    // Check XMM fallback potential
+                    int hostRegXMM = -1;
+                    bool xmmDirty = false;
+                    for (int k=0; k<iREGCNT_XMM; ++k) {
+                        if (xmmregs[k].inuse && xmmregs[k].type == XMMTYPE_GPRREG && xmmregs[k].reg == reg) {
+                            hostRegXMM = k;
+                            xmmDirty = (xmmregs[k].mode & MODE_WRITE);
+                            break;
+                        }
+                    }
+
+                    const char* action = "SKIP";
+                    bool is_dirty = (x86regs[i].mode & MODE_WRITE);
+                    if (flush == DELETE_REG_FREE || flush == DELETE_REG_FREE_NO_WRITEBACK) action = "FREE";
+                    else if (is_dirty) action = "WRITEBACK";
+                    else if (xmmDirty) action = "XMM_CHECK"; // Just a hint
+                    else action = "NO_DIRTY";
+                    
+                    Console.WriteLn("@@T0_DELETE@@ guestpc=%08x reg=8 host=%d mapped=1 mode=%x dirty=%d action=%s reason=found flush_param=%d",
+                        g_current_diag_pc, i, x86regs[i].mode, is_dirty, action, flush);
+                }
+            }
 			switch (flush)
 			{
 				case DELETE_REG_FREE:
@@ -601,7 +767,7 @@ void _deleteGPRtoX86reg(int reg, int flush)
 					{
 						pxAssert(reg != 0);
 //						xMOV(ptr64[&cpuRegs.GPR.r[reg].UL[0]], xRegister64(i));
-                        armStore(PTR_CPU(cpuRegs.GPR.r[reg].UL[0]), a64::XRegister(i));
+                        armStore(PTR_CPU(cpuRegs.GPR.r[reg].UL[0]), a64::XRegister(HostGprPhys(i)));
 
 						// get rid of MODE_WRITE since don't want to flush again
 						x86regs[i].mode &= ~MODE_WRITE;
@@ -620,6 +786,9 @@ void _deleteGPRtoX86reg(int reg, int flush)
 			return;
 		}
 	}
+
+    // Fallback: If not found in X86 regs, check XMM regs (e.g. for ARM64/NEON mapped GPRs)
+    _deleteGPRtoXMMreg(reg, flush);
 }
 
 void _deletePSXtoX86reg(int reg, int flush)
@@ -640,7 +809,7 @@ void _deletePSXtoX86reg(int reg, int flush)
 					{
 						pxAssert(reg != 0);
 //						xMOV(ptr32[&psxRegs.GPR.r[reg]], xRegister32(i));
-                        armStore(PTR_CPU(psxRegs.GPR.r[reg]), a64::WRegister(i));
+                        armStore(PTR_CPU(psxRegs.GPR.r[reg]), a64::WRegister(HostGprPhys(i)));
 
 						// get rid of MODE_WRITE since don't want to flush again
 						x86regs[i].mode &= ~MODE_WRITE;
@@ -858,6 +1027,36 @@ int _allocVFtoXMMreg(int vfreg, int mode)
 	}
 
 	return xmmreg;
+}
+
+void _flushX86regs()
+{
+    static bool s_log_limits = false;
+    if (!s_log_limits) {
+        s_log_limits = true;
+        Console.WriteLn("@@REG_LIMIT@@ iREGCNT_GPR=%d iREGCNT_XMM=%d", iREGCNT_GPR, iREGCNT_XMM);
+    }
+
+    u32 i;
+	for (i = 0; i < iREGCNT_GPR; ++i) // Ensure GPR limit
+	{
+        // Diagnosis: Flush Scan Trace
+        if (i == 21) {
+            static bool s_log_scan = false;
+            if (!s_log_scan) {
+               s_log_scan = true;
+               Console.WriteLn("@@FLUSH_SCAN_21@@ i=21 type=%d gpr=%d host=%d dirty=%d", 
+                    x86regs[i].type, x86regs[i].reg, i, (x86regs[i].mode & MODE_WRITE));
+            }
+        }
+
+		if (x86regs[i].inuse && x86regs[i].mode & MODE_WRITE)
+		{
+            RALOG("Flushing x86 reg %u in _eeFlushAllDirty()\n", i);
+            _writebackX86Reg(i);
+            x86regs[i].mode = (x86regs[i].mode & ~MODE_WRITE) | MODE_READ;
+		}
+	}
 }
 
 void _flushCOP2regs()

@@ -143,50 +143,59 @@ namespace HostSys
 		Munmap(ptr, size);
 	}
 
+    // --- Safety Extensions ---
 
+    // Block Exit Reason (for tracing)
     enum class BlockExitReason : u8 {
         Unknown = 0,
-        Link,
-        Helper,
-        Exception,
-        Fallback,
-        DispatcherExit,
-        BranchTaken,
-        BranchNotTaken,
+        Link,           // Direct block-to-block link
+        Helper,         // Called a C++ helper function
+        Exception,      // Exception/interrupt occurred
+        Fallback,       // Fell back to interpreter
+        DispatcherExit, // Normal exit to dispatcher
+        BranchTaken,    // Branch was taken
+        BranchNotTaken, // Branch fell through
     };
 
+    // Single trace entry for ring buffer
     struct BlockTraceEntry {
         u32 guest_pc;
-        u32 next_guest_pc;
+        u32 next_guest_pc;  // Where execution will go next
         u32 block_id;
         u32 cycle;
         BlockExitReason exit_reason;
+        // Exception info (only valid when exit_reason == Exception)
         u8 exception_code;
         u32 epc;
-        u8 bd_bit;
+        u8 bd_bit;  // Branch Delay bit
     };
 
+    // Ring buffer size (must be power of 2)
     static constexpr size_t BLOCK_TRACE_SIZE = 256;
 
     struct JitRuntimeContext {
         u32 guest_pc;
-        u32 next_guest_pc;
+        u32 next_guest_pc;  // Set by JIT code before exit
         u32 block_id;
-
+        
+        // Exception info (set by exception handlers)
         u8 pending_exception_code;
         u32 pending_epc;
         u8 pending_bd_bit;
-
+        
+        // Block Trace Ring Buffer
         BlockTraceEntry trace_buffer[BLOCK_TRACE_SIZE];
         u32 trace_index;
-
+        
+        // Watchdog: last update timestamp (milliseconds since epoch, or steady_clock)
         u64 last_trace_update_ms;
         static constexpr u64 HANG_THRESHOLD_MS = 500;
-
+        
+        // Link Loop Detection
         u32 last_block_id;
         u32 repeat_count;
         static constexpr u32 LOOP_THRESHOLD = 100000;
-
+        
         void RecordBlockExit(u32 pc, u32 next_pc, u32 id, u32 cyc, BlockExitReason reason,
                              u8 exc_code = 0, u32 exc_epc = 0, u8 exc_bd = 0) {
             BlockTraceEntry& entry = trace_buffer[trace_index & (BLOCK_TRACE_SIZE - 1)];
@@ -199,9 +208,12 @@ namespace HostSys
             entry.epc = exc_epc;
             entry.bd_bit = exc_bd;
             trace_index++;
-
-            last_trace_update_ms++;
-
+            
+            // Update watchdog timestamp (simple counter approximation without chrono)
+            // In real use, this would be: std::chrono::steady_clock::now()
+            last_trace_update_ms++; // placeholder increment
+            
+            // Link loop detection
             if (id == last_block_id) {
                 repeat_count++;
             } else {
@@ -209,30 +221,32 @@ namespace HostSys
                 repeat_count = 1;
             }
         }
-
+        
         bool IsLinkLoopSuspected() const {
             return repeat_count >= LOOP_THRESHOLD;
         }
-
+        
         void ResetLoopDetection() {
             repeat_count = 0;
         }
-
+        
+        // Check if trace hasn't been updated (for external watchdog)
         bool IsHangSuspected(u64 current_ms) const {
             return (current_ms - last_trace_update_ms) > HANG_THRESHOLD_MS;
         }
     };
     extern thread_local JitRuntimeContext g_JitContext;
 
+    // RAII handling for W^X and Cache Flushing
     class AutoCodeWrite
     {
     public:
-        AutoCodeWrite(void* ptr = nullptr, size_t size = 0)
-            : m_ptr(ptr), m_size(size)
+        AutoCodeWrite(void* ptr = nullptr, size_t size = 0) 
+            : m_ptr(ptr), m_size(size) 
         {
             BeginCodeWrite();
         }
-
+        
         ~AutoCodeWrite()
         {
             EndCodeWrite();
@@ -240,7 +254,8 @@ namespace HostSys
                 FlushInstructionCache(m_ptr, static_cast<u32>(m_size));
             }
         }
-
+        
+        // Disable copy
         AutoCodeWrite(const AutoCodeWrite&) = delete;
         AutoCodeWrite& operator=(const AutoCodeWrite&) = delete;
 
@@ -260,7 +275,6 @@ namespace PageFaultHandler
 	};
 
 	HandlerResult HandlePageFault(void* exception_pc, void* fault_address, bool is_write);
-	bool Install(Error* error = nullptr);
 	bool Install_Fresh(Error* error = nullptr);
 } // namespace PageFaultHandler
 

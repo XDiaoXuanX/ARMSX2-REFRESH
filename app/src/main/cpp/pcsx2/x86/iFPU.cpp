@@ -114,7 +114,7 @@ void recCFC1(void)
 	const int regt = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_WRITE);
 	if (_Fs_ >= 16)
 	{
-        auto reg32 = a64::WRegister(regt);
+        auto reg32 = HostW(regt);
 
 //		xMOV(xRegister32(regt), ptr32[&fpuRegs.fprc[31]]);
         armLoad(reg32, PTR_CPU(fpuRegs.fprc[31]));
@@ -123,12 +123,12 @@ void recCFC1(void)
 //		xOR(xRegister32(regt), 0x01000001); //set always-one bits
         armAsm->Orr(reg32, reg32, 0x01000001);
 //		xMOVSX(xRegister64(regt), xRegister32(regt));
-        armAsm->Sxtw(a64::XRegister(regt), reg32);
+        armAsm->Sxtw(HostX(regt), reg32);
 	}
 	else
 	{
 //		xMOVSX(xRegister64(regt), ptr32[&fpuRegs.fprc[0]]);
-        armLoadsw(a64::XRegister(regt), PTR_CPU(fpuRegs.fprc[0]));
+        armLoadsw(HostX(regt), PTR_CPU(fpuRegs.fprc[0]));
 	}
 }
 
@@ -155,7 +155,7 @@ void recCTC1()
 		else if ((mmreg = _checkX86reg(X86TYPE_GPR, _Rt_, MODE_READ)) >= 0)
 		{
 //			xMOV(ptr32[&fpuRegs.fprc[_Fs_]], xRegister32(mmreg));
-            armStore(PTR_CPU(fpuRegs.fprc[_Fs_]), a64::WRegister(mmreg));
+            armStore(PTR_CPU(fpuRegs.fprc[_Fs_]), HostW(mmreg));
 		}
 		else
 		{
@@ -215,15 +215,16 @@ void recMFC1()
 	{
 		// xmm -> gpr
 //		xMOVD(xRegister32(regt), xRegisterSSE(regs));
-        armAsm->Fmov(a64::WRegister(regt), a64::QRegister(regs).S());
+        { a64::Register dst(HostGprPhys(regt), a64::kWRegSize);
+        armAsm->Fmov(dst, a64::QRegister(regs).S()); }
 //		xMOVSX(xRegister64(regt), xRegister32(regt));
-        armAsm->Sxtw(a64::XRegister(regt), a64::WRegister(regt));
+        armAsm->Sxtw(HostX(regt), HostW(regt));
 	}
 	else
 	{
 		// mem -> gpr
 //		xMOVSX(xRegister64(regt), ptr32[&fpuRegs.fpr[_Fs_].UL]);
-        armLoadsw(a64::XRegister(regt), PTR_CPU(fpuRegs.fpr[_Fs_].UL));
+        armLoadsw(HostX(regt), PTR_CPU(fpuRegs.fpr[_Fs_].UL));
 	}
 }
 
@@ -233,8 +234,19 @@ void recMFC1()
 //------------------------------------------------------------------
 // MTC1
 //------------------------------------------------------------------
+// [TEMP_DIAG] @@MTC1_COUNT@@ — track recMTC1 compile-time calls
+// Removal condition: compile 爆増の型after determined
+extern uint32_t s_compile_mtc1_blocks;  // defined in iR5900.cpp
+static thread_local uint32_t s_mtc1_call_count = 0;
+uint32_t recMTC1_GetAndResetCount() { uint32_t c = s_mtc1_call_count; s_mtc1_call_count = 0; return c; }
+
+// [R58] custom recMTC1 — targeted register cleanup after each path.
+// Binary search showed FLUSH_FREE_NONTEMP_X86 is required to fix DMAC_CTRL bug,
+// but flushing ALL non-temp GPRs kills performance (2 FPS vs 27 FPS).
+// Fix: free only the specific registers allocated by recMTC1.
 void recMTC1()
 {
+	s_mtc1_call_count++;
 	EE::Profiler.EmitOp(eeOpcode::MTC1);
 	if (GPR_IS_CONST1(_Rt_))
 	{
@@ -246,21 +258,19 @@ void recMTC1()
 			// common case: mtc1 zero, fnn
 			if (g_cpuConstRegs[_Rt_].UL[0] == 0)
 			{
-//				xPXOR(xRegisterSSE(xmmreg), xRegisterSSE(xmmreg));
                 armAsm->Eor(regQ.V16B(), regQ.V16B(), regQ.V16B());
 			}
 			else
 			{
-				// may as well flush the constant register, since we're needing it in a gpr anyway
 				const int x86reg = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_READ);
-//				xMOVDZX(xRegisterSSE(xmmreg), xRegister32(x86reg));
-                armAsm->Fmov(regQ.S(), a64::Register(x86reg, a64::kWRegSize));
+                armAsm->Fmov(regQ.S(), a64::Register(HostGprPhys(x86reg), a64::kWRegSize));
+				_freeX86reg(x86reg);
 			}
+			_freeXMMreg(xmmreg);
 		}
 		else
 		{
 			pxAssert(!_hasXMMreg(XMMTYPE_FPREG, _Fs_));
-//			xMOV(ptr32[&fpuRegs.fpr[_Fs_].UL], g_cpuConstRegs[_Rt_].UL[0]);
             armStore(PTR_CPU(fpuRegs.fpr[_Fs_].UL), g_cpuConstRegs[_Rt_].UL[0]);
 		}
 	}
@@ -269,49 +279,39 @@ void recMTC1()
 		const int xmmgpr = _checkXMMreg(XMMTYPE_GPRREG, _Rt_, MODE_READ);
 		if (xmmgpr >= 0)
 		{
-			if (g_pCurInstInfo->regs[_Rt_] & EEINST_LASTUSE)
-			{
-				// transfer the reg directly
-				_deleteFPtoXMMreg(_Fs_, DELETE_REG_FREE_NO_WRITEBACK);
-				_reallocateXMMreg(xmmgpr, XMMTYPE_FPREG, _Fs_, MODE_WRITE);
-			}
-			else
-			{
                 auto regQ = a64::QRegister(xmmgpr);
 
 				const int xmmreg2 = _allocIfUsedFPUtoXMM(_Fs_, MODE_WRITE);
 				if (xmmreg2 >= 0) {
-//                    xMOVSS(xRegisterSSE(xmmreg2), xRegisterSSE(xmmgpr));
                     armAsm->Mov(a64::QRegister(xmmreg2).S(), 0, regQ.S(), 0);
+					_freeXMMreg(xmmreg2);
                 }
 				else {
-//                    xMOVSS(ptr[&fpuRegs.fpr[_Fs_].UL], xRegisterSSE(xmmgpr));
                     armStore(PTR_CPU(fpuRegs.fpr[_Fs_].UL), regQ.S());
                 }
-			}
+				// Don't free xmmgpr — it still holds valid GPR data for _Rt_
 		}
 		else
 		{
-			// may as well cache it..
 			const int regt = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_READ);
 			const int mmreg2 = _allocIfUsedFPUtoXMM(_Fs_, MODE_WRITE);
 
-            auto reg32 = a64::Register(regt, a64::kWRegSize);
+            auto reg32 = a64::Register(HostGprPhys(regt), a64::kWRegSize);
 
 			if (mmreg2 >= 0)
 			{
-//				xMOVDZX(xRegisterSSE(mmreg2), xRegister32(regt));
                 armAsm->Fmov(a64::QRegister(mmreg2).S(), reg32);
+				_freeXMMreg(mmreg2);
 			}
 			else
 			{
-//				xMOV(ptr32[&fpuRegs.fpr[_Fs_].UL], xRegister32(regt));
-                armStore(PTR_CPU(fpuRegs.fpr[_Fs_].UL), reg32);
+                armStore(PTR_CPU(fpuRegs.fpr[_Fs_].UL), HostW(regt));
 			}
+			_freeX86reg(regt);
 		}
 	}
 }
-#endif
+#endif // FPU_RECOMPILE
 //------------------------------------------------------------------
 
 
@@ -412,6 +412,22 @@ void ClampValues(int regd)
 {
 	fpuFloat(regd);
 }
+//------------------------------------------------------------------
+
+
+//------------------------------------------------------------------
+// [V3.7-V3.8 Phase B partial 2026-05-02] NEON-based iv2 byte-exact ADDA/MULA
+// fpuDouble + checkOverflow + checkUnderflow を NEON で再現。 PS2 R5900 FPU の
+// IEEE-754 single-precision 演算を bit-exact に一致させる目的。
+//
+// 旧 v1 emit (recCommutativeOp) は精度不足、 character mesh stuck の遠因。
+// SW fastmem fix と組み合わせて V1 JIT で完全動作。
+//
+// iv2 reference:
+//   float fpuDouble(u32 f):
+//     case (f & 0x7f800000) == 0:        f &= 0x80000000   (denormal → ±0)
+//     case (f & 0x7f800000) == 0x7f800000: f = (f & 0x80000000) | 0x7f7fffff (Inf → ±fMax)
+//     default: そのまま
 //------------------------------------------------------------------
 
 static void fpuFlushDouble_NEON(int reg)
@@ -530,6 +546,9 @@ static void recMULA_S_xmm_iv2(int info)
 	armBind(&l_done);
 }
 
+// [V13 Step 6 fix] SUBA も ADDA/MULA と同種 NEON IV2 byte-exact path で実装。
+// MULA + SUBA combination の boot crash (= vs=240) は SUBA が旧 path (= recSUBop) で
+// ACC への state generation が MULA IV2 path と異なるため。 IV2 path 統一で互換性確保。
 static void recSUBA_S_xmm_iv2(int info)
 {
 	EE::Profiler.EmitOp(eeOpcode::SUBA_F);
@@ -553,6 +572,9 @@ static void recSUBA_S_xmm_iv2(int info)
 	armBind(&l_done);
 }
 
+// [V13 Step 6] MADD/MSUB/MADDA/MSUBA NEON byte-exact path。
+// MADDA/MSUBA 用 (= regd = EEREC_ACC、 visual OK 確認済)。
+// 注: MADD/MSUB は recMADDMSUB_v147_only 経由 (= WRITED 削除 + cache invalidate 順序 fix)。
 static void recMADDtemp_iv2(int info, int regd, bool is_sub)
 {
 	auto regD = a64::QRegister(regd);
@@ -584,6 +606,11 @@ static void recMADDtemp_iv2(int info, int regd, bool is_sub)
 	_freeXMMreg(t_acc);
 }
 
+// [V14.7] MADD_S/MSUB_S 専用: WRITED 削除 + cache invalidate 順序 fix。
+// V14.5 (= armStore → _deleteFPtoXMMreg(0)) は cache の dirty 値で memory writeback、
+// MADD 結果を上書き = computation 消失 → game state 違い → 達成判定 誤発火 (= user 観察)。
+// V14.7 = DELETE_REG_FREE_NO_WRITEBACK で cache を先に「dirty 値捨て + 削除」 してから armStore。
+// 「interp 経由は OK (= iFlushCall で cache flush 済)、 JIT native は cache state 副作用」 と整合。
 static void recMADDMSUB_v147_only(int info, bool is_sub)
 {
 	int t_fs  = _allocTempXMMreg(XMMT_FPS);
@@ -593,6 +620,7 @@ static void recMADDMSUB_v147_only(int info, bool is_sub)
 	auto regFt  = a64::QRegister(t_ft);
 	auto regAcc = a64::QRegister(t_acc);
 
+	// 入力 Fs/Ft/ACC を temp に load + PS2 fpuDouble clamp
 	if (info & PROCESS_EE_S) armAsm->Mov(regFs.S(), 0, a64::QRegister(EEREC_S).S(), 0);
 	else armLoad(regFs.S(), PTR_CPU(fpuRegs.fpr[_Fs_]));
 	fpuFlushDouble_NEON(t_fs);
@@ -605,19 +633,24 @@ static void recMADDMSUB_v147_only(int info, bool is_sub)
 	else armLoad(regAcc.S(), PTR_CPU(fpuRegs.ACC));
 	fpuFlushDouble_NEON(t_acc);
 
+	// 中間 mul + 結果 fpuDouble (= PS2 spec 2 段 round)
 	armAsm->Fmul(regFs.S(), regFs.S(), regFt.S());
 	fpuFlushDouble_NEON(t_fs);
 
+	// 最終 add/sub: t_fs = ACC ± mul_result
 	if (is_sub)
 		armAsm->Fsub(regFs.S(), regAcc.S(), regFs.S());
 	else
 		armAsm->Fadd(regFs.S(), regAcc.S(), regFs.S());
 
+	// 結果 over/under check
 	a64::Label l_done;
 	fpuCheckOverflow_NEON(t_fs, FPUflagO | FPUflagSO, &l_done);
 	fpuCheckUnderflow_NEON(t_fs, FPUflagU | FPUflagSU);
 	armBind(&l_done);
 
+	// ★ V14.7 fix: cache を **先に** dirty 値捨て + 削除 (= DELETE_REG_FREE_NO_WRITEBACK)、
+	// その後 armStore で MADD 結果を memory に書く。 順序逆だと cache writeback で MADD 結果消失。
 	_deleteFPtoXMMreg(_Fd_, DELETE_REG_FREE_NO_WRITEBACK);
 	armStore(PTR_CPU(fpuRegs.fpr[_Fd_]), regFs.S());
 
@@ -672,10 +705,8 @@ void recABS_S_xmm(int info)
     armAsm->And(regED.V16B(), regED.V16B(), armLoadPtrV(PTR_CPU(mVUss4.s_pos[0])).V16B());
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
 
-	if (CHECK_FPU_OVERFLOW) { // Only need to do positive clamp, since EEREC_D is positive
-//        xMIN.SS(xRegisterSSE(EEREC_D), ptr[&g_maxvals[0]]);
-        armAsm->Fminnm(regED.S(), regED.S(), armLoadPtrV(PTR_CPU(mVUss4.g_maxvals[0])).S());
-    }
+	// [BUG-E004] ABS_S is bit-clear only (& 0x7FFFFFFF), cannot overflow.
+	// PS2 preserves NaN/Inf bit patterns through ABS. Clamping removed.
 }
 
 FPURECOMPILE_CONSTCODE(ABS_S, XMMINFO_WRITED | XMMINFO_READS);
@@ -924,6 +955,10 @@ void FPU_MUL(int regd, int regt, bool reverseOperands)
 void FPU_MUL(int regd, int regt) { FPU_MUL(regd, regt, false); }
 void FPU_MUL_REV(int regd, int regt) { FPU_MUL(regd, regt, true); } //reversed operands
 
+// [V12 Phase D fix] PS2 MAX.S/MIN.S は scalar single-precision (lane 0 のみ操作)。
+// 旧 code は V4S (4 lanes) で書き、 上位 3 lanes (= 隣接 FPU register) を破壊する bug。
+// V12 Phase B-T15/T16 で Marco's cinematic 描画 NG の真因と確証 (= MAX_S native のみ退行)。
+// 修正: scalar single-precision form (.S()) で lane 0 のみ操作。
 void ARM_MAXSS_XMM_to_XMM(int regd, int regt) {
     auto regD = a64::QRegister(regd);
     armAsm->Fmaxnm(regD.S(), regD.S(), a64::QRegister(regt).S());
@@ -1069,6 +1104,7 @@ FPURECOMPILE_CONSTCODE(ADDA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT)
 //------------------------------------------------------------------
 // BC1x XMM
 //------------------------------------------------------------------
+
 
 static void _setupBranchTest()
 {
@@ -1227,9 +1263,12 @@ void recC_EQ_xmm(int info)
 			return;
 	}
 
+// [V13 Step 4 fix #3] x86 JZ (= ZF=1 = equal OR unordered) と ARM64 eq (= Z=1、 NaN 除外) は
+// 非互換。 ARM64 では NaN compare で Z=0、 V=1。 unordered を equal 扱いにするため `B.vs`
+// (V=1) を追加し、 NaN/unordered で set C flag (= x86 JZ と一致動作)。
 //	j8Ptr[0] = JZ8(0);
     armAsm->B(&j8Ptr0, a64::Condition::eq);
-    armAsm->B(&j8Ptr0, a64::Condition::vs);
+    armAsm->B(&j8Ptr0, a64::Condition::vs);   // [V13] NaN/unordered → equal 扱い (x86 互換)
 //		xAND(ptr32[&fpuRegs.fprc[31]], ~FPUflagC);
         armAnd(PTR_CPU(fpuRegs.fprc[31]), ~FPUflagC);
 //		j8Ptr[1] = JMP8(0);
@@ -1341,6 +1380,9 @@ void recC_LE_xmm(int info)
 			return;
 	}
 
+// [V13 Step 4 fix] x86 JBE (= CF=1 OR ZF=1 = less OR equal OR unordered) と ARM64 ls
+// (= C=0 OR Z=1 = less OR equal、 NaN 除外) は非互換。 ARM64 `le` (Z=1 OR N≠V = equal
+// OR less OR unordered) で x86 JBE と一致動作。
 //	j8Ptr[0] = JBE8(0);
     armAsm->B(&j8Ptr0, a64::Condition::le);
 //		xAND(ptr32[&fpuRegs.fprc[31]], ~FPUflagC);
@@ -1357,6 +1399,10 @@ void recC_LE_xmm(int info)
 
 FPURECOMPILE_CONSTCODE(C_LE, XMMINFO_READS | XMMINFO_READT);
 //REC_FPUFUNC(C_LE);
+// NOTE: 上の `armAsm->B(&j8Ptr0, a64::Condition::ls);` は x86 JBE (CF=1 OR ZF=1 = less OR equal
+// OR unordered) と非互換。 ARM64 `ls` (C=0 OR Z=1) は less OR equal、 unordered で C=1, Z=0 →
+// no jump。 修正は `le` (Z=1 OR N≠V = equal OR less OR unordered) で x86 JBE と一致。
+// 但し switch 内 case ごとに同 condition、 上の line 1259 既存 `ls` を 別 hunk で `le` に変更。
 
 void recC_LT_xmm(int info)
 {
@@ -1446,6 +1492,10 @@ void recC_LT_xmm(int info)
 			return;
 	}
 
+// [V13 Step 4 fix] x86 JB (= CF=1 = less OR unordered) と ARM64 cc (= C=0 = less only) は
+// NaN compare で挙動異なる。 ARM64 Fcmp で less = N=1,C=0,V=0、 unordered = N=0,C=1,V=1 →
+// `cc` (C=0) は less のみ、 unordered 時 jump せず。 ARM64 `lt` (N≠V) なら less + unordered
+// 両方 jump、 x86 JB と一致動作。 GTA VC post-Marco's vs=6770 stuck loop の真因 (V13 確証)。
 //	j8Ptr[0] = JB8(0);
     armAsm->B(&j8Ptr0, a64::Condition::lt);
 //		xAND(ptr32[&fpuRegs.fprc[31]], ~FPUflagC);
@@ -1531,15 +1581,24 @@ void recCVT_W()
 	//kill register allocation for dst because we write directly to fpuRegs.fpr[_Fd_]
 	_deleteFPtoXMMreg(_Fd_, DELETE_REG_FREE_NO_WRITEBACK);
 
+	// [V13 Step 7 fix] NaN handling x86/ARM64 互換性 fix:
+	//   x86 cvttss2si(NaN) = 0x80000000 (= signed indefinite)
+	//   ARM64 Fcvtzs(NaN)  = 0
+	// 旧 code (= cvttss2si emulation) は NaN→0 に対して positive saturate post-fix のみで対応、
+	// negative NaN raw bits (signed-low) では post-fix 通らず EAX=0 のまま、 x86 baseline (0x80000000)
+	// と異なる結果。 修正: NaN check (= raw bits の (val & 0x7FFFFFFF) > 0x7F800000) を先頭に追加し、
+	// NaN なら EAX = 0x80000000 へ強制、 positive saturate を skip。
 	{
 		a64::UseScratchRegisterScope temps(armAsm);
 		a64::Register tmp = temps.AcquireW();
 		a64::Label store_label, nan_label;
 
+		// NaN check first: (raw_bits & 0x7FFFFFFF) > 0x7F800000 → unordered (NaN)
 		armAsm->And(tmp, EDX, 0x7FFFFFFF);
 		armAsm->Cmp(tmp, 0x7F800000);
 		armAsm->B(&nan_label, a64::Condition::gt);
 
+		// not-NaN: positive saturate (cvttss2si 互換)
 		// cvttss2si converts unrepresentable values to 0x80000000, so negative values are already handled.
 		// So we just need to handle positive values.
 		armAsm->Cmp(EDX, 0x4f000000);
@@ -1982,6 +2041,7 @@ void recMADD_S_xmm(int info)
 	recMADD_S_xmm_iv2(info);
 }
 
+// [V14.7] WRITED 削除 (= 4 slot → 3 slot pressure 削減)。 emit 内で D = temp + memory store + cache invalidate (順序 fix)。
 FPURECOMPILE_CONSTCODE(MADD_S, XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
 
 void recMADDA_S_xmm(int info)
@@ -2272,6 +2332,7 @@ void recMSUB_S_xmm(int info)
 	recMSUB_S_xmm_iv2(info);
 }
 
+// [V14.7] WRITED 削除 (= 4 slot → 3 slot pressure 削減)。 emit 内で D = temp + memory store + cache invalidate (順序 fix)。
 FPURECOMPILE_CONSTCODE(MSUB_S, XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
 
 void recMSUBA_S_xmm(int info)
@@ -2293,14 +2354,22 @@ void recMUL_S_xmm(int info)
 	ClampValues(recCommutativeOp(info, EEREC_D, 1));
 }
 
-FPURECOMPILE_CONSTCODE(MUL_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+void recMUL_S(void)
+{
+	eeFPURecompileCode(recMUL_S_xmm, R5900::Interpreter::OpcodeImpl::COP1::MUL_S,
+		XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+}
 
 void recMULA_S_xmm(int info)
 {
 	recMULA_S_xmm_iv2(info);
 }
 
-FPURECOMPILE_CONSTCODE(MULA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT);
+void recMULA_S(void)
+{
+	eeFPURecompileCode(recMULA_S_xmm, R5900::Interpreter::OpcodeImpl::COP1::MULA_S,
+		XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT);
+}
 //------------------------------------------------------------------
 
 
@@ -2326,9 +2395,9 @@ void recNEG_S_xmm(int info)
 //	xXOR.PS(xRegisterSSE(EEREC_D), ptr[&s_neg[0]]);
     armAsm->Eor(regED.V16B(), regED.V16B(), armLoadPtrV(PTR_CPU(mVUss4.s_neg[0])).V16B());
 
-	// Always preserve sign. Using float clamping here would result in
-	// +inf to become +fMax instead of -fMax, which is definitely wrong.
-	fpuFloat3(EEREC_D);
+	// [BUG-E004] NEG_S is sign-bit flip only (XOR 0x80000000), cannot overflow.
+	// PS2 preserves NaN/Inf bit patterns. Clamping removed.
+	// Was: fpuFloat3(EEREC_D);
 }
 
 FPURECOMPILE_CONSTCODE(NEG_S, XMMINFO_WRITED | XMMINFO_READS);

@@ -7,6 +7,7 @@
 #include "common/BitUtils.h"
 #include "common/Console.h"
 #include "common/HostSys.h"
+#include "common/Darwin/DarwinMisc.h"
 
 const a64::Register& armWRegister(int n)
 {
@@ -101,9 +102,28 @@ u8* armStartBlock()
     HostSys::BeginCodeWrite();
 
     pxAssert(!armAsm);
-    armAsm = new a64::MacroAssembler(static_cast<vixl::byte*>(armAsmPtr), armAsmCapacity);
+    // [P45-2] Only apply g_code_rw_offset for addresses within the JIT RX region.
+    // When generating code into BSS (e.g., VTLB m_IndirectDispatchers), the offset
+    // would produce an invalid address. The offset maps JIT RX → JIT RW only.
+    ptrdiff_t write_offset = 0;
+    uintptr_t ptr_val = reinterpret_cast<uintptr_t>(armAsmPtr);
+    if (ptr_val >= DarwinMisc::GetJitBase() && ptr_val < DarwinMisc::GetJitEnd()) {
+        write_offset = DarwinMisc::g_code_rw_offset;
+    }
+    armAsm = new a64::MacroAssembler(static_cast<vixl::byte*>(armAsmPtr + write_offset), armAsmCapacity);
     armAsm->GetScratchVRegisterList()->Remove(31);
-    armAsm->GetScratchRegisterList()->Remove(RSCRATCHADDR.GetCode());
+    // [iter676e] Keep x17 in scratch pool — VIXL needs >=2 scratch registers for
+    // complex macro decomposition (large immediates, address calculations).
+    // RSCRATCHADDR (x17) is only used in "load addr → immediate Ldr/Str" patterns
+    // where no VIXL macro intervenes, so pool membership is safe.
+    // armAsm->GetScratchRegisterList()->Remove(RSCRATCHADDR.GetCode());
+
+    // TASK: Exclude x18 from allocatable/scratch set for iOS safety
+    armAsm->GetScratchRegisterList()->Remove(18);
+    
+    // [iPSX2] Track W^X State
+    DarwinMisc::g_jit_write_state = 1; // RW
+    
     return armAsmPtr;
 }
 
@@ -119,9 +139,12 @@ u8* armEndBlock()
     delete armAsm;
     armAsm = nullptr;
 
-    HostSys::EndCodeWrite();
-
+    // [iPSX2] JIT Fix: Flush BEFORE protection enable (Order=0)
+    // We must flush while we still have write permissions, then switch to execute.
     HostSys::FlushInstructionCache(armAsmPtr, size);
+    HostSys::EndCodeWrite();
+    
+    DarwinMisc::g_jit_write_state = 0; // RX
 
     armAsmPtr = armAsmPtr + size;
     armAsmCapacity -= size;
@@ -145,6 +168,15 @@ void armDisassembleAndDumpCode(const void* ptr, size_t size)
 #endif
 }
 
+// [iPSX2] Manual MOV64 to avoid VIXL macros/literal pool issues
+static void armMov64(const a64::Register& reg, uint64_t val)
+{
+    armAsm->movz(reg, val & 0xFFFF, 0);
+    armAsm->movk(reg, (val >> 16) & 0xFFFF, 16);
+    armAsm->movk(reg, (val >> 32) & 0xFFFF, 32);
+    armAsm->movk(reg, (val >> 48) & 0xFFFF, 48);
+}
+
 void armEmitJmp(const void* ptr, bool force_inline)
 {
     s64 displacement = GetPCDisplacement(armGetCurrentCodePointer(), ptr);
@@ -160,9 +192,11 @@ void armEmitJmp(const void* ptr, bool force_inline)
 
     if (use_blr)
     {
-        armAsm->Mov(RXVIXLSCRATCH, (uptr)ptr);
-//        armAsm->Ldr(RXVIXLSCRATCH, (uptr)ptr);
-        armAsm->Br(RXVIXLSCRATCH);
+        // Use x16 as the indirect branch scratch register (matches common AArch64 call veneer usage).
+        const a64::Register& tgt_reg = a64::x16;
+        armMov64(tgt_reg, (u64)(uptr)ptr);
+        
+        armAsm->Br(tgt_reg);
     }
     else
     {
@@ -186,14 +220,36 @@ void armEmitCall(const void* ptr, bool force_inline)
 
     if (use_blr)
     {
-        armAsm->Mov(RXVIXLSCRATCH, (uptr)ptr);
-//        armAsm->Ldr(RXVIXLSCRATCH, (uptr)ptr);
-        armAsm->Blr(RXVIXLSCRATCH);
+        // [iPSX2] HARDENING: Use Callee-Saved x19 for Target
+        // AND Save LR (x30) because it holds Guest RA.
+        // Stack layout: 
+        // [sp-16] = {x19, x30} (pre-index)
+        // We use x19 for target, x30 is LR.
+        armAsm->Stp(a64::x19, a64::x30, a64::MemOperand(a64::sp, -16, a64::PreIndex));
+        
+        // Move target to x19
+        armMov64(a64::x19, (u64)(uptr)ptr);
+        
+        // Branch to x19
+        armAsm->Blr(a64::x19);
+        
+        // Restore x19 and LR
+        armAsm->Ldp(a64::x19, a64::x30, a64::MemOperand(a64::sp, 16, a64::PostIndex));
     }
     else
     {
+        // [iPSX2] Save LR (x30)
+        armAsm->Str(a64::x30, a64::MemOperand(a64::sp, -16, a64::PreIndex));
+
+        // [iPSX2] @@BL_DISP_FIX@@: displacement is in instruction units (GetPCDisplacement >> 2).
+        // Str emits 1 instruction before BL, so BL_PC = C0+4. Correct offset = (ptr-(C0+4))/4 = displacement-1.
+        // iter164 used -4 (wrong: -4 instructions = -16 bytes → BL undershoots by 12 bytes → BRK 0xcc SIGILL).
+        // iter165b fix: -1 instruction unit (= -4 bytes) → target = (C0+4) + (displacement-1)*4 = ptr ✓
         a64::SingleEmissionCheckScope guard(armAsm);
-        armAsm->bl(displacement);
+        armAsm->bl(displacement - 1);
+
+        // Restore LR
+        armAsm->Ldr(a64::x30, a64::MemOperand(a64::sp, 16, a64::PostIndex));
     }
 }
 
@@ -248,33 +304,10 @@ void armMoveAddressToReg(const a64::Register& reg, const void* addr)
 {
     // psxAsm->Mov(reg, static_cast<u64>(reinterpret_cast<uintptr_t>(addr)));
     pxAssert(reg.IsX());
-
-    const void* current_code_ptr_page = reinterpret_cast<const void*>(
-            reinterpret_cast<uintptr_t>(armGetCurrentCodePointer()) & ~static_cast<uintptr_t>(0xFFF));
-    const void* ptr_page =
-            reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(addr) & ~static_cast<uintptr_t>(0xFFF));
-    const s64 page_displacement = GetPCDisplacement(current_code_ptr_page, ptr_page) >> 10;
-    const u32 page_offset = static_cast<u32>(reinterpret_cast<uintptr_t>(addr) & 0xFFFu);
-    if (vixl::IsInt21(page_displacement) && a64::Assembler::IsImmAddSub(page_offset))
-    {
-        {
-            a64::SingleEmissionCheckScope guard(armAsm);
-            armAsm->adrp(reg, page_displacement);
-        }
-        armAsm->Add(reg, reg, page_offset);
-    }
-    else if (vixl::IsInt21(page_displacement) && a64::Assembler::IsImmLogical(page_offset, 64))
-    {
-        {
-            a64::SingleEmissionCheckScope guard(armAsm);
-            armAsm->adrp(reg, page_displacement);
-        }
-        armAsm->Orr(reg, reg, page_offset);
-    }
-    else
-    {
-        armAsm->Mov(reg, reinterpret_cast<uintptr_t>(addr));
-    }
+    // ADRP path disabled — always use Mov (full 64-bit load).
+    // The ADRP+ADD path was never exercised before (>> 10 bug forced Mov fallback)
+    // and crashes on first use. Use Mov unconditionally until ADRP is properly validated.
+    armAsm->Mov(reg, reinterpret_cast<uintptr_t>(addr));
 }
 
 void armCbz(const a64::Register& reg, a64::Label* p_label)
@@ -344,19 +377,13 @@ bool armIsCalleeSavedRegister(int reg)
 
 bool armIsCallerSaved(int id)
 {
-#if defined(__ANDROID__)
-    // gpr registers callee saved => r19 ~ r28
-    // 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-    return (id <= 15);
-#else
-    #ifdef _WIN32
-    // The x64 ABI considers the registers RAX, RCX, RDX, R8, R9, R10, R11, and XMM0-XMM5 volatile.
-    return (id <= 2 || (id >= 8 && id <= 11));
-    #else
-    // rax, rdi, rsi, rdx, rcx, r8, r9, r10, r11 are scratch registers.
-    return (id <= 2 || id == 6 || id == 7 || (id >= 8 && id <= 11));
-    #endif
-#endif
+    // AArch64 ABI: Registers x0-x18 are volatile (caller-saved).
+    // x19-x28 are non-volatile (callee-saved).
+    // x29 is frame pointer, x30 is link register (volatile caller context).
+    // EXCEPTION: iOS reserves x18. Do NOT treat it as a general caller-saved register for allocation.
+    // If the JIT uses this list to pick scratch registers, x18 must be excluded.
+    // Modified to return (id <= 17 || id == 30).
+    return (id <= 17 || id == 30);
 }
 
 bool armIsCallerSavedXmm(int id)
@@ -456,7 +483,8 @@ u8* ArmConstantPool::GetJumpTrampoline(const void* target)
         return nullptr;
     }
 
-    a64::MacroAssembler masm(static_cast<vixl::byte*>(m_base_ptr + offset), m_capacity - offset);
+    // [P43] Write through RW view; m_base_ptr stays as RX for return values/icache
+    a64::MacroAssembler masm(static_cast<vixl::byte*>(m_base_ptr + DarwinMisc::g_code_rw_offset + offset), m_capacity - offset);
     masm.Mov(RXVIXLSCRATCH, reinterpret_cast<intptr_t>(target));
     masm.Br(RXVIXLSCRATCH);
     masm.FinalizeCode();
@@ -485,7 +513,8 @@ u8* ArmConstantPool::GetLiteral(const u128& value)
         return nullptr;
 
     const u32 offset = Common::AlignUpPow2(m_used, 16);
-    std::memcpy(&m_base_ptr[offset], &value, sizeof(value));
+    // [P43] Write through RW view
+    std::memcpy(m_base_ptr + DarwinMisc::g_code_rw_offset + offset, &value, sizeof(value));
     m_used = offset + sizeof(value);
     return m_base_ptr + offset;
 }
@@ -515,14 +544,36 @@ void armBind(a64::Label* p_label)
 
 void armEmitJmpPtr(void* code, const void* dst, bool flush_icache)
 {
+    // [iPSX2] W^X FIX: Ensure we have write permissions!
+    HostSys::BeginCodeWrite();
+
+    // [P43] Write through RW view; code (RX) used for displacement calc and icache flush
+    u8* rw_code = static_cast<u8*>(code) + DarwinMisc::g_code_rw_offset;
     const s64 displacement = GetPCDisplacement(code, dst);
 
-    u32 new_code = a64::B | a64::Assembler::ImmUncondBranch(displacement);
-    std::memcpy(code, &new_code, sizeof(new_code));
+    // Check if displacement is within 26-bit range for B instruction
+    if (!vixl::IsInt26(displacement)) {
+        // Fallback: Generate a BR instruction using x16
+        // LDR X16, 8 bytes ahead; BR X16; <64-bit address>
+        u32* code32 = reinterpret_cast<u32*>(rw_code);
+        code32[0] = 0x58000050; // LDR X16, #8
+        code32[1] = 0xD61F0200; // BR X16
+        u64* addr_ptr = reinterpret_cast<u64*>(code32 + 2);
+        *addr_ptr = reinterpret_cast<u64>(dst);
 
-    if (flush_icache) {
-        HostSys::FlushInstructionCache(code, a64::kInstructionSize);
+        if (flush_icache) {
+            HostSys::FlushInstructionCache(code, 16); // 4 instructions = 16 bytes
+        }
+    } else {
+        u32 new_code = a64::B | a64::Assembler::ImmUncondBranch(displacement);
+        std::memcpy(rw_code, &new_code, sizeof(new_code));
+
+        if (flush_icache) {
+            HostSys::FlushInstructionCache(code, a64::kInstructionSize);
+        }
     }
+
+    HostSys::EndCodeWrite();
 }
 
 a64::Register armLoadPtr(const void* addr)

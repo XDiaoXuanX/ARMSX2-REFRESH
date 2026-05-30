@@ -3,6 +3,9 @@
 
 #include "BuildVersion.h"
 #include "Config.h"
+#include "R5900.h"
+#include "R3000A.h"
+#include "VUmicro.h"
 #include "Counters.h"
 #include "GS.h"
 #include "GS/GS.h"
@@ -36,10 +39,6 @@
 #include "fmt/chrono.h"
 #include "fmt/format.h"
 #include "imgui.h"
-
-#if defined(__APPLE__)
-#include <TargetConditionals.h>
-#endif
 
 #include <array>
 #include <chrono>
@@ -141,11 +140,13 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 			switch (PerformanceMetrics::GetInternalFPSMethod())
 			{
 				case PerformanceMetrics::InternalFPSMethod::GSPrivilegedRegister:
-					text.append_format("FPS: {:.2f} [P]", PerformanceMetrics::GetInternalFPS());
+					text.append_format("FPS: {:.2f} [P]", PerformanceMetrics::GetInternalFPS(),
+						PerformanceMetrics::GetFPS());
 					break;
 
 				case PerformanceMetrics::InternalFPSMethod::DISPFBBlit:
-					text.append_format("FPS: {:.2f} [B]", PerformanceMetrics::GetInternalFPS());
+					text.append_format("FPS: {:.2f} [B]", PerformanceMetrics::GetInternalFPS(),
+						PerformanceMetrics::GetFPS());
 					break;
 
 				case PerformanceMetrics::InternalFPSMethod::None:
@@ -158,7 +159,8 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 
 		if (GSConfig.OsdShowVPS)
 		{
-			text.append_format("{}VPS: {:.2f}", first ? "" : " | ", PerformanceMetrics::GetFPS());
+			text.append_format("{}VPS: {:.2f}", first ? "" : " | ", PerformanceMetrics::GetFPS(),
+				PerformanceMetrics::GetFPS());
 			first = false;
 		}
 
@@ -176,11 +178,11 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 
 		if (GSConfig.OsdShowVersion)
 		{
-#if defined(__APPLE__) && TARGET_OS_IPHONE
-			text.append_format("{}ARMSX2 iOS", first ? "" : " | ");
-#else
-			text.append_format("{}ARMSX2 {}", first ? "" : " | ", BuildVersion::GitRev);
+#ifndef ARMSX2_VERSION_STR
+#define ARMSX2_VERSION_STR "dev"
 #endif
+			text.append_format("{}ARMSX2 iOS v{}", first ? "" : " | ", ARMSX2_VERSION_STR);
+			first = false;
 		}
 
 		if (!text.empty())
@@ -194,6 +196,22 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 				color = IM_COL32(255, 255, 255, 255);
 
 			DRAW_LINE(fixed_font, text.c_str(), color);
+		}
+
+		// CPU mode: separate line, actual runtime state (not INI)
+		if (!first)
+		{
+			const char* ee_mode  = (Cpu == &intCpu) ? "Int" : "JIT";
+			const char* iop_mode = (psxCpu == &psxInt) ? "Int" : "JIT";
+			const char* vu0_mode = (CpuVU0 == &CpuIntVU0) ? "Int" : "JIT";
+			const char* vu1_mode = (CpuVU1 == &CpuIntVU1) ? "Int" : "JIT";
+			text.clear();
+			// [P51] Merge VU0/VU1 when both are the same mode
+			if (std::strcmp(vu0_mode, vu1_mode) == 0)
+				text.append_format("EE:{} IOP:{} VU:{}", ee_mode, iop_mode, vu0_mode);
+			else
+				text.append_format("EE:{} IOP:{} VU0:{} VU1:{}", ee_mode, iop_mode, vu0_mode, vu1_mode);
+			DRAW_LINE(fixed_font, text.c_str(), IM_COL32(255, 255, 255, 255));
 		}
 
 		if (GSConfig.OsdShowGSStats)

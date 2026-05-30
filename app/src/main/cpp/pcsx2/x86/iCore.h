@@ -12,6 +12,54 @@
 //#define RALOG(...) fprintf(stderr, __VA_ARGS__)
 #define RALOG(...)
 
+// Phase 3: Guard flag for slot/phys separation logic.
+// Always enabled for Phase 3 logic.
+#define ENABLE_SLOT7_GUARD 1
+
+// Phase 2: Error reporting helper (Implemented in iCore.cpp)
+void ReportInvalidSlotPhase2(int slot);
+
+// Phase 0: Detection Logic (Implemented in iCore.cpp)
+void CheckSuspiciousSlotPhase0(int slot);
+
+// Phase 3: Slot to Physical Register Mapping Table (iOS/ARM64)
+// Slots 0-4 map to x19-x24 with x24 kept at slot4 for compatibility with the
+// current iOS/ARM64 port.
+// x26 (RSTATE_x26) remains reserved on iOS/ARM64.
+static constexpr int kSlotToPhys[] = {
+    19, // Slot 0 -> x19
+    20, // Slot 1 -> x20
+    21, // Slot 2 -> x21
+    22, // Slot 3 -> x22
+    24  // Slot 4 -> x24
+};
+
+// HostGprPhys: Maps slot index to physical register number
+// In Phase 3, this performs actual mapping.
+// Allocatable registers are controlled by _isAllocatableX86reg()
+static inline int HostGprPhys(int slot) {
+#ifdef ENABLE_SLOT7_GUARD
+    // Phase 3: Strict checks and Mapping
+    // iREGCNT_GPR matches kSlotToPhys length on iOS/ARM64.
+    if (slot < 0 || slot >= static_cast<int>(iREGCNT_GPR)) {
+        ReportInvalidSlotPhase2(slot);
+        return 19; // Safe fallback (x19) to prevent crash if assert ignored
+    }
+    return kSlotToPhys[slot];
+#else
+    // Phase 0/1/2: Detect suspicious values only in Dev builds
+    #ifdef PCSX2_DEVBUILD
+        CheckSuspiciousSlotPhase0(slot);
+    #endif
+    return slot;
+#endif
+}
+
+// Phase 0: Helper wrappers for slot -> phys -> VIXL register conversion
+// Use these instead of a64::XRegister(slot) to ensure HostGprPhys is called
+static inline a64::XRegister HostX(int slot) { return a64::XRegister(HostGprPhys(slot)); }
+static inline a64::WRegister HostW(int slot) { return a64::WRegister(HostGprPhys(slot)); }
+
 ////////////////////////////////////////////////////////////////////////////////
 // Shared Register allocation flags (apply to X86, XMM, MMX, etc).
 
@@ -30,19 +78,19 @@
 #define PROCESS_EE_HI         0x80 // hi reg is valid
 #define PROCESS_EE_ACC        0x40 // acc reg is valid
 
-#define EEREC_S    (((info) >>  8) & 0xf)
-#define EEREC_T    (((info) >> 12) & 0xf)
-#define EEREC_D    (((info) >> 16) & 0xf)
-#define EEREC_LO   (((info) >> 20) & 0xf)
-#define EEREC_HI   (((info) >> 24) & 0xf)
-#define EEREC_ACC  (((info) >> 20) & 0xf)
+#define EEREC_S    (((info) >>  8) & 0x1f)
+#define EEREC_T    (((info) >> 13) & 0x1f)
+#define EEREC_D    (((info) >> 18) & 0x1f)
+#define EEREC_LO   (((info) >> 18) & 0x1f)
+#define EEREC_HI   (((info) >> 23) & 0x1f)
+#define EEREC_ACC  (((info) >> 18) & 0x1f)
 
 #define PROCESS_EE_SET_S(reg)   (((reg) <<  8) | PROCESS_EE_S)
-#define PROCESS_EE_SET_T(reg)   (((reg) << 12) | PROCESS_EE_T)
-#define PROCESS_EE_SET_D(reg)   (((reg) << 16) | PROCESS_EE_D)
-#define PROCESS_EE_SET_LO(reg)  (((reg) << 20) | PROCESS_EE_LO)
-#define PROCESS_EE_SET_HI(reg)  (((reg) << 24) | PROCESS_EE_HI)
-#define PROCESS_EE_SET_ACC(reg) (((reg) << 20) | PROCESS_EE_ACC)
+#define PROCESS_EE_SET_T(reg)   (((reg) << 13) | PROCESS_EE_T)
+#define PROCESS_EE_SET_D(reg)   (((reg) << 18) | PROCESS_EE_D)
+#define PROCESS_EE_SET_LO(reg)  (((reg) << 18) | PROCESS_EE_LO)
+#define PROCESS_EE_SET_HI(reg)  (((reg) << 23) | PROCESS_EE_HI)
+#define PROCESS_EE_SET_ACC(reg) (((reg) << 18) | PROCESS_EE_ACC)
 
 // special info not related to above flags
 #define PROCESS_CONSTS 1
@@ -138,6 +186,8 @@ enum : int
 	DELETE_REG_FLUSH_AND_FREE = 2,
 	DELETE_REG_FREE_NO_WRITEBACK = 3
 };
+
+extern "C" void recLogWritebackVerify(u32 guestReg);
 
 struct _xmmregs
 {
@@ -327,4 +377,3 @@ int _allocIfUsedFPUtoXMM(int fpureg, int mode);
 
 // no freeing, used when callee won't destroy xmm regs
 #define FLUSH_NODESTROY (FLUSH_CONSTANT_REGS | FLUSH_FLUSH_XMM | FLUSH_ALL_X86)
-

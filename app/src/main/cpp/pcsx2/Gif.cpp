@@ -13,6 +13,15 @@
 alignas(16) GIF_Fifo gif_fifo;
 alignas(16) gifStruct gif;
 
+// [TEMP_DIAG] @@GIF_DMA_RATE@@ — global counter for vsync-rate tracking
+// Removal condition: BIOS browserafter confirmed
+u32 g_gif_dma_total = 0;
+// [TEMP_DIAG] GIF DMA total bytes transferred
+// Removal condition: BIOS browserafter confirmed
+volatile uint64_t g_gif_dma_bytes_total = 0;
+// [TEMP_DIAG] Per-path byte counters — Removal condition: BIOS browserafter confirmed
+u64 g_path_bytes[4] = {};
+
 static __fi void GifDMAInt(int cycles)
 {
 	if (dmacRegs.ctrl.MFD == MFD_GIF)
@@ -118,6 +127,7 @@ int GIF_Fifo::read_fifo()
 		return 0;
 	}
 
+	g_gif_dma_bytes_total += (uint64_t)(fifoSize * 16); // [TEMP_DIAG]
 	const int sizeRead = gifUnit.TransferGSPacketData(GIF_TRANS_DMA, (u8*)&data, fifoSize * 16) / 16; //returns the size actually read
 
 	GIF_LOG("GIF FIFO Read %d QW from FIFO Current Size %d", sizeRead, fifoSize);
@@ -333,6 +343,7 @@ static u32 WRITERING_DMA(u32* pMem, u32 qwc)
 		return 4; // Arbitrary value, probably won't schedule a DMA anwyay since the FIFO is full and GIF is paused
 	}
 
+	g_gif_dma_bytes_total += (uint64_t)(qwc * 16); // [TEMP_DIAG]
 	size = gifUnit.TransferGSPacketData(GIF_TRANS_DMA, (u8*)pMem, qwc * 16) / 16;
 	incGifChAddr(size);
 	return size;
@@ -464,6 +475,42 @@ void GIFdma()
 
 void dmaGIF()
 {
+	if (!gifch.chcr.STR) return;
+	
+	// [TEMP_DIAG] @@GIF_DMA_RATE@@ — vsync-based GIF DMA rate counter
+	// Removal condition: BIOS browserafter confirmed
+	{
+		static u32 s_gif_total = 0;
+		s_gif_total++;
+		// Logged from Counters.cpp via extern
+		extern u32 g_gif_dma_total;
+		g_gif_dma_total = s_gif_total;
+	}
+	// [iter255] GIF DMA ch2 bootprobe  [iter677] +EE PC for render divergence analysis
+	{
+		static int s_gif_dma_n = 0;
+		bool log_this = (s_gif_dma_n < 30) || (g_gif_dma_total >= 50 && g_gif_dma_total <= 55)
+			|| (g_gif_dma_total >= 100 && g_gif_dma_total <= 110);
+		if (log_this) {
+			Console.WriteLn("@@GIF_DMA_START@@ n=%d pc=%08x chcr=%08x qwc=%x madr=%08x tadr=%08x mod=%d str=%d",
+				s_gif_dma_n, cpuRegs.pc, gifch.chcr._u32, gifch.qwc, gifch.madr, gifch.tadr,
+				(int)gifch.chcr.MOD, (int)gifch.chcr.STR);
+			// [TEMP_DIAG] Full data checksum for ALL DMA n=0-29 (texture upload comparison)
+			// Removal condition: BIOS browserafter confirmed
+			if (gifch.madr < 0x02000000u && eeMem && s_gif_dma_n < 30) {
+				const u32* d = reinterpret_cast<const u32*>(eeMem->Main + (gifch.madr & 0x01FFFFFFu));
+				u32 qwc = gifch.qwc;
+				// XOR checksum of ALL data
+				u32 cksum = 0;
+				for (u32 i = 0; i < qwc * 4; i++)
+					cksum ^= d[i];
+				Console.WriteLn("@@GIF_CKSUM@@ n=%d qwc=%u cksum=%08x first=[%08x_%08x_%08x_%08x]",
+					s_gif_dma_n, qwc, cksum, d[3], d[2], d[1], d[0]);
+			}
+		}
+		s_gif_dma_n++;
+	}
+
 	// DevCon.Warning("dmaGIFstart chcr = %lx, madr = %lx, qwc  = %lx\n tadr = %lx, asr0 = %lx, asr1 = %lx", gifch.chcr._u32, gifch.madr, gifch.qwc, gifch.tadr, gifch.asr0, gifch.asr1);
 
 	gif.gspath3done = false; // For some reason this doesn't clear? So when the system starts the thread, we will clear it :)

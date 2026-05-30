@@ -41,26 +41,26 @@ REC_FUNC_DEL(DSRAV, _Rd_);
 
 static void recMoveTtoD(int info)
 {
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = a64::WRegister(HostGprPhys(EEREC_D));
 	if (info & PROCESS_EE_T) {
-//        xMOV(xRegister32(EEREC_D), xRegister32(EEREC_T));
-        armAsm->Mov(reg32, a64::WRegister(EEREC_T));
+//        xMOV(xRegister32(HostGprPhys(EEREC_D)), xRegister32(HostGprPhys(EEREC_T)));
+        armAsm->Mov(reg32, a64::WRegister(HostGprPhys(EEREC_T)));
     }
 	else {
-//        xMOV(xRegister32(EEREC_D), ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
+//        xMOV(xRegister32(HostGprPhys(EEREC_D)), ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
         armLoad(reg32, PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0]));
     }
 }
 
 static void recMoveTtoD64(int info)
 {
-    auto reg64 = a64::XRegister(EEREC_D);
+    auto reg64 = a64::XRegister(HostGprPhys(EEREC_D));
 	if (info & PROCESS_EE_T) {
-//        xMOV(xRegister64(EEREC_D), xRegister64(EEREC_T));
-        armAsm->Mov(reg64, a64::XRegister(EEREC_T));
+//        xMOV(xRegister64(HostGprPhys(EEREC_D)), xRegister64(HostGprPhys(EEREC_T)));
+        armAsm->Mov(reg64, a64::XRegister(HostGprPhys(EEREC_T)));
     }
 	else {
-//        xMOV(xRegister64(EEREC_D), ptr64[&cpuRegs.GPR.r[_Rt_].UD[0]]);
+//        xMOV(xRegister64(HostGprPhys(EEREC_D)), ptr64[&cpuRegs.GPR.r[_Rt_].UD[0]]);
         armLoad(reg64, PTR_CPU(cpuRegs.GPR.r[_Rt_].UD[0]));
     }
 }
@@ -69,8 +69,8 @@ static void recMoveSToRCX(int info)
 {
 	// load full 64-bits for store->load forwarding, since we always store >=64.
 	if (info & PROCESS_EE_S) {
-//        xMOV(rcx, xRegister64(EEREC_S));
-        armAsm->Mov(RCX, a64::XRegister(EEREC_S));
+//        xMOV(rcx, xRegister64(HostGprPhys(EEREC_S)));
+        armAsm->Mov(RCX, a64::XRegister(HostGprPhys(EEREC_S)));
     }
 	else {
 //        xMOV(rcx, ptr64[&cpuRegs.GPR.r[_Rs_].UL[0]]);
@@ -92,13 +92,13 @@ static void recSLLs_(int info, int sa)
 
 	recMoveTtoD(info);
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = a64::WRegister(HostGprPhys(EEREC_D));
 	if (sa != 0) {
-//        xSHL(xRegister32(EEREC_D), sa);
+//        xSHL(xRegister32(HostGprPhys(EEREC_D)), sa);
         armAsm->Lsl(reg32, reg32, sa);
     }
-//	xMOVSX(xRegister64(EEREC_D), xRegister32(EEREC_D));
-    armAsm->Sxtw(a64::XRegister(EEREC_D), reg32);
+//	xMOVSX(xRegister64(HostGprPhys(EEREC_D)), xRegister32(HostGprPhys(EEREC_D)));
+    armAsm->Sxtw(a64::XRegister(HostGprPhys(EEREC_D)), reg32);
 }
 
 static void recSLL_(int info)
@@ -106,7 +106,7 @@ static void recSLL_(int info)
 	recSLLs_(info, _Sa_);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, SLL, XMMINFO_WRITED | XMMINFO_READT);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, SLL, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_NORENAME);
 
 //// SRL
 static void recSRL_const()
@@ -120,13 +120,13 @@ static void recSRLs_(int info, int sa)
 
 	recMoveTtoD(info);
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = a64::WRegister(HostGprPhys(EEREC_D));
 	if (sa != 0) {
-//        xSHR(xRegister32(EEREC_D), sa);
+//        xSHR(xRegister32(HostGprPhys(EEREC_D)), sa);
         armAsm->Lsr(reg32, reg32, sa);
     }
-//	xMOVSX(xRegister64(EEREC_D), xRegister32(EEREC_D));
-    armAsm->Sxtw(a64::XRegister(EEREC_D), reg32);
+//	xMOVSX(xRegister64(HostGprPhys(EEREC_D)), xRegister32(HostGprPhys(EEREC_D)));
+    armAsm->Sxtw(a64::XRegister(HostGprPhys(EEREC_D)), reg32);
 }
 
 static void recSRL_(int info)
@@ -134,7 +134,7 @@ static void recSRL_(int info)
 	recSRLs_(info, _Sa_);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, SRL, XMMINFO_WRITED | XMMINFO_READT);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, SRL, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_NORENAME);
 
 //// SRA
 static void recSRA_const()
@@ -148,13 +148,13 @@ static void recSRAs_(int info, int sa)
 
 	recMoveTtoD(info);
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = a64::WRegister(HostGprPhys(EEREC_D));
 	if (sa != 0) {
-//        xSAR(xRegister32(EEREC_D), sa);
+//        xSAR(xRegister32(HostGprPhys(EEREC_D)), sa);
         armAsm->Asr(reg32, reg32, sa);
     }
-//	xMOVSX(xRegister64(EEREC_D), xRegister32(EEREC_D));
-    armAsm->Sxtw(a64::XRegister(EEREC_D), reg32);
+//	xMOVSX(xRegister64(HostGprPhys(EEREC_D)), xRegister32(HostGprPhys(EEREC_D)));
+    armAsm->Sxtw(a64::XRegister(HostGprPhys(EEREC_D)), reg32);
 }
 
 static void recSRA_(int info)
@@ -162,7 +162,7 @@ static void recSRA_(int info)
 	recSRAs_(info, _Sa_);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, SRA, XMMINFO_WRITED | XMMINFO_READT);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, SRA, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_NORENAME);
 
 ////////////////////////////////////////////////////
 static void recDSLL_const()
@@ -176,8 +176,8 @@ static void recDSLLs_(int info, int sa)
 
 	recMoveTtoD64(info);
 	if (sa != 0) {
-//        xSHL(xRegister64(EEREC_D), sa);
-        armAsm->Lsl(a64::XRegister(EEREC_D), a64::XRegister(EEREC_D), sa);
+//        xSHL(xRegister64(HostGprPhys(EEREC_D)), sa);
+        armAsm->Lsl(a64::XRegister(HostGprPhys(EEREC_D)), a64::XRegister(HostGprPhys(EEREC_D)), sa);
     }
 }
 
@@ -186,7 +186,7 @@ static void recDSLL_(int info)
 	recDSLLs_(info, _Sa_);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, DSLL, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, DSLL, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP | XMMINFO_NORENAME);
 
 ////////////////////////////////////////////////////
 static void recDSRL_const()
@@ -200,8 +200,8 @@ static void recDSRLs_(int info, int sa)
 
 	recMoveTtoD64(info);
 	if (sa != 0) {
-//        xSHR(xRegister64(EEREC_D), sa);
-        armAsm->Lsr(a64::XRegister(EEREC_D), a64::XRegister(EEREC_D), sa);
+//        xSHR(xRegister64(HostGprPhys(EEREC_D)), sa);
+        armAsm->Lsr(a64::XRegister(HostGprPhys(EEREC_D)), a64::XRegister(HostGprPhys(EEREC_D)), sa);
     }
 }
 
@@ -210,7 +210,7 @@ static void recDSRL_(int info)
 	recDSRLs_(info, _Sa_);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, DSRL, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, DSRL, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP | XMMINFO_NORENAME);
 
 //// DSRA
 static void recDSRA_const()
@@ -224,8 +224,8 @@ static void recDSRAs_(int info, int sa)
 
 	recMoveTtoD64(info);
 	if (sa != 0) {
-//        xSAR(xRegister64(EEREC_D), sa);
-        armAsm->Asr(a64::XRegister(EEREC_D), a64::XRegister(EEREC_D), sa);
+//        xSAR(xRegister64(HostGprPhys(EEREC_D)), sa);
+        armAsm->Asr(a64::XRegister(HostGprPhys(EEREC_D)), a64::XRegister(HostGprPhys(EEREC_D)), sa);
     }
 }
 
@@ -234,7 +234,7 @@ static void recDSRA_(int info)
 	recDSRAs_(info, _Sa_);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, DSRA, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, DSRA, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP | XMMINFO_NORENAME);
 
 ///// DSLL32
 static void recDSLL32_const()
@@ -247,7 +247,7 @@ static void recDSLL32_(int info)
 	recDSLLs_(info, _Sa_ + 32);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, DSLL32, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, DSLL32, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP | XMMINFO_NORENAME);
 
 //// DSRL32
 static void recDSRL32_const()
@@ -260,7 +260,7 @@ static void recDSRL32_(int info)
 	recDSRLs_(info, _Sa_ + 32);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, DSRL32, XMMINFO_WRITED | XMMINFO_READT);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, DSRL32, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_NORENAME);
 
 //// DSRA32
 static void recDSRA32_const()
@@ -273,7 +273,7 @@ static void recDSRA32_(int info)
 	recDSRAs_(info, _Sa_ + 32);
 }
 
-EERECOMPILE_CODEX(eeRecompileCodeRC2, DSRA32, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP);
+EERECOMPILE_CODEX(eeRecompileCodeRC2, DSRA32, XMMINFO_WRITED | XMMINFO_READT | XMMINFO_64BITOP | XMMINFO_NORENAME);
 
 /*********************************************************
 * Shift arithmetic with variant register shift           *
@@ -295,11 +295,11 @@ static void recShiftV_constt(int info, const LogicalShift shift)
 	pxAssert(_Rs_ != 0);
 	recMoveSToRCX(info);
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = a64::WRegister(HostGprPhys(EEREC_D));
 
-//	xMOV(xRegister32(EEREC_D), g_cpuConstRegs[_Rt_].UL[0]);
+//	xMOV(xRegister32(HostGprPhys(EEREC_D)), g_cpuConstRegs[_Rt_].UL[0]);
     armAsm->Mov(reg32, g_cpuConstRegs[_Rt_].UL[0]);
-//	shift(xRegister32(EEREC_D), cl);
+//	shift(xRegister32(HostGprPhys(EEREC_D)), cl);
     switch (shift) {
         case LogicalShift::xSHL:
             armAsm->Lsl(reg32, reg32, ECX);
@@ -311,8 +311,8 @@ static void recShiftV_constt(int info, const LogicalShift shift)
             armAsm->Asr(reg32, reg32, ECX);
             break;
     }
-//	xMOVSX(xRegister64(EEREC_D), xRegister32(EEREC_D));
-    armAsm->Sxtw(a64::XRegister(EEREC_D), reg32);
+//	xMOVSX(xRegister64(HostGprPhys(EEREC_D)), xRegister32(HostGprPhys(EEREC_D)));
+    armAsm->Sxtw(a64::XRegister(HostGprPhys(EEREC_D)), reg32);
 }
 
 static void recShiftV(int info, const LogicalShift shift)
@@ -322,9 +322,9 @@ static void recShiftV(int info, const LogicalShift shift)
 	recMoveSToRCX(info);
 	recMoveTtoD(info);
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = a64::WRegister(HostGprPhys(EEREC_D));
 
-//	shift(xRegister32(EEREC_D), cl);
+//	shift(xRegister32(HostGprPhys(EEREC_D)), cl);
     switch (shift) {
         case LogicalShift::xSHL:
             armAsm->Lsl(reg32, reg32, ECX);
@@ -336,8 +336,8 @@ static void recShiftV(int info, const LogicalShift shift)
             armAsm->Asr(reg32, reg32, ECX);
             break;
     }
-//	xMOVSX(xRegister64(EEREC_D), xRegister32(EEREC_D));
-    armAsm->Sxtw(a64::XRegister(EEREC_D), reg32);
+//	xMOVSX(xRegister64(HostGprPhys(EEREC_D)), xRegister32(HostGprPhys(EEREC_D)));
+    armAsm->Sxtw(a64::XRegister(HostGprPhys(EEREC_D)), reg32);
 }
 
 static void recDShiftV_constt(int info, const LogicalShift shift)
@@ -345,11 +345,11 @@ static void recDShiftV_constt(int info, const LogicalShift shift)
 	pxAssert(_Rs_ != 0);
 	recMoveSToRCX(info);
 
-    auto reg64 = a64::XRegister(EEREC_D);
+    auto reg64 = a64::XRegister(HostGprPhys(EEREC_D));
 
-//	xMOV64(xRegister64(EEREC_D), g_cpuConstRegs[_Rt_].SD[0]);
+//	xMOV64(xRegister64(HostGprPhys(EEREC_D)), g_cpuConstRegs[_Rt_].SD[0]);
     armAsm->Mov(reg64, g_cpuConstRegs[_Rt_].SD[0]);
-//	shift(xRegister64(EEREC_D), cl);
+//	shift(xRegister64(HostGprPhys(EEREC_D)), cl);
     switch (shift) {
         case LogicalShift::xSHL:
             armAsm->Lsl(reg64, reg64, RCX);
@@ -369,9 +369,9 @@ static void recDShiftV(int info, const LogicalShift shift)
 	recMoveSToRCX(info);
 	recMoveTtoD64(info);
 
-    auto reg64 = a64::XRegister(EEREC_D);
+    auto reg64 = a64::XRegister(HostGprPhys(EEREC_D));
 
-//	shift(xRegister64(EEREC_D), cl);
+//	shift(xRegister64(HostGprPhys(EEREC_D)), cl);
     switch (shift) {
         case LogicalShift::xSHL:
             armAsm->Lsl(reg64, reg64, RCX);

@@ -57,11 +57,12 @@ void recLUI()
 		GPR_SET_CONST(_Rt_);
 		g_cpuConstRegs[_Rt_].UD[0] = (s32)(cpuRegs.code << 16);
 	}
+
 	else
 	{
 		const int regt = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_WRITE);
 //		xMOV64(xRegister64(regt), (s64)(s32)(cpuRegs.code << 16));
-        armAsm->Mov(a64::XRegister(regt), (s64)(s32)(cpuRegs.code << 16));
+        armAsm->Mov(HostX(regt), (s64)(s32)(cpuRegs.code << 16));
 	}
 
 	EE::Profiler.EmitOp(eeOpcode::LUI);
@@ -97,7 +98,7 @@ static void recMFHILO(bool hi, bool upper)
 			const int gprhilo = upper ? -1 : _allocIfUsedGPRtoX86(reg, MODE_READ);
 			if (gprhilo >= 0) {
 //                xPINSR.Q(xRegisterSSE(xmmd), xRegister64(gprhilo), 0);
-                armAsm->Ins(a64::QRegister(xmmd).V2D(), 0, a64::XRegister(gprhilo));
+                armAsm->Ins(a64::QRegister(xmmd).V2D(), 0, HostX(gprhilo));
             }
 			else {
 //                xPINSR.Q(xRegisterSSE(xmmd), ptr64[hi ? &cpuRegs.HI.UD[static_cast<u8>(upper)]
@@ -120,11 +121,11 @@ static void recMFHILO(bool hi, bool upper)
 			pxAssert(gprreg < 0);
 			if (upper) {
 //                xPEXTR.Q(xRegister64(gprd), xRegisterSSE(xmmhilo), 1);
-                armAsm->Fmov(a64::XRegister(gprd), a64::QRegister(xmmhilo).V1D(), 1);
+                armAsm->Fmov(HostX(gprd), a64::QRegister(xmmhilo).V1D(), 1);
             }
 			else {
 //                xMOVD(xRegister64(gprd), xRegisterSSE(xmmhilo));
-                armAsm->Fmov(a64::XRegister(gprd), a64::QRegister(xmmhilo).V1D());
+                armAsm->Fmov(HostX(gprd), a64::QRegister(xmmhilo).V1D());
             }
 		}
 		else if (gprd < 0 && xmmhilo >= 0)
@@ -144,18 +145,18 @@ static void recMFHILO(bool hi, bool upper)
 		{
 			if (gprreg >= 0) {
 //                xMOV(xRegister64(gprd), xRegister64(gprreg));
-                armAsm->Mov(a64::XRegister(gprd), a64::XRegister(gprreg));
+                armAsm->Mov(HostX(gprd), HostX(gprreg));
             }
 			else {
 //                xMOV(xRegister64(gprd), ptr64[hi ? &cpuRegs.HI.UD[static_cast<u8>(upper)]
 //                                                 : &cpuRegs.LO.UD[static_cast<u8>(upper)]]);
-                armLoad(a64::XRegister(gprd), hi ? PTR_CPU(cpuRegs.HI.UD[static_cast<u8>(upper)]) : PTR_CPU(cpuRegs.LO.UD[static_cast<u8>(upper)]));
+                armLoad(HostX(gprd), hi ? PTR_CPU(cpuRegs.HI.UD[static_cast<u8>(upper)]) : PTR_CPU(cpuRegs.LO.UD[static_cast<u8>(upper)]));
             }
 		}
 		else if (gprreg >= 0)
 		{
 //			xMOV(ptr64[&cpuRegs.GPR.r[_Rd_].UD[0]], xRegister64(gprreg));
-            armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), a64::XRegister(gprreg));
+            armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), HostX(gprreg));
 		}
 		else
 		{
@@ -192,7 +193,7 @@ static void recMTHILO(bool hi, bool upper)
 			const int gprhilo = upper ? -1 : _allocIfUsedGPRtoX86(reg, MODE_WRITE);
 			if (gprhilo >= 0) {
 //                xMOVD(xRegister64(gprhilo), xRegisterSSE(xmms)); // actually movq
-                armAsm->Fmov(a64::XRegister(gprhilo), a64::QRegister(xmms).V1D());
+                armAsm->Fmov(HostX(gprhilo), a64::QRegister(xmms).V1D());
             }
 			else {
 //                xMOVQ(ptr64[hi ? &cpuRegs.HI.UD[static_cast<u8>(upper)]
@@ -210,14 +211,14 @@ static void recMTHILO(bool hi, bool upper)
 			if (gprs >= 0)
 			{
 //				xPINSR.Q(xRegisterSSE(xmmhilo), xRegister64(gprs), static_cast<u8>(upper));
-                armAsm->Ins(a64::QRegister(xmmhilo).V2D(), static_cast<u8>(upper), a64::XRegister(gprs));
+                armAsm->Ins(a64::QRegister(xmmhilo).V2D(), static_cast<u8>(upper), HostX(gprs));
 			}
 			else if (GPR_IS_CONST1(_Rs_))
 			{
 				// force it into a register, since we need to load the constant anyway
 				gprs = _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
 //				xPINSR.Q(xRegisterSSE(xmmhilo), xRegister64(gprs), static_cast<u8>(upper));
-                armAsm->Ins(a64::QRegister(xmmhilo).V2D(), static_cast<u8>(upper), a64::XRegister(gprs));
+                armAsm->Ins(a64::QRegister(xmmhilo).V2D(), static_cast<u8>(upper), HostX(gprs));
 			}
 			else
 			{
@@ -234,14 +235,14 @@ static void recMTHILO(bool hi, bool upper)
 			const int gprreg = upper ? -1 : _allocIfUsedGPRtoX86(reg, MODE_WRITE);
 			if (gprreg >= 0)
 			{
-				_eeMoveGPRtoR(a64::XRegister(gprreg), _Rs_);
+				_eeMoveGPRtoR(HostX(gprreg), _Rs_);
 			}
 			else
 			{
 				// force into a register, since we need to load it to write anyway
 				gprs = _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
 //				xMOV(ptr64[hi ? &cpuRegs.HI.UD[static_cast<u8>(upper)] : &cpuRegs.LO.UD[static_cast<u8>(upper)]], xRegister64(gprs));
-                armStore(hi ? PTR_CPU(cpuRegs.HI.UD[static_cast<u8>(upper)]) : PTR_CPU(cpuRegs.LO.UD[static_cast<u8>(upper)]), a64::XRegister(gprs));
+                armStore(hi ? PTR_CPU(cpuRegs.HI.UD[static_cast<u8>(upper)]) : PTR_CPU(cpuRegs.LO.UD[static_cast<u8>(upper)]), HostX(gprs));
 			}
 		}
 	}
@@ -305,52 +306,58 @@ static void recMOVZtemp_const()
 
 static void recMOVZtemp_consts(int info)
 {
-	// we need the constant anyway, so just force it into a register
-	const int regs = (info & PROCESS_EE_S) ? EEREC_S : _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
+	// [iter676h FIX] consts: rs is constant. Avoid _allocX86reg which may evict
+	// registers needed by other operands. Load rs from memory instead.
 	if (info & PROCESS_EE_T) {
-//        xTEST(xRegister64(EEREC_T), xRegister64(EEREC_T));
-        armAsm->Tst(a64::XRegister(EEREC_T), a64::XRegister(EEREC_T));
-    }
+		armAsm->Tst(HostX(EEREC_T), HostX(EEREC_T));
+	}
 	else {
-//        xCMP(ptr64[&cpuRegs.GPR.r[_Rt_].UD[0]], 0);
-        armAsm->Cmp(armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rt_].UD[0])), 0);
-    }
+		armAsm->Cmp(armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rt_].UD[0])), 0);
+	}
 
-//	xCMOVE(xRegister64(EEREC_D), xRegister64(regs));
-    auto regX = a64::XRegister(EEREC_D);
-    armAsm->Csel(regX, a64::XRegister(regs), regX, a64::Condition::eq);
+	auto regX = HostX(EEREC_D);
+	if (info & PROCESS_EE_S) {
+		armAsm->Csel(regX, HostX(EEREC_S), regX, a64::Condition::eq);
+	}
+	else {
+		// [iter681] FIX: Rs is const-folded — use g_cpuConstRegs, NOT cpuRegs memory.
+		// cpuRegs.GPR.r[Rs] may contain a stale value from before the const-fold.
+		armAsm->Mov(RXVIXLSCRATCH, (u64)g_cpuConstRegs[_Rs_].UD[0]);
+		armAsm->Csel(regX, RXVIXLSCRATCH, regX, a64::Condition::eq);
+	}
 }
 
 static void recMOVZtemp_constt(int info)
 {
+	// [iter676h FIX] constt: rt is constant zero → condition always true → unconditional move.
+	// Previous code used Csel with stale flags and potentially invalid EEREC_S when PROCESS_EE_S=0.
 	if (info & PROCESS_EE_S) {
-//        xMOV(xRegister64(EEREC_D), xRegister64(EEREC_S));
-        armAsm->Mov(a64::XRegister(EEREC_D), a64::XRegister(EEREC_S));
-    }
+		armAsm->Mov(HostX(EEREC_D), HostX(EEREC_S));
+	}
 	else {
-//        xMOV(xRegister64(EEREC_D), ptr64[&cpuRegs.GPR.r[_Rs_].UD[0]]);
-        armLoad(a64::XRegister(EEREC_D), PTR_CPU(cpuRegs.GPR.r[_Rs_].UD[0]));
-    }
+		auto rsVal = armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rs_].UD[0]));
+		armAsm->Mov(HostX(EEREC_D), rsVal);
+	}
 }
 
 static void recMOVZtemp_(int info)
 {
 	if (info & PROCESS_EE_T) {
-//        xTEST(xRegister64(EEREC_T), xRegister64(EEREC_T));
-        armAsm->Tst(a64::XRegister(EEREC_T), a64::XRegister(EEREC_T));
+//        xTEST(xRegister64(HostGprPhys(EEREC_T)), xRegister64(HostGprPhys(EEREC_T)));
+        armAsm->Tst(HostX(EEREC_T), HostX(EEREC_T));
     }
 	else {
 //        xCMP(ptr64[&cpuRegs.GPR.r[_Rt_].UD[0]], 0);
         armAsm->Cmp(armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rt_].UD[0])), 0);
     }
 
-    auto reg64 = a64::XRegister(EEREC_D);
+    auto reg64 = HostX(EEREC_D);
 	if (info & PROCESS_EE_S) {
-//        xCMOVE(xRegister64(EEREC_D), xRegister64(EEREC_S));
-        armAsm->Csel(reg64, a64::XRegister(EEREC_S), reg64, a64::Condition::eq);
+//        xCMOVE(xRegister64(HostGprPhys(EEREC_D)), xRegister64(HostGprPhys(EEREC_S)));
+        armAsm->Csel(reg64, HostX(EEREC_S), reg64, a64::Condition::eq);
     }
 	else {
-//        xCMOVE(xRegister64(EEREC_D), ptr64[&cpuRegs.GPR.r[_Rs_].UD[0]]);
+//        xCMOVE(xRegister64(HostGprPhys(EEREC_D)), ptr64[&cpuRegs.GPR.r[_Rs_].UD[0]]);
         armAsm->Csel(reg64, armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rs_].UD[0])), reg64, a64::Condition::eq);
     }
 }
@@ -377,54 +384,55 @@ static void recMOVNtemp_const()
 
 static void recMOVNtemp_consts(int info)
 {
-	// we need the constant anyway, so just force it into a register
-	const int regs = (info & PROCESS_EE_S) ? EEREC_S : _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
+	// [iter676h FIX] consts: rs is constant. Avoid _allocX86reg which may evict
+	// registers needed by other operands. Load rs from memory instead.
 	if (info & PROCESS_EE_T) {
-//        xTEST(xRegister64(EEREC_T), xRegister64(EEREC_T));
-        armAsm->Tst(a64::XRegister(EEREC_T), a64::XRegister(EEREC_T));
-    }
+		armAsm->Tst(HostX(EEREC_T), HostX(EEREC_T));
+	}
 	else {
-//        xCMP(ptr64[&cpuRegs.GPR.r[_Rt_].UD[0]], 0);
-        armAsm->Cmp(armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rt_].UD[0])), 0);
-    }
+		armAsm->Cmp(armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rt_].UD[0])), 0);
+	}
 
-//	xCMOVNE(xRegister64(EEREC_D), xRegister64(regs));
-    auto reg64 = a64::XRegister(EEREC_D);
-    armAsm->Csel(reg64, a64::XRegister(regs), reg64, a64::Condition::ne);
+	auto reg64 = HostX(EEREC_D);
+	if (info & PROCESS_EE_S) {
+		armAsm->Csel(reg64, HostX(EEREC_S), reg64, a64::Condition::ne);
+	}
+	else {
+		// [iter681] FIX: Rs is const-folded — use g_cpuConstRegs, NOT cpuRegs memory.
+		armAsm->Mov(RXVIXLSCRATCH, (u64)g_cpuConstRegs[_Rs_].UD[0]);
+		armAsm->Csel(reg64, RXVIXLSCRATCH, reg64, a64::Condition::ne);
+	}
 }
 
 static void recMOVNtemp_constt(int info)
 {
+	// [iter676h FIX] constt: rt is constant non-zero → condition always true → unconditional move.
+	// Previous code used Csel with stale flags and potentially invalid EEREC_S when PROCESS_EE_S=0.
 	if (info & PROCESS_EE_S) {
-//        xMOV(xRegister64(EEREC_D), xRegister64(EEREC_S));
-        armAsm->Mov(a64::XRegister(EEREC_D), a64::XRegister(EEREC_S));
-    }
+		armAsm->Mov(HostX(EEREC_D), HostX(EEREC_S));
+	}
 	else {
-//        xMOV(xRegister64(EEREC_D), ptr64[&cpuRegs.GPR.r[_Rs_].UD[0]]);
-        armLoad(a64::XRegister(EEREC_D), PTR_CPU(cpuRegs.GPR.r[_Rs_].UD[0]));
-    }
+		auto rsVal = armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rs_].UD[0]));
+		armAsm->Mov(HostX(EEREC_D), rsVal);
+	}
 }
 
 static void recMOVNtemp_(int info)
 {
 	if (info & PROCESS_EE_T) {
-//        xTEST(xRegister64(EEREC_T), xRegister64(EEREC_T));
-        armAsm->Tst(a64::XRegister(EEREC_T), a64::XRegister(EEREC_T));
-    }
+		armAsm->Tst(HostX(EEREC_T), HostX(EEREC_T));
+	}
 	else {
-//        xCMP(ptr64[&cpuRegs.GPR.r[_Rt_].UD[0]], 0);
-        armAsm->Cmp(armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rt_].UD[0])), 0);
-    }
+		armAsm->Cmp(armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rt_].UD[0])), 0);
+	}
 
-    auto reg64 = a64::XRegister(EEREC_D);
+	auto reg64 = HostX(EEREC_D);
 	if (info & PROCESS_EE_S) {
-//        xCMOVNE(xRegister64(EEREC_D), xRegister64(EEREC_S));
-        armAsm->Csel(reg64, a64::XRegister(EEREC_S), reg64, a64::Condition::ne);
-    }
+		armAsm->Csel(reg64, HostX(EEREC_S), reg64, a64::Condition::ne);
+	}
 	else {
-//        xCMOVNE(xRegister64(EEREC_D), ptr64[&cpuRegs.GPR.r[_Rs_].UD[0]]);
-        armAsm->Csel(reg64, armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rs_].UD[0])), reg64, a64::Condition::ne);
-    }
+		armAsm->Csel(reg64, armLoad64(PTR_CPU(cpuRegs.GPR.r[_Rs_].UD[0])), reg64, a64::Condition::ne);
+	}
 }
 
 static EERECOMPILE_CODERC0(MOVNtemp, XMMINFO_READS | XMMINFO_READT | XMMINFO_READD | XMMINFO_WRITED | XMMINFO_NORENAME);

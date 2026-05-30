@@ -7,6 +7,8 @@
 #include "CDVD/IsoReader.h"
 #include "Counters.h"
 #include "DEV9/DEV9.h"
+
+
 #include "DebugTools/DebugInterface.h"
 #include "DebugTools/SymbolImporter.h"
 #include "Elfheader.h"
@@ -17,7 +19,6 @@
 #include "GameDatabase.h"
 #include "GameList.h"
 #include "Host.h"
-#include "Host/AudioStream.h"
 #include "INISettingsInterface.h"
 #include "ImGui/FullscreenUI.h"
 #include "ImGui/ImGuiOverlays.h"
@@ -40,11 +41,16 @@
 #include "SPU2/spu2.h"
 #include "USB/USB.h"
 #include "Vif_Dynarec.h"
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #include "VMManager.h"
 #include "ps2/BiosTools.h"
 
 #include "common/Console.h"
 #include "common/Error.h"
+#include "common/Darwin/DarwinMisc.h"
 #include "common/FileSystem.h"
 #include "common/FPControl.h"
 #include "common/Path.h"
@@ -72,9 +78,6 @@
 #include <jni.h>
 #include "SDL3/SDL.h"
 #endif
-#if defined(__APPLE__)
-#include <TargetConditionals.h>
-#endif
 
 #include <atomic>
 #include <algorithm>
@@ -94,9 +97,12 @@
 #endif
 
 #ifdef __APPLE__
-#include "common/Darwin/ApplePlatform.h"
 #include "common/Darwin/DarwinMisc.h"
+#include <mach-o/dyld.h>
 #endif
+
+// [iPSX2] Needed for diagnostic logging
+extern "C" void LogUnified(const char* fmt, ...);
 
 namespace VMManager
 {
@@ -195,6 +201,9 @@ static std::string s_elf_override;
 static std::string s_input_profile_name;
 static u32 s_frame_advance_count = 0;
 static bool s_fast_boot_requested = false;
+
+// [P15] ELF postload callback — set by R5900.cpp, called at EntryPointCompilingOnCPUThread
+void (*g_armsx2_elf_postload_fn)() = nullptr;
 static bool s_gs_open_on_initialize = false;
 static bool s_thread_affinities_set = false;
 
@@ -205,125 +214,6 @@ static float s_target_speed = 0.0f;
 static bool s_target_speed_can_sync_to_host = false;
 static bool s_target_speed_synced_to_host = false;
 static bool s_use_vsync_for_timing = false;
-
-#if ARMSX2_APPLE_MAC_RUNTIME
-extern "C" void LogUnified(const char* fmt, ...);
-
-static const char* MacCDVDSourceName(CDVD_SourceType type)
-{
-	switch (type)
-	{
-		case CDVD_SourceType::Iso:
-			return "Iso";
-		case CDVD_SourceType::Disc:
-			return "Disc";
-		case CDVD_SourceType::NoDisc:
-			return "NoDisc";
-		default:
-			return "Unknown";
-	}
-}
-
-static void MacLogCDVDState(const char* tag)
-{
-	const CDVD_SourceType source = CDVDsys_GetSourceType();
-	LogUnified("@@MAC_BOOT_CDVD@@ tag=%s source=%d(%s) file=%s elf=%s fast_boot_requested=%d title=%s serial=%s crc=%08x state=%d\n",
-		tag, static_cast<int>(source), MacCDVDSourceName(source), CDVDsys_GetFile(source).c_str(),
-		s_elf_override.c_str(), s_fast_boot_requested ? 1 : 0, s_title.c_str(), s_disc_serial.c_str(),
-		s_disc_crc, static_cast<int>(s_state.load(std::memory_order_acquire)));
-}
-#endif
-
-static const char* VMStateToLogString(VMState state)
-{
-	switch (state)
-	{
-		case VMState::Shutdown:
-			return "Shutdown";
-		case VMState::Initializing:
-			return "Initializing";
-		case VMState::Running:
-			return "Running";
-		case VMState::Paused:
-			return "Paused";
-		case VMState::Resetting:
-			return "Resetting";
-		case VMState::Stopping:
-			return "Stopping";
-		default:
-			return "Unknown";
-	}
-}
-
-static void LogVMSettingsSnapshot(const char* tag, SettingsInterface* si = nullptr)
-{
-	std::string raw_audio_backend = "(n/a)";
-	int raw_cpu_core = -999;
-	int raw_gs_renderer = -999;
-	bool raw_arm64_dynarec = false;
-	bool raw_extra_memory = false;
-	if (si)
-	{
-		raw_audio_backend = si->GetStringValue("SPU2/Output", "Backend", "(missing)");
-		raw_cpu_core = si->GetIntValue("EmuCore/CPU", "CoreType", -999);
-		raw_gs_renderer = si->GetIntValue("EmuCore/GS", "Renderer", -999);
-		raw_arm64_dynarec = si->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
-		raw_extra_memory = si->GetBoolValue("EmuCore/CPU", "ExtraMemory", false);
-	}
-
-	Console.WriteLn(
-		"@@VM_SETTINGS@@ tag=%s state=%s valid_vm=%d initializing_or_valid=%d mtgs_open=%d "
-		"raw_spu2_backend=%s raw_cpu_core=%d raw_arm64_dynarec=%d raw_extra_memory=%d raw_gs_renderer=%d "
-		"cpu_core=%d arm64_dynarec=%d extra_memory=%d ee_rec=%d iop_rec=%d vu0_rec=%d vu1_rec=%d "
-		"gs_renderer=%d vsync=%d mailbox_disabled=%d spu2_backend=%d spu2_backend_name=%s vu_thread=%d",
-		tag, VMStateToLogString(VMManager::GetState()), VMManager::HasValidVM() ? 1 : 0,
-		VMManager::HasValidOrInitializingVM() ? 1 : 0, MTGS::IsOpen() ? 1 : 0, raw_audio_backend.c_str(),
-		raw_cpu_core, raw_arm64_dynarec ? 1 : 0, raw_extra_memory ? 1 : 0, raw_gs_renderer,
-		EmuConfig.Cpu.CoreType,
-#ifdef PCSX2_ARM64_DYNAREC
-		EmuConfig.Cpu.UseArm64Dynarec ? 1 : 0,
-#else
-		0,
-#endif
-		EmuConfig.Cpu.ExtraMemory ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0,
-		EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0,
-		EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0, static_cast<int>(EmuConfig.GS.Renderer),
-		EmuConfig.GS.VsyncEnable ? 1 : 0, EmuConfig.GS.DisableMailboxPresentation ? 1 : 0,
-		static_cast<int>(EmuConfig.SPU2.Backend), AudioStream::GetBackendName(EmuConfig.SPU2.Backend),
-		EmuConfig.Speedhacks.vuThread ? 1 : 0);
-}
-
-static bool ApplyIOSNoJITSettings(const char* tag)
-{
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-	const bool requested = DarwinMisc::IsNoJitModeActive() || EmuConfig.Cpu.CoreType == 1;
-	if (!requested)
-		return false;
-
-	DarwinMisc::ForceNoJitMode();
-	EmuConfig.Cpu.CoreType = 1;
-#ifdef PCSX2_ARM64_DYNAREC
-	EmuConfig.Cpu.UseArm64Dynarec = false;
-#endif
-	EmuConfig.Cpu.Recompiler.EnableEE = false;
-	EmuConfig.Cpu.Recompiler.EnableIOP = false;
-	EmuConfig.Cpu.Recompiler.EnableVU0 = false;
-	EmuConfig.Cpu.Recompiler.EnableVU1 = false;
-	EmuConfig.Cpu.Recompiler.EnableFastmem = false;
-	EmuConfig.Cpu.Recompiler.EnableEECache = false;
-	EmuConfig.Speedhacks.vuThread = false;
-	if (EmuConfig.GS.Renderer == GSRendererType::SW)
-		EmuConfig.GS.Renderer = GSRendererType::Metal;
-
-	Console.WriteLn("@@NO_JIT_MODE@@ tag=%s active=1 core_type=%d ee_rec=%d iop_rec=%d vu0_rec=%d vu1_rec=%d fastmem=%d",
-		tag, EmuConfig.Cpu.CoreType, EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0,
-		EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0,
-		EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableFastmem ? 1 : 0);
-	return true;
-#else
-	return false;
-#endif
-}
 
 // Used to track play time. We use a monotonic timer here, in case of clock changes.
 static u64 s_session_resume_timestamp = 0;
@@ -808,6 +698,26 @@ bool VMManager::Internal::CPUThreadInitialize()
 	Threading::SetNameOfCurrentThread("CPU Thread");
 	PerformanceMetrics::SetCPUThread(Threading::ThreadHandle::GetForCallingThread());
 
+	// [iPSX2] Clean Build Verification Fingerprint
+	Console.WriteLn("@@BUILD_ID@@ VIXL_POP_DISP_EVENT_FIX_002_Jan28_1840");
+	Console.WriteLn("@@RUNTIME_CFG@@ CoreType=%d (0=Rec/Trans, 1=Int, 2=ARM64) EnableEE=%d EnableVU0=%d", 
+		EmuConfig.Cpu.CoreType, 
+		EmuConfig.Cpu.Recompiler.EnableEE, 
+		EmuConfig.Cpu.Recompiler.EnableVU0);
+	Console.WriteLn("@@RUNTIME_CFG@@ FastMem=%d", EmuConfig.Cpu.Recompiler.EnableFastmem); 
+
+    // [iPSX2] Log User Config Flags
+    Console.WriteLn("@@CFG@@ iPSX2_FORCE_EE_INTERP=%d (CS_DEBUGGED fallback) iPSX2_FORCE_JIT_VERIFY=%d iPSX2_JIT_HLE=%d",
+        DarwinMisc::iPSX2_FORCE_EE_INTERP, DarwinMisc::iPSX2_FORCE_JIT_VERIFY, DarwinMisc::iPSX2_JIT_HLE);
+	Console.WriteLn("@@CFG@@ iPSX2_SAFE_ONLY=%d", iPSX2_IsSafeOnlyEnabled() ? 1 : 0);
+
+#ifdef __APPLE__
+    const struct mach_header* h = _dyld_get_image_header(0);
+    intptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    Console.WriteLn("@@DYLD_MAIN@@ header=%p slide=0x%lx base=%p", h, slide, (uintptr_t)h + slide);
+#endif
+
+
 	// On Win32, we have a bunch of things which use COM (e.g. SDL, XAudio2, etc).
 	// We need to initialize COM first, before anything else does, because otherwise they might
 	// initialize it in single-threaded/apartment mode, which can't be changed to multithreaded.
@@ -827,8 +737,6 @@ bool VMManager::Internal::CPUThreadInitialize()
 		ConsoleLogWriter<LOGLEVEL_INFO>::Error("cpuinfo_initialize() failed.");
 
 	LogCPUCapabilities();
-
-	ApplyIOSNoJITSettings("pre_memory");
 
 	if (!SysMemory::Allocate())
 	{
@@ -937,7 +845,7 @@ void VMManager::UpdateLoggingSettings(SettingsInterface& si)
 	const bool ee_console_enabled = any_logging_sinks && si.GetBoolValue("Logging", "EnableEEConsole", false);
 	ConsoleLogging.eeConsole.Enabled = ee_console_enabled;
 
-	ConsoleLogging.iopConsole.Enabled = any_logging_sinks && si.GetBoolValue("Logging", "EnableIOPConsole", false);
+	ConsoleLogging.iopConsole.Enabled = any_logging_sinks && (si.GetBoolValue("Logging", "EnableIOPConsole", false) || getenv("iPSX2_BOOT_ELF") || !s_elf_override.empty());
 	TraceLogging.IOP.R3000A.Enabled = true;
 	TraceLogging.IOP.COP2.Enabled = true;
 	TraceLogging.IOP.Memory.Enabled = true;
@@ -952,8 +860,15 @@ void VMManager::UpdateLoggingSettings(SettingsInterface& si)
 	// Set the output level if file logging or trace logs have changed.
 	if (file_logging_enabled != Log::IsFileOutputEnabled() || (EmuConfig.Trace.Enabled && Log::GetMaxLevel() < LOGLEVEL_TRACE))
 	{
-		std::string path = Path::Combine(EmuFolders::Logs, "emulog.txt");
-		Log::SetFileOutputLevel(file_logging_enabled ? EmuConfig.Trace.Enabled ? LOGLEVEL_TRACE : level : LOGLEVEL_NONE, std::move(path));
+		// [iPSX2] DEPRECATED: emulog.txt
+		// We use pcsx2_log.txt (stdout/stderr) for everything now.
+		// std::string path = Path::Combine(EmuFolders::Logs, "emulog.txt");
+		// Log::SetFileOutputLevel(file_logging_enabled ? EmuConfig.Trace.Enabled ? LOGLEVEL_TRACE : level : LOGLEVEL_NONE, std::move(path));
+		
+		// Ensure Console output is enabled so it goes to stdout
+		if (file_logging_enabled) {
+			Log::SetConsoleOutputLevel(EmuConfig.Trace.Enabled ? LOGLEVEL_TRACE : level);
+		}
 	}
 
 #if defined(__ANDROID__)
@@ -1046,31 +961,18 @@ void VMManager::LoadSettings()
 
 	std::unique_lock<std::mutex> lock = Host::GetSettingsLock();
 	SettingsInterface* si = Host::GetSettingsInterface();
-	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=begin si=%p", si);
-	LogVMSettingsSnapshot("load_settings_begin", si);
-	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=LoadCoreSettings begin");
 	LoadCoreSettings(*si);
-	LogVMSettingsSnapshot("after_load_core_settings", si);
-	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=Pad::LoadConfig begin");
 	Pad::LoadConfig(*si);
-	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=Host::LoadSettings begin");
 	Host::LoadSettings(*si, lock);
-	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=InputManager::ReloadSources begin");
 	InputManager::ReloadSources(*si, lock);
-	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=LoadInputBindings begin");
 	LoadInputBindings(*si, lock);
-	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=UpdateLoggingSettings begin");
 	UpdateLoggingSettings(*si);
-	LogVMSettingsSnapshot("load_settings_end", si);
 
 	if (HasValidOrInitializingVM())
 	{
-		Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=WarnAboutUnsafeSettings/ApplyGameFixes begin");
 		WarnAboutUnsafeSettings();
 		ApplyGameFixes();
-		LogVMSettingsSnapshot("after_game_fixes", si);
 	}
-	Console.WriteLn("@@VM_LOAD_SETTINGS@@ step=end");
 }
 
 void VMManager::ReloadInputSources()
@@ -1118,8 +1020,6 @@ void VMManager::LoadCoreSettings(SettingsInterface& si)
 	// MTVU emits illegal instructions on Switch dynarec today, so keep it disabled.
 	EmuConfig.Speedhacks.vuThread = false;
 #endif
-
-	ApplyIOSNoJITSettings("load_core_settings");
 }
 
 void VMManager::LoadInputBindings(SettingsInterface& si, std::unique_lock<std::mutex>& lock)
@@ -1173,12 +1073,10 @@ void VMManager::ApplyGameFixes()
 void VMManager::ApplySettings()
 {
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Applying settings...");
-	LogVMSettingsSnapshot("apply_settings_entry", Host::GetSettingsInterface());
 
 	// If we're running, ensure the threads are synced.
 	if (GetState() == VMState::Running)
 	{
-		Console.WriteLn("@@VM_APPLY_SETTINGS@@ syncing_threads=1 vu1=%d mtgs_open=%d", THREAD_VU1 ? 1 : 0, MTGS::IsOpen() ? 1 : 0);
 		if (THREAD_VU1)
 			vu1Thread.WaitVU();
 		MTGS::WaitGS(false);
@@ -1187,16 +1085,10 @@ void VMManager::ApplySettings()
 	// Reset to a clean Pcsx2Config. Otherwise things which are optional (e.g. gamefixes)
 	// do not use the correct default values when loading.
 	Pcsx2Config old_config(std::move(EmuConfig));
-	Console.WriteLn("@@VM_APPLY_SETTINGS@@ old_config cpu_core=%d gs_renderer=%d spu2_backend=%d:%s",
-		old_config.Cpu.CoreType, static_cast<int>(old_config.GS.Renderer), static_cast<int>(old_config.SPU2.Backend),
-		AudioStream::GetBackendName(old_config.SPU2.Backend));
 	EmuConfig = Pcsx2Config();
 	EmuConfig.CopyRuntimeConfig(old_config);
-	LogVMSettingsSnapshot("after_config_reset", Host::GetSettingsInterface());
 	LoadSettings();
-	LogVMSettingsSnapshot("before_check_config_changes", Host::GetSettingsInterface());
 	CheckForConfigChanges(old_config);
-	LogVMSettingsSnapshot("apply_settings_exit", Host::GetSettingsInterface());
 }
 
 void VMManager::ApplyCoreSettings()
@@ -1738,18 +1630,12 @@ void VMManager::PrecacheCDVDFile()
 	}
 }
 
+
+
 bool VMManager::Initialize(VMBootParameters boot_params)
 {
 	const Common::Timer init_timer;
 	pxAssertRel(s_state.load(std::memory_order_acquire) == VMState::Shutdown, "VM is shutdown");
-#if ARMSX2_APPLE_MAC_RUNTIME
-	LogUnified("@@MAC_BOOT_PARAMS_IN@@ filename=%s elf=%s source=%d(%s) fast_boot_set=%d fast_boot=%d save_state=%s state_index_set=%d\n",
-		boot_params.filename.c_str(), boot_params.elf_override.c_str(),
-		boot_params.source_type.has_value() ? static_cast<int>(*boot_params.source_type) : -1,
-		boot_params.source_type.has_value() ? MacCDVDSourceName(*boot_params.source_type) : "Auto",
-		boot_params.fast_boot.has_value() ? 1 : 0, boot_params.fast_boot.value_or(false) ? 1 : 0,
-		boot_params.save_state.c_str(), boot_params.state_index.has_value() ? 1 : 0);
-#endif
 
 	// cancel any game list scanning, we need to use CDVD!
 	// TODO: we can get rid of this once, we make CDVD not use globals...
@@ -1811,11 +1697,6 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 		if (boot_params.source_type.value() == CDVD_SourceType::Iso &&
 			!FileSystem::FileExists(boot_params.filename.c_str()))
 		{
-#if ARMSX2_APPLE_MAC_RUNTIME
-			LogUnified("@@MAC_BOOT_SOURCE_FAIL@@ reason=missing_iso source=%d(%s) filename=%s\n",
-				static_cast<int>(*boot_params.source_type), MacCDVDSourceName(*boot_params.source_type),
-				boot_params.filename.c_str());
-#endif
 			Host::ReportErrorAsync(
 				"Error", fmt::format("Requested filename '{}' does not exist.", boot_params.filename));
 			return false;
@@ -1829,16 +1710,8 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 	{
 		// Automatic type detection of boot parameter based on filename.
 		if (!AutoDetectSource(boot_params.filename))
-		{
-#if ARMSX2_APPLE_MAC_RUNTIME
-			LogUnified("@@MAC_BOOT_SOURCE_FAIL@@ reason=autodetect filename=%s\n", boot_params.filename.c_str());
-#endif
 			return false;
-		}
 	}
-#if ARMSX2_APPLE_MAC_RUNTIME
-	MacLogCDVDState("after_source_resolve");
-#endif
 
 	ScopedGuard close_cdvd_files(&CDVDsys_ClearFiles);
 
@@ -1846,16 +1719,7 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 	if (!GSDumpReplayer::IsReplayingDump())
 	{
 		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Loading BIOS...");
-#if ARMSX2_APPLE_MAC_RUNTIME
-		LogUnified("@@MAC_BOOT_BIOS_LOAD_BEGIN@@ bios_name=%s bios_path=%s exists=%d\n",
-			EmuConfig.BaseFilenames.Bios.c_str(), Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str(),
-			FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str()) ? 1 : 0);
-#endif
-		const bool bios_loaded = LoadBIOS();
-#if ARMSX2_APPLE_MAC_RUNTIME
-		LogUnified("@@MAC_BOOT_BIOS_LOAD_END@@ ok=%d\n", bios_loaded ? 1 : 0);
-#endif
-		if (!bios_loaded)
+		if (!LoadBIOS())
 		{
 			Host::ReportErrorAsync(TRANSLATE_SV("VMManager", "Error"),
 				TRANSLATE_SV("VMManager",
@@ -1868,24 +1732,28 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 			return false;
 		}
 
-		// Must happen after BIOS load, depends on BIOS version.
+
+// Must happen after BIOS load, depends on BIOS version.
 		cdvdLoadNVRAM();
-#if ARMSX2_APPLE_MAC_RUNTIME
-		LogUnified("@@MAC_BOOT_NVRAM_LOADED@@\n");
-#endif
+
+        // [iPSX2] Fix: Copy BIOS to memory immediately after load (Step 2 V3)
+        // [iPSX2] Fix: Copy BIOS to memory immediately after load (Step 2 V3)
+        Console.WriteLn("@@RUN_STAMP@@ @@BUILD_ID@@ FIX15_EXTINFO_BNE_NOP_Feb19");
+        Console.WriteLn("@@STAMP_CANON@@ source=\"BIOS\" other_suppressed=1");
+        
+        CopyBIOSToMemory();
+
+        // [FIX #9 JIT CACHE] Invalidate JIT cache for patched ROM regions so that
+        // the patched instructions are recompiled (not served from stale JIT cache).
+        // bfc023c0: scan-start patch (a0 = bfc02740)
+        // bfc026a4: BNE v0, t2 -> NOP patch (Fix9)
+        // bfc0268c: BNE v0, t4 -> NOP patch (Fix15)
+	        // Sanitized: ROM patch-specific JIT cache invalidation disabled.
 	}
 
 	Error error;
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Opening CDVD...");
-#if ARMSX2_APPLE_MAC_RUNTIME
-	MacLogCDVDState("before_cdvd_open");
-#endif
-	const bool cdvd_opened = DoCDVDopen(&error);
-#if ARMSX2_APPLE_MAC_RUNTIME
-	LogUnified("@@MAC_BOOT_CDVD_OPEN_END@@ ok=%d error=%s\n", cdvd_opened ? 1 : 0,
-		cdvd_opened ? "" : error.GetDescription().c_str());
-#endif
-	if (!cdvd_opened)
+	if (!DoCDVDopen(&error))
 	{
 		Host::ReportErrorAsync("Startup Error", fmt::format("Failed to open CDVD '{}': {}.",
 													Path::GetFileName(CDVDsys_GetFile(CDVDsys_GetSourceType())),
@@ -1896,9 +1764,6 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 
 	// Figure out which game we're running! This also loads game settings.
 	UpdateDiscDetails(true);
-#if ARMSX2_APPLE_MAC_RUNTIME
-	MacLogCDVDState("after_disc_details");
-#endif
 
 	ScopedGuard close_memcards(&FileMcd_EmuClose);
 
@@ -1908,9 +1773,6 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 		(boot_params.fast_boot.value_or(static_cast<bool>(EmuConfig.EnableFastBoot)) || !s_elf_override.empty()) &&
 		(CDVDsys_GetSourceType() != CDVD_SourceType::NoDisc || !s_elf_override.empty()) &&
 		!GSDumpReplayer::IsReplayingDump();
-#if ARMSX2_APPLE_MAC_RUNTIME
-	MacLogCDVDState("after_fast_boot_resolve");
-#endif
 
 	if (!s_elf_override.empty())
 	{
@@ -1988,7 +1850,9 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 	FPControlRegister::SetCurrent(EmuConfig.Cpu.FPUFPCR);
 	memBindConditionalHandlers();
 	SysMemory::Reset();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("VMManager: Resetting CPU...");
 	cpuReset();
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("VMManager: CPU Reset complete.");
 
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Opening GS...");
 	s_gs_open_on_initialize = MTGS::IsOpen();
@@ -1998,6 +1862,7 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Failed to open GS.");
 		return false;
 	}
+	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("VMManager: GS opened successfully.");
 
 	ScopedGuard close_gs = []() {
 		if (!s_gs_open_on_initialize)
@@ -2201,6 +2066,8 @@ void VMManager::Shutdown(bool save_resume_state)
 
 void VMManager::Reset()
 {
+    Console.WriteLn("@@DEBUG@@ VMManager::Reset called.");
+    s_cpu_implementation_changed = true;
 	pxAssert(HasValidVM());
 
 	// If we're running, we're probably going to be executing this at event test time,
@@ -3089,18 +2956,13 @@ void VMManager::LogCPUCapabilities()
 
 void VMManager::InitializeCPUProviders()
 {
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-	if (DarwinMisc::IsNoJitModeActive())
-	{
-		Console.WriteLn("@@NO_JIT_PROVIDERS@@ skipped=1");
-		return;
-	}
-#endif
 //#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	recCpu.Reserve();
 	psxRec.Reserve();
 
-#ifdef PCSX2_ARM64_DYNAREC
+#if defined(PCSX2_ARM64_DYNAREC)
+	// Reserve ARM64 EE dynarec if compiled in
+	jitA64Cpu.Reserve();
 #endif
 
 	CpuMicroVU0.Reserve();
@@ -3126,7 +2988,8 @@ void VMManager::ShutdownCPUProviders()
 
 	psxRec.Shutdown();
 	recCpu.Shutdown();
-#ifdef PCSX2_ARM64_DYNAREC
+#if defined(PCSX2_ARM64_DYNAREC)
+	jitA64Cpu.Shutdown();
 #endif
 //#else
 //	// See the comment in the InitializeCPUProviders for an explaination why we
@@ -3138,73 +3001,128 @@ void VMManager::ShutdownCPUProviders()
 
 void VMManager::UpdateCPUImplementations()
 {
-	if (GSDumpReplayer::IsReplayingDump())
-	{
-		Cpu = &GSDumpReplayerCpu;
-		psxCpu = &psxInt;
-		CpuVU0 = &CpuIntVU0;
-		CpuVU1 = &CpuIntVU1;
-		return;
-	}
+    Console.WriteLn("@@DEBUG@@ VMManager::UpdateCPUImplementations called.");
+    Console.WriteLn("@@DEBUG@@ recCpu=%p func=%p intCpu=%p func=%p", &recCpu, (void*)recCpu.Execute, &intCpu, (void*)intCpu.Execute);
 
-	if (ApplyIOSNoJITSettings("update_cpu_implementations"))
-	{
-		Cpu = &intCpu;
-		psxCpu = &psxInt;
-		CpuVU0 = &CpuIntVU0;
-		CpuVU1 = &CpuIntVU1;
-		Console.WriteLn("@@CPU_SEL@@ mode=NO_JIT EE=intCpu IOP=psxInt VU0=interp VU1=interp");
-		return;
-	}
+    if (GSDumpReplayer::IsReplayingDump())
+    {
+        Cpu = &GSDumpReplayerCpu;
+        psxCpu = &psxInt;
+        CpuVU0 = &CpuIntVU0;
+        CpuVU1 = &CpuIntVU1;
+        return;
+    }
 
 //#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
-	// CPU core selection: 0=Translator, 1=Interpreter, 2=ARM64 Dynarec (if available)
-	const s32 core_type = EmuConfig.Cpu.CoreType;
-	EmuConfig.Cpu.Recompiler.EnableEE = (core_type != 1);
-	if (core_type == 1)
-	{
-		Cpu = &intCpu;
-	}
-	else if (!CHECK_EEREC)
-	{
-		// Recompiler not available, force interpreter
-		Cpu = &intCpu;
-	}
-	else
-	{
-#ifdef PCSX2_ARM64_DYNAREC
-		if (core_type == 2 || EmuConfig.Cpu.UseArm64Dynarec)
-		{
-			Console.WriteLn("CPU: Selecting ARM64 dynarec");
-			Cpu = &recCpu;
-		}
-		else
-		{
-			Cpu = &recCpu;
-		}
-#else
-		Cpu = &recCpu;
-#endif
-	}
-	if (Cpu == &intCpu)
-	{
-		psxCpu = &psxInt;
-	}
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-	else if (DarwinMisc::ARMSX2_IOP_CORE_TYPE == 0)
-		psxCpu = &psxRec;
-	else if (DarwinMisc::ARMSX2_IOP_CORE_TYPE == 1)
-		psxCpu = &psxInt;
-	else
-		psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
-#else
-	else
-		psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
-#endif
+    // CPU core selection: 0=Translator, 1=Interpreter, 2=ARM64 Dynarec (if available)
+    
+    // [V34] CS_DEBUGGED fallback (ios_main.mm sets iPSX2_FORCE_EE_INTERP=1 when
+    // JIT entitlement is missing on real device). Otherwise EE/IOP/VU mode is
+    // driven exclusively by PCSX2-iOS.ini (CoreType + Recompiler.Enable*).
+    if (DarwinMisc::iPSX2_FORCE_EE_INTERP) {
+        Console.WriteLn("@@EE_SEL_PATH@@ path=\"INT_FORCED\" chosen=intCpu");
 
-	const bool force_vu_interp = (Cpu == &intCpu) || DarwinMisc::ARMSX2_FORCE_EE_INTERP;
-	CpuVU0 = (EmuConfig.Cpu.Recompiler.EnableVU0 && !force_vu_interp) ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
-	CpuVU1 = (EmuConfig.Cpu.Recompiler.EnableVU1 && !force_vu_interp) ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+        static bool s_log_jit_bypass = false;
+        if (!std::exchange(s_log_jit_bypass, true)) {
+            Console.WriteLn("@@JIT_OVERRIDE@@ executed=0 reason=\"INT_FORCED_EARLY_RETURN\"");
+        }
+
+        Cpu = &intCpu;
+        // [P13] IOP selection deferred to common IOP selection block below (was early return + psxInt forced)
+        CpuVU0 = &CpuIntVU0;
+        CpuVU1 = &CpuIntVU1;
+
+        // Ensure config reflects reality to avoid confusion in UI/logs, though we override Cpu ptrs directly
+        EmuConfig.Cpu.CoreType = 1;
+        // Fall through to IOP selection logic (no return here)
+    }
+
+    // [DEBUG-VERIFY] Force Enable JIT for iOS Verification (Only if explicitly enabled)
+    if (!iPSX2_IsSafeOnlyEnabled() && DarwinMisc::iPSX2_FORCE_JIT_VERIFY) {
+        static bool s_log_jit_exec = false;
+        if (!std::exchange(s_log_jit_exec, true)) {
+            Console.WriteLn("@@DEBUG@@ Forcing JIT Config for iOS Verification");
+            Console.WriteLn("@@JIT_OVERRIDE@@ executed=1 reason=\"iPSX2_FORCE_JIT_VERIFY\"");
+        }
+        EmuConfig.Cpu.Recompiler.EnableEE = true;
+        if (EmuConfig.Cpu.CoreType == 1) EmuConfig.Cpu.CoreType = 0;
+    }
+
+    const s32 core_type = EmuConfig.Cpu.CoreType;
+
+    // [iPSX2] One-shot probe for EE Selection Inputs
+    static bool s_probed_ee_sel = false;
+    if (!std::exchange(s_probed_ee_sel, true))
+    {
+        Console.WriteLn("@@EE_SEL_IN@@ core_type=%d UseArm64Dynarec=DISABLED IniCoreType=%d", 
+            core_type, (int)EmuConfig.Cpu.CoreType);
+    }
+
+    // [V34] EE selection driven by CoreType alone (Swift UI writes only CoreType).
+    // Swift UI design treats [EmuCore/CPU] CoreType as the single source of truth
+    // for EE JIT/Interp. Sync EnableEE so all downstream CHECK_EEREC consumers
+    // (vtlb, Interpreter, VU0, VMManager FastBoot fallback) remain consistent.
+    EmuConfig.Cpu.Recompiler.EnableEE = (core_type != 1);
+
+    if (core_type == 1)
+    {
+        static bool s_path_int = false;
+        if (!std::exchange(s_path_int, true)) Console.WriteLn("@@EE_SEL_PATH@@ path=\"INT\" chosen=intCpu");
+        Cpu = &intCpu;
+    }
+    else
+    {
+#if defined(PCSX2_ARM64_DYNAREC)
+        if (core_type == 2 || EmuConfig.Cpu.UseArm64Dynarec)
+        {
+             Console.WriteLn("CPU: Selecting ARM64 dynarec");
+             static bool s_path_jit = false;
+             if (!std::exchange(s_path_jit, true)) Console.WriteLn("@@EE_SEL_PATH@@ path=\"ARM64\" chosen=jitA64Cpu");
+             Cpu = &jitA64Cpu;
+        }
+        else
+        {
+             static bool s_path_rec = false;
+             if (!std::exchange(s_path_rec, true)) Console.WriteLn("@@EE_SEL_PATH@@ path=\"REC\" chosen=recCpu");
+             Cpu = &recCpu;
+        }
+#else
+             {
+                 static bool s_path_rec_else = false;
+                 if (!std::exchange(s_path_rec_else, true)) Console.WriteLn("@@EE_SEL_PATH@@ path=\"REC\" chosen=recCpu");
+                 Cpu = &recCpu;
+             }
+#endif
+    }
+//#endif
+    // [V34] IOP selection: driven by INI [EmuCore/CPU/Recompiler] EnableIOP only.
+    // [P9] Safety: when EE is in interpreter mode (= CS_DEBUGGED fallback), IOP
+    // JIT (psxRec) would null-deref on x27 (RSTATE_CPU) → force IOP interp too.
+    if (Cpu == &intCpu) {
+        psxCpu = &psxInt;
+        Console.WriteLn("@@IOP_SEL_PATH@@ path=\"INT_FORCED\" chosen=psxInt (EE is interpreter)");
+    } else {
+        psxCpu = EmuConfig.Cpu.Recompiler.EnableIOP ? &psxRec : &psxInt;
+        Console.WriteLn("@@IOP_SEL_PATH@@ path=\"CFG\" chosen=%s (EnableIOP=%d)",
+            EmuConfig.Cpu.Recompiler.EnableIOP ? "psxRec" : "psxInt",
+            (int)EmuConfig.Cpu.Recompiler.EnableIOP);
+    }
+
+    // [V34] VU selection: driven by INI [EmuCore/CPU/Recompiler] EnableVU0/EnableVU1
+    // only. CS_DEBUGGED fallback (iPSX2_FORCE_EE_INTERP) also forces VU to interp.
+    {
+        bool force_vu_interp = (DarwinMisc::iPSX2_FORCE_EE_INTERP != 0);
+        bool use_vu0_rec = EmuConfig.Cpu.Recompiler.EnableVU0 && !force_vu_interp;
+        bool use_vu1_rec = EmuConfig.Cpu.Recompiler.EnableVU1 && !force_vu_interp;
+        CpuVU0 = use_vu0_rec ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0)
+                             : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+        CpuVU1 = use_vu1_rec ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1)
+                             : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+        Console.WriteLn("@@VU_SEL@@ CpuVU0=%s CpuVU1=%s (CS_DEBUGGED_fallback=%d)",
+            use_vu0_rec ? "recMicroVU0" : "InterpVU0",
+            use_vu1_rec ? "recMicroVU1" : "InterpVU1",
+            (int)force_vu_interp);
+    }
 //#else
 //	Cpu = &intCpu;
 //	psxCpu = &psxInt;
@@ -3219,6 +3137,8 @@ void VMManager::Internal::ClearCPUExecutionCaches()
 	Cpu->Reset();
 	psxCpu->Reset();
 
+	// Sanitized: ROM patch-specific JIT cache invalidation disabled.
+
 //#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	// mVU's VU0 needs to be properly initialized for macro mode even if it's not used for micro mode!
 	if (CHECK_EEREC && !EmuConfig.Cpu.Recompiler.EnableVU0)
@@ -3230,13 +3150,37 @@ void VMManager::Internal::ClearCPUExecutionCaches()
 
 	if constexpr (newVifDynaRec)
 	{
-		dVifReset(0);
-		dVifReset(1);
+#ifdef __APPLE__
+		if (!DarwinMisc::iPSX2_FORCE_EE_INTERP)
+#endif
+		{
+			dVifReset(0);
+			dVifReset(1);
+		}
 	}
 }
 
 void VMManager::Execute()
 {
+	// [iPSX2] One-shot probe to confirm Core selection
+	static bool s_probed_cores = false;
+	if (!std::exchange(s_probed_cores, true))
+	{
+		const char* ee_mode = (Cpu == &recCpu) ? "Recompiler(recCpu)" : 
+							 (Cpu == &intCpu) ? "Interpreter(intCpu)" : 
+							 "Unknown/JIT-A64";
+		
+		#if defined(PCSX2_ARM64_DYNAREC) && !TARGET_OS_IPHONE
+		if (Cpu == &jitA64Cpu) ee_mode = "Recompiler(jitA64Cpu)";
+		#endif
+
+		const char* iop_mode = (psxCpu == &psxRec) ? "Recompiler" : 
+							  (psxCpu == &psxInt) ? "Interpreter" : "Unknown";
+
+		Console.WriteLn("@@IOP_CORE@@ EE_Mode=%s IOP_Mode=%s", ee_mode, iop_mode);
+		Console.WriteLn("@@IOP_CORE_ADDRS@@ Cpu=%p intCpu=%p recCpu=%p psxCpu=%p psxRec=%p psxInt=%p", 
+			Cpu, &intCpu, &recCpu, psxCpu, &psxRec, &psxInt);
+	}
 	// Check for interpreter<->recompiler switches.
 	if (std::exchange(s_cpu_implementation_changed, false))
 	{
@@ -3244,6 +3188,38 @@ void VMManager::Execute()
 		UpdateCPUImplementations();
 		Internal::ClearCPUExecutionCaches();
 		vtlb_ResetFastmem();
+	}
+
+	// [iPSX2] Main Execution Loop (CPU Truth Watchdog)
+	static int s_watch_ticks = 0;
+	s_watch_ticks++;
+	if (s_watch_ticks % 2000 == 0) // rough check
+	{ 
+		static u64 last_log_time = 0;
+		// Use std::chrono to avoid System::GetTimeInMs link errors
+		u64 now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		if (now - last_log_time > 200) {
+			static int log_count = 0;
+			// Limit to 50 samples as requested
+			if (log_count < 50) {
+				u32 pc = cpuRegs.pc;
+				const char* region = "OTHER";
+				if (pc >= 0xbfc00000 && pc <= 0xbfc0ffff) region = "BIOS";
+				else if (pc >= 0xbfc40000 && pc <= 0xbfc4ffff) region = "TBIN";
+				
+				LogUnified("@@CPU_WATCH@@ t_ms=%d pc=%08x region=%s\n", (int)now, pc, region);
+                
+                // [iPSX2] EE Progress Probe
+                static int s_progress_count = 0;
+                if (pc != 0xbfc00000 && s_progress_count < 5) {
+                    Console.WriteLn("@@EE_PROGRESS@@ pc=%08x region=%s", pc, region);
+                    s_progress_count++;
+                }
+
+				log_count++;
+			}
+			last_log_time = now;
+		}
 	}
 
 	// Execute until we're asked to stop.
@@ -3388,6 +3364,11 @@ void VMManager::Internal::EntryPointCompilingOnCPUThread()
 	mmap_ResetBlockTracking();
 	ClearCPUExecutionCaches();
 
+	// [P15] EELOAD after completedに ELF ポストロード (R5900.cpp で定義)
+	// Removal condition: IOP→EE SIF DMA transferのデータ欠落root causeafter fixed
+	if (g_armsx2_elf_postload_fn)
+		g_armsx2_elf_postload_fn();
+
 	R5900SymbolImporter.OnElfLoadedInMemory();
 }
 
@@ -3454,6 +3435,7 @@ void VMManager::CheckForCPUConfigChanges(const Pcsx2Config& old_config)
 	Internal::ClearCPUExecutionCaches();
 	memBindConditionalHandlers();
 
+	// Re-enable IOP JIT handled above in UpdateCPUImplementations
 	if (EmuConfig.Cpu.Recompiler.EnableFastmem != old_config.Cpu.Recompiler.EnableFastmem)
 		vtlb_ResetFastmem();
 
@@ -4231,7 +4213,9 @@ void VMManager::ReloadPINE()
 
 void VMManager::InitializeDiscordPresence()
 {
-#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+#if defined(iPSX2_MACOS)
+	return;
+#elif defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 #if defined(USE_DISCORD_SDK)
 	std::shared_ptr<discordpp::Client> client;
 	{
@@ -4386,7 +4370,9 @@ void VMManager::InitializeDiscordPresence()
 
 void VMManager::ShutdownDiscordPresence()
 {
-#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+#if defined(iPSX2_MACOS)
+	return;
+#elif defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 #if defined(USE_DISCORD_SDK)
 	std::shared_ptr<discordpp::Client> client;
 	{
@@ -4429,7 +4415,9 @@ void VMManager::ShutdownDiscordPresence()
 
 void VMManager::UpdateDiscordPresence(bool update_session_time)
 {
-#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+#if defined(iPSX2_MACOS)
+	return;
+#elif defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 #if defined(USE_DISCORD_SDK)
 	std::lock_guard lock(s_discord_mutex);
 	if (!s_discord_presence_active)
@@ -4495,7 +4483,9 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 
 void VMManager::PollDiscordPresence()
 {
-#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+#if defined(iPSX2_MACOS)
+	return;
+#elif defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
 	#if defined(USE_DISCORD_SDK)
 	{
 		std::lock_guard lock(s_discord_mutex);

@@ -312,10 +312,29 @@ void psxGPUw(int addr, u32 data)
 	REG_LOG("PGPU write 0x%08X = 0x%08X", addr, data);
 	if (addr == HW_PS1_GPU_DATA)
 	{
+		// [iter463] @@PGIF_GP0_WRITE@@ IOP → rb_gp0 callカウンタ
+		// 目的: IOP が psxGPUw(GP0) を呼んでいるかverify (rb_gp0 と eeHw[0xF3E0] のブリッジ断絶の前提検証)
+		// Removal condition: IOP→PGIF GP0 write behaviorafter confirmed
+		{
+			static u32 s_gp0w_cnt = 0;
+			s_gp0w_cnt++;
+			if (s_gp0w_cnt <= 5 || (s_gp0w_cnt % 1000) == 0)
+				Console.WriteLn("@@PGIF_GP0_WRITE@@ n=%u data=%08x rb_count=%d IOPpc=%08x",
+					s_gp0w_cnt, data, rb_gp0.count, psxRegs.pc);
+		}
 		ringBufPut(&rb_gp0, &data);
 	}
 	else if (addr == HW_PS1_GPU_STATUS)
 	{
+		// [iter478] @@PGIF_GP1_WRITE@@ IOP が GP1 コマンドを送っているかverify (max 20 + every 1000)
+		// Removal condition: IOP GPU DMA がbootし PGPU_DMA_START がverifyされた後
+		{
+			static u32 s_gp1w_cnt = 0;
+			s_gp1w_cnt++;
+			if (s_gp1w_cnt <= 20 || (s_gp1w_cnt % 1000) == 0)
+				Console.WriteLn("@@PGIF_GP1_WRITE@@ n=%u data=%08x cmd=%02x ioppc=%08x",
+					s_gp1w_cnt, data, data >> 24, psxRegs.pc);
+		}
 		// Check for Cmd 0x10-0x1F
 		u8 imm_check = (data >> 28);
 		imm_check &= 0x3;
@@ -342,6 +361,15 @@ u32 psxGPUr(int addr)
 	else if (addr == HW_PS1_GPU_STATUS)
 	{
 		data = getUpdPgpuStatReg();
+		// [iter475] @@PGPU_STAT_READ@@ IOP が GPU STATUS を読んでいる回数と値をverify (ready bit 28/26 チェック)
+		// Removal condition: IOP GPU コマンド送信が継続することをafter confirmed
+		{
+			static u32 s_stat_cnt = 0;
+			s_stat_cnt++;
+			if (s_stat_cnt <= 5 || (s_stat_cnt % 10000) == 0)
+				Console.WriteLn("@@PGPU_STAT_READ@@ n=%u stat=%08x bit28=%u bit26=%u ioppc=%08x",
+					s_stat_cnt, data, (data >> 28) & 1, (data >> 26) & 1, psxRegs.pc);
+		}
 	}
 	if (addr != HW_PS1_GPU_STATUS)
 		REG_LOG("PGPU read  0x%08X = 0x%08X", addr, data);
@@ -642,6 +670,16 @@ void processPgpuDma()
 		dmaRegs.chcr.bits.TSM = 1;
 	}
 	PGPU_DMA_LOG("Starting GPU DMA! CHCR %08X  BCR %08X  MADR %08X ", dmaRegs.chcr.get(), dmaRegs.bcr.get(), dmaRegs.madr.address);
+	// [iter477] @@PGPU_DMA_START@@ IOP GPU DMA callカウンタ (rb_gp0 flow のverify)
+	// Removal condition: IOP GPU DMA フローと rb_gp0→EE の接続after confirmed
+	{
+		static u32 s_dma_cnt = 0;
+		s_dma_cnt++;
+		if (s_dma_cnt <= 5 || (s_dma_cnt % 1000) == 0)
+			Console.WriteLn("@@PGPU_DMA_START@@ n=%u chcr=%08x bcr=%08x madr=%08x tsm=%u rb_gp0=%d ioppc=%08x",
+				s_dma_cnt, dmaRegs.chcr.get(), dmaRegs.bcr.get(), dmaRegs.madr.address,
+				(u32)dmaRegs.chcr.bits.TSM, rb_gp0.count, psxRegs.pc);
+	}
 
 	//Linked List Mode
 	if (dmaRegs.chcr.bits.TSM == 2)

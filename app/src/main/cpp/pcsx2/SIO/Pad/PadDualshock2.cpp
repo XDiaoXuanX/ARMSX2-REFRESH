@@ -837,7 +837,47 @@ std::tuple<u8, u8> PadDualshock2::GetRawRightAnalog() const
 
 u32 PadDualshock2::GetButtons() const
 {
-	return buttons;
+	// [V4-AUTO-PRESS 2026-05-04] env-driven auto-button: vsync range 内で 50 vsync 周期で
+	// 最初 10 vsync 押下 / 残 40 vsync release。 デバッグ高速化用 (= 手動 X 押下不要)。
+	// env: iPSX2_AUTO_<BUTTON>_VS=lo,hi (例: 1500,1700)。 0 / 未設定で無効。
+	// PS2 button bit semantics: active-low (= 0 で押下、 1 で release)、 button bit map は
+	// PadDualshock2.h の bitmaskMapping 参照 (START=11, CROSS=6, CIRCLE=5, TRIANGLE=4, SQUARE=7)。
+	// Removal condition: 永続機能、 不要時は env 未設定で無効化可。
+	extern uint g_FrameCount;
+	struct AutoEntry { u32 lo, hi, bit; bool valid; };
+	auto parse_env = [](const char* name, u32 default_bit) -> AutoEntry {
+		AutoEntry e{0, 0, default_bit, false};
+		const char* v = std::getenv(name);
+		if (v && std::sscanf(v, "%u,%u", &e.lo, &e.hi) == 2 && e.hi > e.lo) e.valid = true;
+		return e;
+	};
+	static const AutoEntry s_start    = parse_env("iPSX2_AUTO_START_VS",    11);
+	static const AutoEntry s_cross    = parse_env("iPSX2_AUTO_CROSS_VS",     6);
+	static const AutoEntry s_circle   = parse_env("iPSX2_AUTO_CIRCLE_VS",    5);
+	static const AutoEntry s_triangle = parse_env("iPSX2_AUTO_TRIANGLE_VS",  4);
+	static const AutoEntry s_square   = parse_env("iPSX2_AUTO_SQUARE_VS",    7);
+	static bool s_logged = false;
+	if (!s_logged) {
+		s_logged = true;
+		Console.WriteLn("@@AUTO_PRESS@@ START=[%u,%u]%s CROSS=[%u,%u]%s CIRCLE=[%u,%u]%s TRIANGLE=[%u,%u]%s SQUARE=[%u,%u]%s",
+			s_start.lo, s_start.hi, s_start.valid ? "" : "(off)",
+			s_cross.lo, s_cross.hi, s_cross.valid ? "" : "(off)",
+			s_circle.lo, s_circle.hi, s_circle.valid ? "" : "(off)",
+			s_triangle.lo, s_triangle.hi, s_triangle.valid ? "" : "(off)",
+			s_square.lo, s_square.hi, s_square.valid ? "" : "(off)");
+	}
+	u32 b = buttons;
+	auto active = [](const AutoEntry& e) -> bool {
+		if (!e.valid) return false;
+		if (g_FrameCount < e.lo || g_FrameCount >= e.hi) return false;
+		return ((g_FrameCount - e.lo) % 50) < 10;
+	};
+	if (active(s_start))    b &= ~(1u << s_start.bit);
+	if (active(s_cross))    b &= ~(1u << s_cross.bit);
+	if (active(s_circle))   b &= ~(1u << s_circle.bit);
+	if (active(s_triangle)) b &= ~(1u << s_triangle.bit);
+	if (active(s_square))   b &= ~(1u << s_square.bit);
+	return b;
 }
 
 u8 PadDualshock2::GetPressure(u32 index) const

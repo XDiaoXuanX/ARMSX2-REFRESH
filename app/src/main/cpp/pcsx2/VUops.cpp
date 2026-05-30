@@ -5,6 +5,7 @@
 #include "VUops.h"
 #include "GS.h"
 #include "Gif_Unit.h"
+#include <sys/time.h> // [CLIFF_DIAG]
 #include "MTVU.h"
 
 #include <cmath>
@@ -187,8 +188,10 @@ void _vuFlushAll(VURegs* VU)
 
 __fi void _vuTestPipes(VURegs* VU)
 {
+	// Restored to PC PCSX2 do-while multi-pass pattern.
+	// Single-pass optimization (P22) removed: flush functions may expose new
+	// entries on repeated passes in complex VU1 programs (3D scenes).
 	bool flushed;
-
 	do
 	{
 		flushed = false;
@@ -232,6 +235,10 @@ static void _vuFMACTestStall(VURegs* VU, u32 reg, u32 xyzw)
 
 static __fi void _vuTestFMACStalls(VURegs* VU, _VURegsNum* VUregsn)
 {
+	// [P22 O4] Early exit: no FMAC entries pending → no stalls possible
+	if (VU->fmaccount == 0)
+		return;
+
 	if (VUregsn->VFread0)
 	{
 		_vuFMACTestStall(VU, VUregsn->VFread0, VUregsn->VFr0xyzw);
@@ -277,6 +284,10 @@ static __fi void _vuTestEFUStalls(VURegs* VU, _VURegsNum* VUregsn)
 
 static __fi void _vuTestALUStalls(VURegs* VU, _VURegsNum* VUregsn)
 {
+	// [P22 O4] Early exit: no IALU entries pending → no stalls possible
+	if (VU->ialucount == 0)
+		return;
+
 	u32 i = 0;
 
 	for (int currentpipe = VU->ialureadpos; i < VU->ialucount; currentpipe = (currentpipe + 1) & 3, i++)
@@ -1820,6 +1831,11 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 	if (!VU1.xgkickenable)
 		return;
 
+	CliffDiag::xgkickXfer.fetch_add(1, std::memory_order_relaxed); // [CLIFF_DIAG]
+	// [CLIFF_DIAG] Time XGKICK transfer
+	struct timeval _xgk_tv0;
+	gettimeofday(&_xgk_tv0, nullptr);
+
 	VU1.xgkickcyclecount += cycles;
 	VU1.xgkicklastcycle += cycles;
 
@@ -1860,19 +1876,7 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 
 		VUM_LOG("XGKICK Transferring %x bytes from %x size %x", transfersize * 0x10, VU1.xgkickaddr, VU1.xgkicksizeremaining);
 
-		// Would be "nicer" to do the copy until it's all up, however this really screws up PATH3 masking stuff
-		// So lets just do it the other way :)
-		/*if (THREAD_VU1)
-		{
-			if ((transfersize * 0x10) < VU1.xgkicksizeremaining)
-				gifUnit.gifPath[GIF_PATH_1].CopyGSPacketData(&VU1.Mem[VU1.xgkickaddr], transfersize * 0x10, true);
-			else
-				gifUnit.TransferGSPacketData(GIF_TRANS_XGKICK, &g_cpuRegistersPack.vuRegs[1].Mem[VU1.xgkickaddr], transfersize * 0x10, true);
-		}
-		else*/
-		//{
-			gifUnit.TransferGSPacketData(GIF_TRANS_XGKICK, &g_cpuRegistersPack.vuRegs[1].Mem[VU1.xgkickaddr], transfersize * 0x10, true);
-		//}
+		gifUnit.TransferGSPacketData(GIF_TRANS_XGKICK, &g_cpuRegistersPack.vuRegs[1].Mem[VU1.xgkickaddr], transfersize * 0x10, true);
 
 		if ((VU0.VI[REG_VPU_STAT].UL & 0x100) && flush)
 			VU1.cycle += transfersize * 2;
@@ -1904,6 +1908,14 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 		_vuTestPipes(&VU1);
 	}
 	VUM_LOG("XGKick run complete Enabled %d", VU1.xgkickenable);
+
+	// [CLIFF_DIAG] End XGKICK timing
+	{
+		struct timeval _xgk_tv1;
+		gettimeofday(&_xgk_tv1, nullptr);
+		uint32_t dt = (uint32_t)((_xgk_tv1.tv_sec - _xgk_tv0.tv_sec) * 1000000 + (_xgk_tv1.tv_usec - _xgk_tv0.tv_usec));
+		CliffDiag::xgkickUs.fetch_add(dt, std::memory_order_relaxed);
+	}
 }
 
 static __ri void _vuXGKICK(VURegs* VU)

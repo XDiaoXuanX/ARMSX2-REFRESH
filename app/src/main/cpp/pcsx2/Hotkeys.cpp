@@ -300,5 +300,8 @@ DEFINE_HOTKEY_LOADSTATE_X(10, TRANSLATE_NOOP("Hotkeys", "Load State From Slot 10
 #undef DEFINE_HOTKEY_LOADSTATE_X
 END_HOTKEY_LIST()
 
+const size_t g_num_common_hotkeys = std::size(g_common_hotkeys);
+
 BEGIN_HOTKEY_LIST(g_host_hotkeys)
 END_HOTKEY_LIST()
+const size_t g_num_host_hotkeys = std::size(g_host_hotkeys);

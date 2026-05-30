@@ -189,6 +189,7 @@ static void _vu1Exec(VURegs* VU)
 	{
 		if (VU->ebit-- == 1)
 		{
+			CliffDiag::vu1Ebit.fetch_add(1, std::memory_order_relaxed); // [CLIFF_DIAG]
 			VU->VIBackupCycles = 0;
 			_vuFlushAll(VU);
 			VU0.VI[REG_VPU_STAT].UL &= ~0x100;

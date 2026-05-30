@@ -14,40 +14,6 @@
 #include <array>
 #include <fstream>
 
-static bool BindKnownSamplerUniforms(GLuint program)
-{
-	static constexpr struct
-	{
-		const char* name;
-		GLint unit;
-	} bindings[] = {
-		{"TextureSampler", 0},
-		{"Texture", 0},
-		{"imgSrc", 0},
-		{"PaletteSampler", 1},
-		{"RtSampler", 2},
-		{"img_prim_min", 3},
-	};
-
-	GLint previous_program = 0;
-	glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
-	glUseProgram(program);
-
-	bool changed = false;
-	for (const auto& binding : bindings)
-	{
-		const GLint location = glGetUniformLocation(program, binding.name);
-		if (location >= 0)
-		{
-			glUniform1i(location, binding.unit);
-			changed = true;
-		}
-	}
-
-	glUseProgram(static_cast<GLuint>(previous_program));
-	return changed;
-}
-
 static u32 s_last_program_id = 0;
 static GLuint s_next_bad_shader_id = 1;
 
@@ -175,8 +141,6 @@ bool GLProgram::CreateFromBinary(const void* data, u32 data_length, u32 data_for
 	}
 
 	m_program_id = prog;
-	if (BindKnownSamplerUniforms(m_program_id))
-		s_last_program_id = 0;
 	return true;
 }
 
@@ -287,9 +251,6 @@ bool GLProgram::Link()
 			return false;
 		}
 	}
-
-	if (BindKnownSamplerUniforms(m_program_id))
-		s_last_program_id = 0;
 
 	return true;
 }
@@ -536,8 +497,7 @@ void GLProgram::SetName(const std::string_view name)
 		return;
 
 #ifdef _DEBUG
-	if (glObjectLabel)
-		glObjectLabel(GL_PROGRAM, m_program_id, static_cast<GLsizei>(name.length()), name.data());
+	glObjectLabel(GL_PROGRAM, m_program_id, name.length(), name.data());
 #endif
 }
 

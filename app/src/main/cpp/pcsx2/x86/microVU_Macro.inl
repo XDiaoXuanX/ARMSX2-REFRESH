@@ -23,6 +23,9 @@ using namespace R5900::Dynarec;
 void setupMacroOp(int mode, const char* opName)
 {
 	// Set up reg allocation
+	// [iter229] Guard: mVUreset not implemented; allocate regAlloc on first COP2 macro use.
+	if (!microVU0.regAlloc)
+		microVU0.regAlloc = std::make_unique<microRegAlloc>(microVU0.index);
 	microVU0.regAlloc->reset(true);
 
 	if (mode & 0x03) // Q will be read/written
@@ -272,13 +275,16 @@ REC_COP2_mVU0(CLIP,   "CLIP",   0x108);
 REC_COP2_mVU0(DIV,   "DIV",   0x112);
 REC_COP2_mVU0(SQRT,  "SQRT",  0x112);
 REC_COP2_mVU0(RSQRT, "RSQRT", 0x112);
-REC_COP2_mVU0(IADD,  "IADD",  0x104);
-REC_COP2_mVU0(IADDI, "IADDI", 0x104);
-REC_COP2_mVU0(IAND,  "IAND",  0x104);
-REC_COP2_mVU0(IOR,   "IOR",   0x104);
-REC_COP2_mVU0(ISUB,  "ISUB",  0x104);
-REC_COP2_mVU0(ILWR,  "ILWR",  0x104);
-REC_COP2_mVU0(ISWR,  "ISWR",  0x100);
+// [D4-BUG-D002] VU0 macro integer ops: microVU JIT regalloc produces wrong results on ARM64.
+// CTC2 JIT writes VI to host register cache, but IADD/etc interpreter reads from memory.
+// Fallback all integer ops to interpreter until CTC2/VI cache coherency is fixed.
+INTERPRETATE_COP2_FUNC(IADD);
+INTERPRETATE_COP2_FUNC(IADDI);
+INTERPRETATE_COP2_FUNC(IAND);
+INTERPRETATE_COP2_FUNC(IOR);
+INTERPRETATE_COP2_FUNC(ISUB); // [D4-BUG-D002] see IADD comment above
+INTERPRETATE_COP2_FUNC(ILWR); // [D4-BUG-D002] VILWR JIT may corrupt VI values
+INTERPRETATE_COP2_FUNC(ISWR); // [D4-BUG-D002] paired with ILWR fallback
 REC_COP2_mVU0(LQI,   "LQI",   0x104);
 REC_COP2_mVU0(LQD,   "LQD",   0x104);
 REC_COP2_mVU0(SQI,   "SQI",   0x100);
@@ -461,7 +467,7 @@ static void mVUFinishVU0()
 static void TEST_FBRST_RESET(int flagreg, void(*resetFunct)(), int vuIndex)
 {
 //	xTEST(xRegister32(flagreg), (vuIndex) ? 0x200 : 0x002);
-    armAsm->Tst(a64::WRegister(flagreg), (vuIndex) ? 0x200 : 0x002);
+    armAsm->Tst(HostW(flagreg), (vuIndex) ? 0x200 : 0x002);
 //	xForwardJZ8 skip;
     a64::Label skip;
     armAsm->B(&skip, a64::Condition::eq);
@@ -489,7 +495,9 @@ static void recCFC2()
 	}
 
 	const int regt = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_WRITE);
-    auto regT = a64::XRegister(regt);
+    // [iter_r62] FIX: slot→phys mapping was missing — a64::XRegister(regt) mapped slot 0-4
+    // to x0-x4 instead of the correct host registers (x19-x24). CFC2 results were lost.
+    auto regT = HostX(regt);
 	pxAssert(!GPR_IS_CONST1(_Rt_));
 
 	if (_Rd_ == 0) // why would you read vi00?
@@ -530,7 +538,7 @@ static void recCFC2()
 		const int vireg = _allocIfUsedVItoX86(_Rd_, MODE_READ);
 		if (vireg >= 0) {
 //            xMOVZX(xRegister32(regt), xRegister16(vireg));
-            armAsm->Uxth(regT.W(), a64::WRegister(vireg));
+            armAsm->Uxth(regT.W(), HostW(vireg));
         }
 		else {
 //            xMOVZX(xRegister32(regt), ptr16[&vu0Regs.VI[_Rd_].UL]);
@@ -541,6 +549,13 @@ static void recCFC2()
 
 static void recCTC2()
 {
+	// [D4-BUG-D002] CTC2+IADD coherency: fallback VI1-15 writes to interpreter
+	// to ensure VU0 integer ops (also interpreter-fallback) see correct values.
+	if (_Rd_ > 0 && _Rd_ < REG_STATUS_FLAG)
+	{
+		recCall(CTC2);
+		return;
+	}
 	printCOP2("CTC2");
 
 	COP2_Interlock(1);
@@ -554,6 +569,20 @@ static void recCTC2()
 			mVUSyncVU0();
 		else if (g_pCurInstInfo->info & EEINST_COP2_FINISH_VU0)
 			mVUFinishVU0();
+	}
+
+	// [BUG-E005] For special registers (>= REG_STATUS_FLAG except handled cases),
+	// fall through to interpreter which has correct per-register masking.
+	// Only VI0-15, REG_R, REG_STATUS_FLAG, REG_CMSAR1, REG_FBRST have JIT paths.
+	// [BUG-E005] For special registers not explicitly handled by JIT below,
+	// fall through to interpreter which has correct per-register masking.
+	if (_Rd_ != 0 && _Rd_ >= REG_STATUS_FLAG &&
+	    _Rd_ != REG_R && _Rd_ != REG_STATUS_FLAG &&
+	    _Rd_ != REG_CMSAR1 && _Rd_ != REG_FBRST && _Rd_ != REG_I)
+	{
+		iFlushCall(FLUSH_INTERPRETER);
+		recCall(CTC2);
+		return;
 	}
 
 	switch (_Rd_)
@@ -625,7 +654,7 @@ static void recCTC2()
 				}
 
 				const int flagreg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
-                auto regFlag = a64::WRegister(flagreg);
+                auto regFlag = HostW(flagreg);
 				_eeMoveGPRtoR(regFlag, _Rt_);
 
 				iFlushCall(FLUSH_FREE_VU0);
@@ -652,11 +681,11 @@ static void recCTC2()
 				const int vireg = _allocIfUsedVItoX86(_Rd_, MODE_WRITE);
 				if (vireg >= 0)
 				{
-                    auto reg32 = a64::WRegister(vireg);
+                    auto reg32 = HostW(vireg);
 					if (gprreg >= 0)
 					{
 //						xMOVZX(xRegister32(vireg), xRegister16(gprreg));
-                        armAsm->Uxth(reg32, a64::WRegister(gprreg));
+                        armAsm->Uxth(reg32, HostW(gprreg));
 					}
 					else
 					{
@@ -692,7 +721,7 @@ static void recCTC2()
 					if (gprreg >= 0)
 					{
 //						xMOV(ptr16[&vu0Regs.VI[_Rd_].US[0]], xRegister16(gprreg));
-                        armAsm->Sxth(EAX, a64::WRegister(gprreg));
+                        armAsm->Sxth(EAX, HostW(gprreg));
 					}
 					else
 					{
@@ -743,7 +772,7 @@ static void recCTC2()
 							const int gprreg = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_READ);
 							if (gprreg >= 0) {
 //                                xMOVDZX(xRegisterSSE(xmmreg), xRegister32(gprreg));
-                                armAsm->Fmov(regQ.S(), a64::Register(gprreg, a64::kWRegSize));
+                                armAsm->Fmov(regQ.S(), a64::Register(HostGprPhys(gprreg), a64::kWRegSize));
                             }
 							else {
 //                                xMOVSSZX(xRegisterSSE(xmmreg), ptr32[&cpuRegs.GPR.r[_Rt_].SD[0]]);
@@ -961,17 +990,12 @@ void recLQC2()
 	}
 	else
 	{
-//		_eeMoveGPRtoR(arg1regd, _Rs_);
-        _eeMoveGPRtoR(ECX, _Rs_);
-		if (_Imm_ != 0) {
-//            xADD(arg1regd, _Imm_);
-            armAsm->Add(ECX, ECX, _Imm_);
-        }
-//		xAND(arg1regd, ~0xF);
-        armAsm->And(ECX, ECX, ~0xF);
-
-//		xmmreg = vtlb_DynGenReadQuad(128, arg1regd.GetId(), alloc_cb);
-        xmmreg = vtlb_DynGenReadQuad(128, ECX.GetCode(), alloc_cb);
+		_deleteEEreg(_Rs_, 1); // Flush stale GPR cache before reading Rs
+		_eeMoveGPRtoR(ECX, _Rs_);
+		if (_Imm_ != 0)
+			armAsm->Add(ECX, ECX, _Imm_);
+		armAsm->And(ECX, ECX, ~0xF);
+		xmmreg = vtlb_DynGenReadQuad(128, ECX.GetCode(), alloc_cb);
 	}
 
 	// toss away if loading to vf00
@@ -1004,17 +1028,12 @@ void recSQC2()
 	}
 	else
 	{
-//		_eeMoveGPRtoR(arg1regd, _Rs_);
-        _eeMoveGPRtoR(ECX, _Rs_);
-		if (_Imm_ != 0) {
-//            xADD(arg1regd, _Imm_);
-            armAsm->Add(ECX, ECX, _Imm_);
-        }
-//		xAND(arg1regd, ~0xF);
-        armAsm->And(ECX, ECX, ~0xF);
-
-//		vtlb_DynGenWrite(128, true, arg1regd.GetId(), ftreg);
-        vtlb_DynGenWrite(128, true, ECX.GetCode(), ftreg);
+		_deleteEEreg(_Rs_, 1); // Flush stale GPR cache before reading Rs
+		_eeMoveGPRtoR(ECX, _Rs_);
+		if (_Imm_ != 0)
+			armAsm->Add(ECX, ECX, _Imm_);
+		armAsm->And(ECX, ECX, ~0xF);
+		vtlb_DynGenWrite(128, true, ECX.GetCode(), ftreg);
 	}
 
 	if (!_Rt_)

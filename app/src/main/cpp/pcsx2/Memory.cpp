@@ -8,7 +8,7 @@ RAM
 0x00100000-0x01ffffff this is the physical address for the ram.its cached there
 0x20100000-0x21ffffff uncached
 0x30100000-0x31ffffff uncached & accelerated
-0xa0000000-0xa1ffffff MIRROR might...???
+00xa0000000-0xa1ffffff MIRROR might...???
 0x80000000-0x81ffffff MIRROR might... ????
 
 scratch pad
@@ -32,18 +32,20 @@ BIOS
 #include "SaveState.h"
 #include "VUmicro.h"
 
+#include "R5900.h" // For cpuRegs.pc access
+
 #include "ps2/HwInternal.h"
 #include "ps2/BiosTools.h"
 
 #include "common/AlignedMalloc.h"
 #include "common/Error.h"
-#ifdef __APPLE__
-#include "common/Darwin/DarwinMisc.h"
-#include <TargetConditionals.h>
-#endif
 
 #ifdef ENABLECACHE
 #include "Cache.h"
+#endif
+
+#ifdef __APPLE__
+#include "common/Darwin/DarwinMisc.h"
 #endif
 
 namespace Ps2MemSize
@@ -53,8 +55,8 @@ namespace Ps2MemSize
 
 namespace SysMemory
 {
-	static u8* TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size, const PageProtectionMode& mode);
-	static u8* AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base, const PageProtectionMode& mode);
+	static u8* TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size);
+	static u8* AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base);
 
 	static bool AllocateMemoryMap();
 	static void DumpMemoryMap();
@@ -90,14 +92,14 @@ namespace HostMemoryMap
 	}
 } // namespace HostMemoryMap
 
-u8* SysMemory::TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size, const PageProtectionMode& mode)
+u8* SysMemory::TryAllocateVirtualMemory(const char* name, void* file_handle, uptr base, size_t size)
 {
 	u8* baseptr;
 
 	if (file_handle)
 		baseptr = static_cast<u8*>(HostSys::MapSharedMemory(file_handle, 0, (void*)base, size, PageAccess_ReadWrite()));
 	else
-		baseptr = static_cast<u8*>(HostSys::Mmap((void*)base, size, mode));
+		baseptr = static_cast<u8*>(HostSys::Mmap((void*)base, size, PageAccess_Any()));
 
 	if (!baseptr)
 		return nullptr;
@@ -124,7 +126,7 @@ u8* SysMemory::TryAllocateVirtualMemory(const char* name, void* file_handle, upt
 	return baseptr;
 }
 
-u8* SysMemory::AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base, const PageProtectionMode& mode)
+u8* SysMemory::AllocateVirtualMemory(const char* name, void* file_handle, size_t size, size_t offset_from_base)
 {
 	// ARM64 does not need the rec areas to be in +/- 2GB.
 #ifdef _M_X86
@@ -148,14 +150,14 @@ u8* SysMemory::AllocateVirtualMemory(const char* name, void* file_handle, size_t
 			continue;
 		}
 
-		if (u8* ret = TryAllocateVirtualMemory(name, file_handle, base, size, mode))
+		if (u8* ret = TryAllocateVirtualMemory(name, file_handle, base, size))
 			return ret;
 
 		DevCon.Warning("%s: host memory @ 0x%016" PRIXPTR " -> 0x%016" PRIXPTR " is unavailable; attempting to map elsewhere...", name,
 			base, base + size);
 	}
 #else
-	return TryAllocateVirtualMemory(name, file_handle, 0, size, mode);
+	return TryAllocateVirtualMemory(name, file_handle, 0, size);
 #endif
 
 	return nullptr;
@@ -171,23 +173,14 @@ bool SysMemory::AllocateMemoryMap()
 		return false;
 	}
 
-	if ((s_data_memory = AllocateVirtualMemory("Data Memory", s_data_memory_file_handle, HostMemoryMap::MainSize, 0, PageAccess_ReadWrite())) == nullptr)
+	if ((s_data_memory = AllocateVirtualMemory("Data Memory", s_data_memory_file_handle, HostMemoryMap::MainSize, 0)) == nullptr)
 	{
 		Host::ReportErrorAsync("Error", "Failed to map data memory at an acceptable location.");
 		ReleaseMemoryMap();
 		return false;
 	}
 
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-	const bool no_jit = DarwinMisc::IsNoJitModeActive();
-#else
-	const bool no_jit = false;
-#endif
-	const PageProtectionMode code_mode = no_jit ? PageAccess_ReadWrite() : PageAccess_Any();
-	DevCon.WriteLn(Color_Gray, "@@CODE_MEMORY@@ executable=%d no_jit=%d size=%zu",
-		code_mode.CanExecute() ? 1 : 0, no_jit ? 1 : 0, HostMemoryMap::CodeSize);
-
-	if ((s_code_memory = AllocateVirtualMemory("Code Memory", nullptr, HostMemoryMap::CodeSize, HostMemoryMap::MainSize, code_mode)) == nullptr)
+	if ((s_code_memory = AllocateVirtualMemory("Code Memory", nullptr, HostMemoryMap::CodeSize, HostMemoryMap::MainSize)) == nullptr)
 	{
 		Host::ReportErrorAsync("Error", "Failed to allocate code memory at an acceptable location.");
 		ReleaseMemoryMap();
@@ -197,6 +190,12 @@ bool SysMemory::AllocateMemoryMap()
 	HostMemoryMap::EEmem = (uptr)(s_data_memory + HostMemoryMap::EEmemOffset);
 	HostMemoryMap::IOPmem = (uptr)(s_data_memory + HostMemoryMap::IOPmemOffset);
 	HostMemoryMap::VUmem = (uptr)(s_data_memory + HostMemoryMap::VUmemSize);
+
+#ifdef __APPLE__
+	DarwinMisc::SetJitRange(s_code_memory, HostMemoryMap::CodeSize);
+	// [P43] Log dual-mapping state
+	Console.WriteLn("@@P43_OFFSET@@ g_code_rw_offset=%ld", (long)DarwinMisc::g_code_rw_offset);
+#endif
 
 	DumpMemoryMap();
 	return true;
@@ -336,6 +335,14 @@ void memSetUserMode() {
 void ba0W16(u32 mem, u16 value)
 {
 	//MEM_LOG("ba000000 Memory write16 address %x value %x", mem, value);
+	// [iter230] TEMP_DIAG: DVE write trace
+	{
+		static u32 s_dve_w_n = 0;
+		if (s_dve_w_n++ < 40)
+			Console.WriteLn("@@DVE_W16@@ n=%u mem=%08x reg=%02x val=%04x cmd_exec=%d s_ba02=%02x s_ba06=%02x",
+				s_dve_w_n, mem, (unsigned)(mem & 0xFF), (unsigned)value,
+				(int)s_ba_command_executing, (unsigned)s_ba[0x2], (unsigned)s_ba[0x6]);
+	}
 	u32 masked_mem = (mem & 0xFF);
 
 	if (masked_mem == 0x6) // Status Reg
@@ -393,7 +400,13 @@ void ba0W16(u32 mem, u16 value)
 
 u16 ba0R16(u32 mem)
 {
-	//MEM_LOG("ba000000 Memory read16 address %x", mem);
+	// [iter230] TEMP_DIAG: DVE read trace
+	{
+		static u32 s_dve_r_n = 0;
+		if (s_dve_r_n++ < 20)
+			Console.WriteLn("@@DVE_R16@@ n=%u mem=%08x cmd_exec=%d s_ba06=%02x",
+				s_dve_r_n, mem, (int)s_ba_command_executing, (unsigned)s_ba[0x6]);
+	}
 
 	if (mem == 0x1a000006)
 	{
@@ -452,6 +465,26 @@ static vtlbHandler
 	iopHw_by_page_08,
 	iop_memory;
 
+// [iPSX2] SafePSM Implementation
+// Provides direct pointer access for ROM even when Handlers are used (fixing PSM macro)
+void* SafePSM(u32 mem)
+{
+    u32 paddr = mem & 0x1fffffff;
+    // ROM (BioS)
+    if (paddr >= 0x1fc00000 && paddr < 0x20000000) {
+        return &eeMem->ROM[paddr & 0x3fffff];
+    }
+    // ROM1
+    if (paddr >= 0x1e000000 && paddr < 0x1e400000) {
+        return &eeMem->ROM1[paddr & 0x3fffff];
+    }
+    // ROM2
+    if (paddr >= 0x1e400000 && paddr < 0x1e800000) {
+        return &eeMem->ROM2[paddr & 0x3fffff];
+    }
+    
+    return vtlb_GetPhyPtr(paddr);
+}
 
 void memMapVUmicro()
 {
@@ -474,8 +507,8 @@ void memMapVUmicro()
 	// Note: In order for the below conditional to work correctly
 	// support needs to be coded to reset the memMappings when MTVU is
 	// turned off/on. For now we just always use the vu data handlers...
-	if (THREAD_VU1) vtlb_MapHandler(vu1_data_mem,0x1100c000,0x00004000);
-	else            vtlb_MapBlock  (VU1.Mem,     0x1100c000,0x00004000);
+	if (1||THREAD_VU1) vtlb_MapHandler(vu1_data_mem,0x1100c000,0x00004000);
+	else               vtlb_MapBlock  (VU1.Mem,     0x1100c000,0x00004000);
 }
 
 void memMapPhy()
@@ -488,8 +521,21 @@ void memMapPhy()
 
 	// Various ROMs (all read-only)
 	vtlb_MapBlock(eeMem->ROM,	0x1fc00000, Ps2MemSize::Rom);
+
 	vtlb_MapBlock(eeMem->ROM1,	0x1e000000, Ps2MemSize::Rom1);
-	vtlb_MapBlock(eeMem->ROM2,	0x1e400000, Ps2MemSize::Rom2);
+	// [FIX] Cap ROM2 mapping to prevent overlap into IOP memory region.
+	// sizeof(EEVM_MemoryAllocMess) > EEmemSize, so ROM2's upper portion shares
+	// backing memory with IOP. Limit the MapBlock to the safe range.
+	{
+		const u32 rom2_struct_offset = offsetof(EEVM_MemoryAllocMess, ROM2);
+		const u32 rom2_safe_size = (HostMemoryMap::EEmemSize > rom2_struct_offset)
+			? std::min(Ps2MemSize::Rom2, HostMemoryMap::EEmemSize - rom2_struct_offset)
+			: 0u;
+		// Round down to page boundary (4096)
+		const u32 rom2_map_size = rom2_safe_size & ~0xFFFu;
+		if (rom2_map_size > 0)
+			vtlb_MapBlock(eeMem->ROM2, 0x1e400000, rom2_map_size);
+	}
 
 	// IOP memory
 	// (used by the EE Bios Kernel during initial hardware initialization, Apps/Games
@@ -585,6 +631,8 @@ static void TAKES_R128 nullWrite128(u32 mem, r128 value)
 	MEM_LOG("Write uninstalled memory at address %08x", mem);
 }
 
+#include "Hw.h"
+
 template<int p>
 static mem8_t _ext_memRead8 (u32 mem)
 {
@@ -604,7 +652,6 @@ static mem8_t _ext_memRead8 (u32 mem)
 			return iopMemRead8(mem & ~0x1c000000);
 		default: break;
 	}
-
 	MEM_LOG("Unknown Memory Read8   from address %8.8x", mem);
 	cpuTlbMissR(mem, cpuRegs.branch);
 	return 0;
@@ -623,19 +670,16 @@ static mem16_t _ext_memRead16(u32 mem)
 			return ba0R16(mem);
 		case 6: // gsm
 			return gsRead16(mem);
-
 		case 7: // dev9
 		{
 			mem16_t retval = DEV9read16(mem & ~0xa4000000);
 			Console.WriteLn("DEV9 read16 %8.8lx: %4.4lx", mem & ~0xa4000000, retval);
 			return retval;
 		}
-
 		case 8: // spu2
 			return SPU2read(mem);
 		case 9:
 			return iopMemRead16(mem & ~0x1c000000);
-
 		default: break;
 	}
 	MEM_LOG("Unknown Memory read16  from address %8.8x", mem);
@@ -660,7 +704,6 @@ static mem32_t _ext_memRead32(u32 mem)
 			return iopMemRead32(mem & ~0x1c000000);
 		default: break;
 	}
-
 	MEM_LOG("Unknown Memory read32  from address %8.8x (Status=%8.8x)", mem, cpuRegs.CP0.n.Status.val);
 	cpuTlbMissR(mem, cpuRegs.branch);
 	return 0;
@@ -682,7 +725,6 @@ static u64 _ext_memRead64(u32 mem)
 		}
 		default: break;
 	}
-
 	MEM_LOG("Unknown Memory read64  from address %8.8x", mem);
 	cpuTlbMissR(mem, cpuRegs.branch);
 	return 0;
@@ -708,7 +750,6 @@ static RETURNS_R128 _ext_memRead128(u32 mem)
 		}
 		default: break;
 	}
-
 	MEM_LOG("Unknown Memory read128 from address %8.8x", mem);
 	cpuTlbMissR(mem, cpuRegs.branch);
 	return r128_zero();
@@ -1126,6 +1167,7 @@ void memReset()
 	tlb_fallback_8 = vtlb_RegisterHandlerTempl1(_ext_mem,8);
 	iop_memory = vtlb_RegisterHandlerTempl1(_ext_mem,9);
 
+
 	// Dynarec versions of VUs
 	vu0_micro_mem = vtlb_RegisterHandlerTempl1(vuMicro,0);
 	vu1_micro_mem = vtlb_RegisterHandlerTempl1(vuMicro,1);
@@ -1213,6 +1255,7 @@ void memReset()
 	memMapKernelMem();
 	memMapSupervisorMem();
 	memMapUserMem();
+
 	memSetKernelMode();
 
 	vtlb_VMap(0x00000000,0x00000000,0x20000000);
@@ -1232,6 +1275,7 @@ void memReset()
 	// BIOS is included in eeMem, so it needs to be copied after zeroing.
 	std::memset(eeMem, 0, sizeof(*eeMem));
 	CopyBIOSToMemory();
+
 }
 
 void memRelease()

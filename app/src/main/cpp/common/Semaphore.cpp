@@ -97,8 +97,7 @@ bool Threading::WorkSema::WaitForEmpty()
 	while (true)
 	{
 		if (value < 0)
-			return !IsDead(value); // STATE_SLEEPING or STATE_SPINNING, queue is empty!
-		// Note: We technically only need memory_order_acquire on *failure* (because that's when we could leave without sleeping), but libstdc++ still asserts on failure < success
+			return !IsDead(value);
 		if (m_state.compare_exchange_weak(value, value | STATE_FLAG_WAITING_EMPTY, std::memory_order_acquire))
 			break;
 	}

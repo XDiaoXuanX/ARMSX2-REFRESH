@@ -7,9 +7,10 @@
 #include "common/WindowInfo.h"
 #include "GS/GS.h"
 #include "GS/Renderers/Common/GSFastList.h"
-#include "GS/Renderers/Common/GSGPUProfile.h"
 #include "GS/Renderers/Common/GSTexture.h"
+#if !defined(iPSX2_MACOS)
 #include "GS/Renderers/Vulkan/GSTextureVK.h"
+#endif
 #include "GS/Renderers/Common/GSVertex.h"
 #include "GS/GSAlignedClass.h"
 #include "GS/GSExtra.h"
@@ -705,6 +706,7 @@ struct alignas(16) GSHWDrawConfig
 	u32 nindices;         ///< Number of indices
 	u32 indices_per_prim; ///< Number of indices that make up one primitive
 	const std::vector<size_t>* drawlist; ///< For reducing barriers on sprites
+	const std::vector<GSVector4i>* drawlist_bbox; ///< For RT copy when barriers not available.
 	GSVector4i scissor; ///< Scissor rect
 	GSVector4i drawarea; ///< Area in the framebuffer which will be modified.
 	Topology topology;  ///< Draw topology
@@ -794,6 +796,7 @@ public:
 		bool stencil_buffer       : 1; ///< Supports stencil buffer, and can use for DATE.
 		bool cas_sharpening       : 1; ///< Supports sufficient functionality for contrast adaptive sharpening.
 		bool test_and_sample_depth: 1; ///< Supports concurrently binding the depth-stencil buffer for sampling and depth testing.
+		bool multidraw_fb_copy    : 1; ///< Supports copying framebuffer for multi-draw barrier emulation.
 		FeatureSupport()
 		{
 			memset(this, 0, sizeof(*this));
@@ -833,7 +836,6 @@ public:
 protected:
 	std::string m_name = "Unknown";
 	FeatureSupport m_features;
-	RuntimeGpuProfile m_runtime_gpu_profile = RuntimeGpuProfile::Generic;
 	u32 m_max_texture_size = 0;
 
 	struct
@@ -880,7 +882,6 @@ protected:
 	GSTexture* m_colclip_rt = nullptr; ///< Temp hw colclip texture
 
 	bool AcquireWindow(bool recreate_window);
-	__fi void SetRuntimeGPUProfile(RuntimeGpuProfile profile) { m_runtime_gpu_profile = profile; }
 
 	virtual GSTexture* CreateSurface(GSTexture::Type type, int width, int height, int levels, GSTexture::Format format) = 0;
 	GSTexture* FetchSurface(GSTexture::Type type, int width, int height, int levels, GSTexture::Format format, bool clear, bool prefer_unused_texture);
@@ -929,9 +930,6 @@ public:
 
 	__fi FeatureSupport Features() const { return m_features; }
 	__fi u32 GetMaxTextureSize() const { return m_max_texture_size; }
-	__fi RuntimeGpuProfile GetRuntimeGPUProfile() const { return m_runtime_gpu_profile; }
-	__fi bool IsMaliGPUProfile() const { return (m_runtime_gpu_profile == RuntimeGpuProfile::Mali); }
-	__fi bool IsAdrenoGPUProfile() const { return (m_runtime_gpu_profile == RuntimeGpuProfile::Adreno); }
 
 	__fi const WindowInfo& GetWindowInfo() const { return m_window_info; }
 	__fi s32 GetWindowWidth() const { return static_cast<s32>(m_window_info.surface_width); }

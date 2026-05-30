@@ -3,6 +3,35 @@
 
 #pragma once
 
+#include <atomic>
+
+// [DIAGNOSTIC] Robust HWREG Ring Buffer
+struct HwRegEntry {
+    u32 caller_pc;
+    u32 vaddr;
+    u32 paddr;
+    u32 width;
+    u64 val;
+    bool is_write;
+};
+
+struct HwRegRingBuffer {
+    static const int SIZE = 64;
+    HwRegEntry entries[SIZE];
+    int idx;
+    std::atomic<u32> write_count;
+    std::atomic<u32> read_count;
+    std::atomic<u32> push_count;
+
+    HwRegRingBuffer();
+    
+    void Push(u32 pc, u32 vaddr, u32 paddr, u32 width, u64 val, bool is_write);
+    void DumpLast(int n);
+    void DumpStats();
+};
+
+extern HwRegRingBuffer g_HwRegRing;
+
 namespace EEMemoryMap
 {
 	static const uint RCNT0_Start		= 0x10000000;

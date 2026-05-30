@@ -4,6 +4,7 @@
 #pragma once
 
 #include "vtlb.h"
+#include <atomic>
 
 // This is a table of default virtual map addresses for ps2vm components.  These locations
 // are provided and used to assist in debugging and possibly hacking; as it makes it possible
@@ -49,9 +50,9 @@ namespace HostMemoryMap
 	// Code
 	//////////////////////////////////////////////////////////////////////////
 
-	// EE recompiler code cache area (64mb)
+	// EE recompiler code cache area (128mb)
 	static constexpr u32 EErecOffset = 0x00000000;
-	static constexpr u32 EErecSize = 0x4000000;
+	static constexpr u32 EErecSize = 0x8000000;
 
 	// IOP recompiler code cache area (32mb)
 	static constexpr u32 IOPrecOffset = EErecOffset + EErecSize;
@@ -142,7 +143,31 @@ namespace SysMemory
 } // namespace SysMemory
 
 
-#define PSM(mem) (vtlb_GetPhyPtr((mem)&0x1fffffff))
+#ifndef iPSX2_ENABLE_PSM_SAFE
+#define iPSX2_ENABLE_PSM_SAFE 0
+#endif
+#ifndef DEBUG_ONLY_PSM_SAFE
+#define DEBUG_ONLY_PSM_SAFE 0
+#endif
+#define P0_PSM_SAFE_ACTIVE ((iPSX2_ENABLE_PSM_SAFE == 1) && (DEBUG_ONLY_PSM_SAFE == 1))
+
+extern "C" void LogUnified(const char* fmt, ...);
+inline std::atomic<bool> g_p0_psm_logged{false};
+
+static __fi void* PSM_Impl(u32 mem)
+{
+	if (!g_p0_psm_logged.exchange(true))
+		LogUnified("@@P0_PSM_SAFE@@ active=%d dbg=%d\n", iPSX2_ENABLE_PSM_SAFE, DEBUG_ONLY_PSM_SAFE);
+#if P0_PSM_SAFE_ACTIVE
+	// [DEBUG_ONLY] SafePSM handles ROM pointers when using Handlers (fixes JIT crash)
+	extern void* SafePSM(u32 mem);
+	return SafePSM(mem);
+#else
+	return vtlb_GetPhyPtr((mem)&0x1fffffff);
+#endif
+}
+
+#define PSM(mem) (PSM_Impl(mem))
 
 #define psHu8(mem) (*(u8*)&eeHw[(mem)&0xffff])
 #define psHu16(mem) (*(u16*)&eeHw[(mem)&0xffff])

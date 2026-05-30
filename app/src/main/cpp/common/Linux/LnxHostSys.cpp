@@ -257,8 +257,10 @@ u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* ma
 	const uint lnxmode = LinuxProt(mode);
 	void* const ptr = mmap(map_base, map_size, lnxmode, MAP_SHARED | MAP_FIXED,
 		static_cast<int>(reinterpret_cast<intptr_t>(file_handle)), static_cast<off_t>(file_offset));
-	if (ptr == MAP_FAILED)
+	if (ptr == MAP_FAILED) {
+        Console.Error("Explicit mmap failed: base=%p size=%zu off=%zu errno=%d (%s)", map_base, map_size, file_offset, errno, strerror(errno));
 		return nullptr;
+    }
 
 	m_num_mappings++;
 	return static_cast<u8*>(ptr);

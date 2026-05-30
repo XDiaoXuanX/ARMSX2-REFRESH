@@ -277,7 +277,12 @@ void ImGuiManager::NewFrame()
 	// focus when there's nothing there. We use GetCurrentWindowRead() because otherwise it'll make it visible.
 	ImGui::GetCurrentWindowRead()->Flags |= ImGuiWindowFlags_NoNavInputs;
 	s_imgui_wants_keyboard.store(io.WantCaptureKeyboard, std::memory_order_relaxed);
+#if defined(__APPLE__) && defined(__MACH__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+	// [P28] On iOS, never let ImGui capture mouse/touch — SwiftUI virtual pad handles input
+	s_imgui_wants_mouse.store(false, std::memory_order_release);
+#else
 	s_imgui_wants_mouse.store(io.WantCaptureMouse, std::memory_order_release);
+#endif
 
 	const bool want_text_input = io.WantTextInput;
 	if (s_imgui_wants_text.load(std::memory_order_relaxed) != want_text_input)

@@ -178,6 +178,8 @@ void CTC2() {
 			VU0.VI[REG_R].UL = ((cpuRegs.GPR.r[_Rt_].UL[0] & 0x7FFFFF) | 0x3F800000);
 			break;
 		case REG_FBRST:
+			// [BUG-E005] Only bits 2,3,10,11 are sticky (STP/SER for VU0/VU1).
+			// Reset bits (0,1,8,9) trigger reset then self-clear.
 			VU0.VI[REG_FBRST].UL = cpuRegs.GPR.r[_Rt_].UL[0] & 0x0C0C;
 			if (cpuRegs.GPR.r[_Rt_].UL[0] & 0x1) { // VU0 Force Break
 				Console.Error("fixme: VU0 Force Break");
@@ -193,15 +195,34 @@ void CTC2() {
 //				Console.WriteLn("fixme: VU1 Reset");
 				vu1ResetRegs();
 			}
+			// [BUG-E005] Reset bits are self-clearing; after reset, FBRST = 0
+			if (cpuRegs.GPR.r[_Rt_].UL[0] & 0x0303)
+				VU0.VI[REG_FBRST].UL = 0;
 			break;
 		case REG_CMSAR1: // REG_CMSAR1
 			vu1Finish(true);
 			vu1ExecMicro(cpuRegs.GPR.r[_Rt_].US[0]);	// Execute VU1 Micro SubRoutine
 			break;
 		case REG_CLIP_FLAG:
-			VU0.clipflag = cpuRegs.GPR.r[_Rt_].UL[0];
+			// [BUG-E005] Clipping flag is 24 bits
+			VU0.VI[REG_CLIP_FLAG].UL = cpuRegs.GPR.r[_Rt_].UL[0] & 0x00FFFFFF;
+			break;
 		default:
-			VU0.VI[_Fs_].UL = cpuRegs.GPR.r[_Rt_].UL[0];
+			// [BUG-E005] Per-register behavior for CTC2
+			if (_Fs_ < 16) {
+				// VI1-15: 16-bit integer registers
+				VU0.VI[_Fs_].UL = cpuRegs.GPR.r[_Rt_].UL[0] & 0xFFFF;
+			} else if (_Fs_ == 19 || (_Fs_ >= 23 && _Fs_ <= 26) || _Fs_ == 29 || _Fs_ == 30) {
+				// Reserved / read-only: vi19, vi23-26(reserved/TPC), vi29(VPU_STAT), vi30
+				// CTC2 writes are ignored on real PS2
+				break;
+			} else if (_Fs_ == 27) {
+				// CMSAR0: 16-bit
+				VU0.VI[_Fs_].UL = cpuRegs.GPR.r[_Rt_].UL[0] & 0xFFFF;
+			} else {
+				// REG_I (21), others: full 32-bit write
+				VU0.VI[_Fs_].UL = cpuRegs.GPR.r[_Rt_].UL[0];
+			}
 			break;
 	}
 }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#include <sys/time.h> // [CLIFF_DIAG]
 #include "GS.h"
 #include "Gif_Unit.h"
 #include "MTGS.h"
@@ -59,7 +60,7 @@ namespace MTGS
 	static void _FinishSimplePacket();
 	static u8* GetDataPacketPtr();
 
-	static void SetEvent();
+	// [P23] SetEvent() declaration moved to MTGS.h (public API)
 
 	alignas(__cachelinesize) BufferedData RingBuffer;
 
@@ -123,6 +124,11 @@ void MTGS::StartThread()
 	pxAssertRel(!s_open_flag.load(), "GS thread should not be opened when starting");
 	s_sem_event.Reset();
 	s_shutdown_flag.store(false, std::memory_order_release);
+	// [iter684] GS-SW ReadTexture16 stack overflow in Debug (-O0) mode on iOS simulator.
+	// Debug mode creates large stack frames (no inlining, all locals on stack).
+	// Signal handler recursion (151 deep) compounds the issue.
+	s_thread.SetStackSize(16 * 1024 * 1024); // 16MB
+	Console.WriteLn("@@GS_STACK@@ Setting GS thread stack to %u bytes", s_thread.GetStackSize());
 	s_thread.Start(&MTGS::ThreadEntryPoint);
 }
 
@@ -270,8 +276,6 @@ void MTGS::PostVsyncStart(bool registers_written)
 		return;
 
 	s_VsyncSignalListener.store(true, std::memory_order_release);
-	//Console.WriteLn( Color_Blue, "(EEcore Sleep) Vsync\t\tringpos=0x%06x, writepos=0x%06x", m_ReadPos.load(), m_WritePos.load() );
-
 	s_sem_Vsync.Wait();
 }
 
@@ -403,13 +407,13 @@ void MTGS::MainLoop()
 					if (endpos >= RingBufferSize)
 					{
 						uint firstcopylen = RingBufferSize - datapos;
-						GSgifTransfer2((u32*)data, firstcopylen);
+						GSgifTransfer2((u8*)data, firstcopylen);
 						datapos = endpos & RingBufferMask;
-						GSgifTransfer2((u32*)RingBuffer.m_Ring, datapos);
+						GSgifTransfer2((u8*)RingBuffer.m_Ring, datapos);
 					}
 					else
 					{
-						GSgifTransfer2((u32*)data, qsize);
+						GSgifTransfer2((u8*)data, qsize);
 					}
 
 					ringposinc += qsize;
@@ -428,13 +432,13 @@ void MTGS::MainLoop()
 					if (endpos >= RingBufferSize)
 					{
 						uint firstcopylen = RingBufferSize - datapos;
-						GSgifTransfer3((u32*)data, firstcopylen);
+						GSgifTransfer3((u8*)data, firstcopylen);
 						datapos = endpos & RingBufferMask;
-						GSgifTransfer3((u32*)RingBuffer.m_Ring, datapos);
+						GSgifTransfer3((u8*)RingBuffer.m_Ring, datapos);
 					}
 					else
 					{
-						GSgifTransfer3((u32*)data, qsize);
+						GSgifTransfer3((u8*)data, qsize);
 					}
 
 					ringposinc += qsize;
@@ -447,7 +451,16 @@ void MTGS::MainLoop()
 					u32 offset = tag.data[0];
 					u32 size = tag.data[1];
 					if (offset != ~0u)
+					{
+						// [CLIFF_DIAG] Time GSgifTransfer
+						struct timeval tv0, tv1;
+						gettimeofday(&tv0, nullptr);
 						GSgifTransfer((u8*)&path.buffer[offset], size / 16);
+						gettimeofday(&tv1, nullptr);
+						uint32_t dt = (uint32_t)((tv1.tv_sec - tv0.tv_sec) * 1000000 + (tv1.tv_usec - tv0.tv_usec));
+						CliffDiag::gsXferUs.fetch_add(dt, std::memory_order_relaxed);
+						CliffDiag::gsXferCalls.fetch_add(1, std::memory_order_relaxed);
+					}
 					path.readAmount.fetch_sub(size, std::memory_order_acq_rel);
 					break;
 				}
@@ -1051,7 +1064,6 @@ void Gif_AddGSPacketMTVU(GS_Packet& gsPack, GIF_PATH path)
 
 void Gif_AddCompletedGSPacket(GS_Packet& gsPack, GIF_PATH path)
 {
-	//DevCon.WriteLn("Adding Completed Gif Packet [size=%x]", gsPack.size);
 	if (COPY_GS_PACKET_TO_MTGS)
 	{
 		MTGS::PrepDataPacket(path, gsPack.size / 16);
@@ -1067,9 +1079,10 @@ void Gif_AddCompletedGSPacket(GS_Packet& gsPack, GIF_PATH path)
 	}
 }
 
+
+
 void Gif_AddBlankGSPacket(u32 size, GIF_PATH path)
 {
-	//DevCon.WriteLn("Adding Blank Gif Packet [size=%x]", size);
 	gifUnit.gifPath[path].readAmount.fetch_add(size);
 	MTGS::SendSimpleGSPacket(MTGS::Command::GSPacket, ~0u, size, path);
 }

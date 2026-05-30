@@ -4,7 +4,6 @@
 #include "GSMTLDeviceInfo.h"
 #include "GS/GS.h"
 #include "common/Console.h"
-#include "common/Darwin/ApplePlatform.h"
 #include "common/Path.h"
 
 #ifdef __APPLE__
@@ -206,12 +205,16 @@ GSMTLDevice::GSMTLDevice(MRCOwned<id<MTLDevice>> dev)
 		features.slow_color_compression = [[dev name] containsString:@"AMD"] || [[dev name] isEqualToString:@"Intel HD Graphics 4000"];
 
 	features.max_texsize = 8192;
-#if ARMSX2_APPLE_IOS_SIMULATOR
+	// Simulator claims to support it but might fail on pipeline creation with "reading from rendertarget not supported"
+#if TARGET_OS_SIMULATOR
 	features.framebuffer_fetch = false;
-#elif ARMSX2_APPLE_IOS_DEVICE
+#elif TARGET_OS_IPHONE
 	features.framebuffer_fetch = [dev supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily1_v1];
+#else
+	// [P63] macOS: framebuffer fetch supported on Apple Silicon
+	features.framebuffer_fetch = true;
 #endif
-#if ARMSX2_APPLE_MACOS_NATIVE
+#if !TARGET_OS_IPHONE
 	if ([dev supportsFeatureSet:MTLFeatureSet_macOS_GPUFamily1_v1])
 		features.max_texsize = 16384;
 #endif
@@ -235,3 +238,4 @@ const char* to_string(GSMTLDevice::MetalVersion ver)
 }
 
 #endif // __APPLE__
+

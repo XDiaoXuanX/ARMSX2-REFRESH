@@ -4,6 +4,8 @@
 #include "R3000A.h"
 #include "IopGte.h"
 #include "IopMem.h"
+#include "IopHw.h"
+#include "Common.h"
 
 #include "common/Console.h"
 
@@ -303,7 +305,45 @@ void psxCTC2() { _c2dRd_ = _u32(_rRt_); };
 * Format:  ?                                             *
 *********************************************************/
 void psxNULL() {
-Console.Warning("psx: Unimplemented op %x", psxRegs.code);
+	// [P9 TEMP_DIAG] IOP が PC=0 などのゴミコードを実行したときのスパム抑制 (cap=50)
+	static int s_psx_null_cap = 0;
+	if (s_psx_null_cap < 50) {
+		Console.Warning("psx: Unimplemented op %x pc=%08x [%d/50]", psxRegs.code, psxRegs.pc, ++s_psx_null_cap);
+	}
+	// [TEMP_DIAG] @@IOP_NULL_CONTEXT@@ — 初回のみ DMA/memory stateダンプ
+	// Removal condition: IOP excvec 破損causeafter identified
+	static bool s_null_ctx_done = false;
+	if (!s_null_ctx_done) {
+		s_null_ctx_done = true;
+		// IOP memory at exception vector
+		u32 ev80 = iopMemRead32(0x80);
+		u32 ev84 = iopMemRead32(0x84);
+		u32 ev88 = iopMemRead32(0x88);
+		u32 ev8c = iopMemRead32(0x8c);
+		Console.Error("@@IOP_NULL_CONTEXT@@ excvec: %08x %08x %08x %08x", ev80, ev84, ev88, ev8c);
+		// IOP DMA registers (channels 0-6, 9-13)
+		Console.Error("@@IOP_NULL_CONTEXT@@ DMA_DPCR=%08x DMA_DPCR2=%08x DMA_DICR=%08x DMA_DICR2=%08x",
+			psxHu32(0x10f0), psxHu32(0x1570), psxHu32(0x10f4), psxHu32(0x1574));
+		// DMA2 (GPU), DMA3 (CDVD), DMA6 (OTC)
+		Console.Error("@@IOP_NULL_CONTEXT@@ DMA2: MADR=%08x BCR=%08x CHCR=%08x",
+			psxHu32(0x10a0), psxHu32(0x10a4), psxHu32(0x10a8));
+		Console.Error("@@IOP_NULL_CONTEXT@@ DMA3: MADR=%08x BCR=%08x CHCR=%08x",
+			psxHu32(0x10b0), psxHu32(0x10b4), psxHu32(0x10b8));
+		Console.Error("@@IOP_NULL_CONTEXT@@ DMA6: MADR=%08x BCR=%08x CHCR=%08x",
+			psxHu32(0x10e0), psxHu32(0x10e4), psxHu32(0x10e8));
+		// DMA9 (SIF0 IOP->EE), DMA10 (SIF1 EE->IOP)
+		Console.Error("@@IOP_NULL_CONTEXT@@ DMA9: MADR=%08x BCR=%08x CHCR=%08x",
+			psxHu32(0x1520), psxHu32(0x1524), psxHu32(0x1528));
+		Console.Error("@@IOP_NULL_CONTEXT@@ DMA10: MADR=%08x BCR=%08x CHCR=%08x",
+			psxHu32(0x1530), psxHu32(0x1534), psxHu32(0x1538));
+		// EE state at this moment
+		Console.Error("@@IOP_NULL_CONTEXT@@ ee_pc=%08x ee_cyc=%u iop_cyc=%u iop_ra=%08x iop_sp=%08x",
+			cpuRegs.pc, cpuRegs.cycle, psxRegs.cycle, psxRegs.GPR.n.ra, psxRegs.GPR.n.sp);
+		// Also check nearby IOP memory for corruption pattern
+		Console.Error("@@IOP_NULL_CONTEXT@@ iop[10d50]=%08x %08x %08x %08x iop[ca60]=%08x %08x %08x %08x",
+			iopMemRead32(0x10d50), iopMemRead32(0x10d54), iopMemRead32(0x10d58), iopMemRead32(0x10d5c),
+			iopMemRead32(0xca60), iopMemRead32(0xca64), iopMemRead32(0xca68), iopMemRead32(0xca6c));
+	}
 }
 
 void psxSPECIAL() {

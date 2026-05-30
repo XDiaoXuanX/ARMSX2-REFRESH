@@ -961,10 +961,10 @@ u32 DEV9read32(u32 addr)
 		static u32 s_dev9_override_log_count = 0;
 		if (s_dev9_override_cfg < 0)
 		{
-			const char* env = getenv("ARMSX2_DEV9_READ10000000_OVERRIDE");
+			const char* env = getenv("iPSX2_DEV9_READ10000000_OVERRIDE");
 			const bool enabled = (env && env[0] && strcmp(env, "0") != 0);
 			s_dev9_override_cfg = enabled ? 1 : 0;
-			Console.Error("@@CFG@@ ARMSX2_DEV9_READ10000000_OVERRIDE=%d", s_dev9_override_cfg);
+			Console.Error("@@CFG@@ iPSX2_DEV9_READ10000000_OVERRIDE=%d", s_dev9_override_cfg);
 		}
 		if (s_dev9_override_cfg && addr == 0x10000000)
 		{

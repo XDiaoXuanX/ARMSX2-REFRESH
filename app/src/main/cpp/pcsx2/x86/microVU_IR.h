@@ -227,7 +227,7 @@ class microRegAlloc
 {
 protected:
 	static const int xmmTotal = iREGCNT_XMM - 1; // PQ register is reserved
-	static const int gprTotal = iREGCNT_GPR;
+	static const int gprTotal = iREGCNT_MVU_GPR;
 
 	std::array<microMapXMM, xmmTotal> xmmMap;
 	std::array<microMapGPR, gprTotal> gprMap;
@@ -359,7 +359,7 @@ public:
 			if (i == T1 || i == T2 || i == F0 || i == F1 || i == F2 || i == F3
                 || i == 4 //i == rsp.GetId()
                 || i == 16 || i == 17 || i == 18 //i == a64::x16.GetCode() || i == a64::x17.GetCode() || i == a64::x18.GetCode()
-                || i >= iREGCNT_GPR
+                || i >= iREGCNT_MVU_GPR
             ) {
 				continue;
 			}
@@ -974,14 +974,16 @@ public:
 
 	void writeBackReg(const a64::Register& reg, bool clearDirty)
 	{
-		microMapGPR& mapX = gprMap[reg.GetCode()];
+		// reg.GetCode() is the slot index into gprMap
+		const int slot = reg.GetCode();
+		microMapGPR& mapX = gprMap[slot];
 		pxAssert(mapX.usable || !mapX.dirty);
 		if (mapX.dirty)
 		{
 			pxAssert(mapX.VIreg > 0);
 			if (mapX.VIreg < 16) {
 //                xMOV(ptr16[&getVI(mapX.VIreg)], xRegister16(reg));
-                armAsm->Strh(reg, PTR_CPU(vuRegs[index].VI[mapX.VIreg]));
+                armAsm->Strh(armWRegister(slot), PTR_CPU(vuRegs[index].VI[mapX.VIreg]));
             }
 			if (clearDirty)
 			{
@@ -1011,7 +1013,7 @@ public:
 			{
 				if (backup)
 				{
-					writeVIBackup(a64::WRegister(i));
+					writeVIBackup(armWRegister(i));
 					backup = false;
 				}
 
@@ -1109,11 +1111,11 @@ public:
 
                             if (zext_if_dirty) {
 //                                xMOVZX(gprX, xRegister16(i));
-                                armAsm->Uxth(gprX, a64::WRegister(i));
+                                armAsm->Uxth(gprX, armWRegister(i));
                             }
                             else {
 //                                xMOV(gprX, xRegister32(i));
-                                armAsm->Mov(gprX, a64::WRegister(i));
+                                armAsm->Mov(gprX, armWRegister(i));
                             }
 							gprMap[x].isZeroExtended = zext_if_dirty;
 							MVURALOG("  clone write %d in %d to %d for %d\n", viLoadReg, i, x, viWriteReg);
@@ -1139,7 +1141,7 @@ public:
 					gprMap[i].isNeeded = true;
 
 					if (backup)
-						writeVIBackup(a64::WRegister(i));
+						writeVIBackup(armWRegister(i));
 
 					if (regAllocCOP2)
 					{

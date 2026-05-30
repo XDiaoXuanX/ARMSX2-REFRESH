@@ -211,7 +211,7 @@ endif()
 
 if(NOT WIN32)
 	# libcurl-based HTTPDownloader
-	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT iPSX2_MACOS_BUILD)
 		target_sources(common PRIVATE
 			HTTPDownloaderCurl.cpp
 			HTTPDownloaderCurl.h
@@ -241,7 +241,7 @@ else()
 		target_link_libraries(common PRIVATE
 			webp
 		)
-	else()
+	elseif(NOT iPSX2_MACOS_BUILD)
 		target_link_libraries(common PRIVATE
 			WebP::libwebp
 			JPEG::JPEG
@@ -269,10 +269,10 @@ target_compile_features(common PUBLIC cxx_std_20)
 target_include_directories(common PUBLIC ../3rdparty/include ../3rdparty/vixl/include ../)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-	target_compile_definitions(common PRIVATE
-		"PCSX2_ARM64_DYNAREC=1"
-		"_M_ARM64=1"
-	)
+    target_compile_definitions(common PRIVATE
+        "PCSX2_ARM64_DYNAREC=1"
+        "_M_ARM64=1"
+    )
 endif()
 target_compile_definitions(common PUBLIC "${PCSX2_DEFS}")
 target_compile_options(common PRIVATE "${PCSX2_WARNINGS}")

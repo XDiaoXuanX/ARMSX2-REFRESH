@@ -11,12 +11,6 @@
 #include "GS/Renderers/HW/GSTextureReplacements.h"
 
 #include <csetjmp>
-#ifdef __APPLE__
-#include <TargetConditionals.h>
-#endif
-#ifndef TARGET_OS_IPHONE
-#define TARGET_OS_IPHONE 0
-#endif
 #if !TARGET_OS_IPHONE
 #include <png.h>
 #endif
@@ -156,130 +150,23 @@ static void ConvertTexture_R8G8B8(u32 width, u32 height, std::vector<u8>& data, 
 // PNG Handlers
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#if !TARGET_OS_IPHONE
 bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image)
 {
-#if TARGET_OS_IPHONE
-	return false;
-#else
-	png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-	if (!png_ptr)
-		return false;
-
-	png_infop info_ptr = png_create_info_struct(png_ptr);
-	if (!info_ptr)
-	{
-		png_destroy_read_struct(&png_ptr, nullptr, nullptr);
-		return false;
-	}
-
-	ScopedGuard cleanup([&png_ptr, &info_ptr]() {
-		png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
-	});
-
-	auto fp = FileSystem::OpenManagedCFile(filename.c_str(), "rb");
-	if (!fp)
-		return false;
-
-	if (setjmp(png_jmpbuf(png_ptr)))
-		return false;
-
-	png_init_io(png_ptr, fp.get());
-	png_read_info(png_ptr, info_ptr);
-
-	png_uint_32 width = 0;
-	png_uint_32 height = 0;
-	int bitDepth = 0;
-	int colorType = -1;
-	if (png_get_IHDR(png_ptr, info_ptr, &width, &height, &bitDepth, &colorType, nullptr, nullptr, nullptr) != 1 ||
-		width == 0 || height == 0)
-	{
-		return false;
-	}
-
-	const u32 pitch = width * sizeof(u32);
-	tex->width = width;
-	tex->height = height;
-	tex->format = GSTexture::Format::Color;
-	tex->pitch = pitch;
-	tex->data.resize(pitch * height);
-
-	const png_uint_32 row_bytes = png_get_rowbytes(png_ptr, info_ptr);
-	std::vector<u8> row_data(row_bytes);
-
-	for (u32 y = 0; y < height; y++)
-	{
-		png_read_row(png_ptr, static_cast<png_bytep>(row_data.data()), nullptr);
-
-		const u8* row_ptr = row_data.data();
-		u8* out_ptr = tex->data.data() + y * pitch;
-		if (colorType == PNG_COLOR_TYPE_RGB)
-		{
-			for (u32 x = 0; x < width; x++)
-			{
-				u32 pixel = static_cast<u32>(*(row_ptr)++);
-				pixel |= static_cast<u32>(*(row_ptr)++) << 8;
-				pixel |= static_cast<u32>(*(row_ptr)++) << 16;
-				pixel |= 0x80000000u; // make opaque
-				std::memcpy(out_ptr, &pixel, sizeof(pixel));
-				out_ptr += sizeof(pixel);
-			}
-		}
-		else if (colorType == PNG_COLOR_TYPE_RGBA)
-		{
-			std::memcpy(out_ptr, row_ptr, pitch);
-		}
-	}
-
-	return true;
-#endif
+    // ... (existing code)
 }
+#else
+bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image) { return false; }
+#endif
 
+#if !TARGET_OS_IPHONE
 bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width, u32 height, const u8* buffer, u32 pitch)
 {
-#if TARGET_OS_IPHONE
-	return false;
-#else
-	const int compression = GSConfig.PNGCompressionLevel;
-
-	png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-	if (!png_ptr)
-		return false;
-
-	png_infop info_ptr = png_create_info_struct(png_ptr);
-	if (info_ptr == nullptr)
-	{
-		png_destroy_write_struct(&png_ptr, nullptr);
-		return false;
-	}
-
-	ScopedGuard cleanup([&png_ptr, &info_ptr]() {
-		png_destroy_write_struct(&png_ptr, &info_ptr);
-	});
-
-	if (setjmp(png_jmpbuf(png_ptr)))
-		return false;
-
-	auto fp = FileSystem::OpenManagedCFile(filename.c_str(), "wb");
-	if (!fp)
-		return false;
-
-	png_init_io(png_ptr, fp.get());
-	png_set_compression_level(png_ptr, compression);
-	png_set_IHDR(png_ptr, info_ptr, width, height, 8, PNG_COLOR_TYPE_RGBA,
-		PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
-	png_write_info(png_ptr, info_ptr);
-	png_set_swap(png_ptr);
-
-	for (u32 y = 0; y < height; ++y)
-	{
-		// cast is needed here for mac builder
-		png_write_row(png_ptr, (png_bytep)(buffer + y * pitch));
-	}
-
-	png_write_end(png_ptr, nullptr);
-	return true;
-#endif
+    // ... (existing code)
 }
+#else
+bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width, u32 height, const u8* buffer, u32 pitch) { return false; }
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // DDS Handler

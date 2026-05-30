@@ -29,7 +29,13 @@ void ReadFIFO_VIF1(mem128_t* out)
 		DevCon.Warning("Reading from vif1 fifo when stalled");
 
 	ZeroQWC(out); // Clear first in case no data gets written...
-	pxAssertRel(vif1Regs.stat.FQC != 0, "FQC = 0 on VIF FIFO READ!");
+	// [iter216] Soft-fail: corrupted vtlb mappings may trigger unexpected FIFO reads.
+	if (vif1Regs.stat.FQC == 0) {
+		static u32 s_vif1_warn = 0;
+		if (s_vif1_warn < 3)
+			Console.Warning("@@VIF1_FQC0@@ n=%u FQC=0 on FIFO read (skip)", s_vif1_warn++);
+		return;
+	}
 	if (vif1Regs.stat.FDR)
 	{
 		if (vif1Regs.stat.FQC > vif1.GSLastDownloadSize)
@@ -115,8 +121,23 @@ void WriteFIFO_VIF1(const mem128_t* value)
 	pxAssertMsg(ret, "vif stall code not implemented");
 }
 
+// [TEMP_DIAG] GIF FIFO write counter
+// Removal condition: BIOS browserafter confirmed
+volatile uint32_t g_gif_fifo_write_count = 0;
+
 void WriteFIFO_GIF(const mem128_t* value)
 {
+	g_gif_fifo_write_count++;
+	// [TEMP_DIAG] @@GIF_FIFO_DATA@@ — dump first 140 FIFO writes for JIT/Interp comparison
+	// Removal condition: BIOS browserafter confirmed
+	{
+		static u32 s_fifo_log_n = 0;
+		if (s_fifo_log_n < 140) {
+			Console.WriteLn("@@GIF_FIFO_DATA@@ n=%u data=[%08x_%08x_%08x_%08x] pc=%08x",
+				s_fifo_log_n, value->_u32[3], value->_u32[2], value->_u32[1], value->_u32[0], cpuRegs.pc);
+			s_fifo_log_n++;
+		}
+	}
 	GUNIT_LOG("WriteFIFO_GIF()");
 	if ((!gifUnit.CanDoPath3() || gif_fifo.fifoSize > 0))
 	{

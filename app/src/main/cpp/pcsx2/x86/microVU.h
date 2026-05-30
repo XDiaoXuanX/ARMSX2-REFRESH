@@ -134,7 +134,8 @@ struct microVU
 	}
 
 	__fi u32 compareState(microRegInfo* lhs, microRegInfo* rhs) const {
-		return reinterpret_cast<u32(*)(void*, void*)>(compareStateF)(lhs, rhs);
+		// Use C++ memcmp instead of JIT compareStateF to avoid W^X violation
+		return std::memcmp(lhs, rhs, sizeof(microRegInfo)) != 0 ? 1 : 0;
 	}
 };
 
@@ -221,7 +222,9 @@ public:
 			for (microBlockLink* linkI = fBlockList; linkI != nullptr; prevI = linkI, linkI = linkI->next)
 			{
 //				if (mVU.compareState(pState, &linkI->block.pState) == 0)
-                if (((mVUCall(mVU.compareStateF)(0, pState, &linkI->block.pState)) == 0))
+                // Use C++ memcmp instead of JIT compareStateF to avoid W^X violation
+                // (compareStateF lives in JIT code cache, which is write-only during compilation)
+                if (std::memcmp(pState, &linkI->block.pState, sizeof(microRegInfo)) == 0)
 				{
 					if (linkI != fBlockList)
 					{

@@ -7,7 +7,7 @@
 #include "Vif_Dynarec.h"
 #include "MTVU.h"
 #ifdef __APPLE__
-#include "common/Darwin/DarwinMisc.h"
+#include "common/Darwin/DarwinMisc.h" // [P43] VIF JIT guard
 #endif
 
 enum UnpackOffset {
@@ -312,7 +312,7 @@ void resetNewVif(int idx)
 
 	if (newVifDynaRec
 #ifdef __APPLE__
-		&& !DarwinMisc::IsNoJitModeActive()
+		&& !DarwinMisc::iPSX2_FORCE_EE_INTERP
 #endif
 	)
 		dVifReset(idx);
@@ -358,7 +358,7 @@ _vifT int nVifUnpack(const u8* data)
 		{
 			if (newVifDynaRec
 #ifdef __APPLE__
-				&& !DarwinMisc::IsNoJitModeActive()
+				&& !DarwinMisc::iPSX2_FORCE_EE_INTERP
 #endif
 			)
 				dVifUnpack<idx>(data, isFill);
@@ -491,16 +491,14 @@ __ri void _nVifUnpackLoop(const u8* data)
 
 		if (doMode
 #ifdef __APPLE__
-			|| DarwinMisc::IsNoJitModeActive()
+			|| DarwinMisc::iPSX2_FORCE_EE_INTERP
 #endif
 		)
 		{
-			//if (1) {
 			ft(dest, data);
 		}
 		else
 		{
-			//DevCon.WriteLn("SSE Unpack!");
 			uint cl3 = std::min(vif.cl, 3);
 			fnbase[cl3](dest, data);
 		}

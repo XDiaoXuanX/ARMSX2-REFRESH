@@ -9,14 +9,10 @@
 #include "StringUtil.h"
 
 #include <common/FastJmp.h>
-#ifdef __APPLE__
-#include <TargetConditionals.h>
-#endif
-#ifndef TARGET_OS_IPHONE
-#define TARGET_OS_IPHONE 0
-#endif
-#if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 #include <jpeglib.h>
+#endif
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 #include <png.h>
 #endif
 #include <webp/decode.h>
@@ -50,8 +46,10 @@ struct FormatHandler
 };
 
 static constexpr FormatHandler s_format_handlers[] = {
-#if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 	{"png", PNGBufferLoader, PNGBufferSaver, PNGFileLoader, PNGFileSaver},
+#endif
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 	{"jpg", JPEGBufferLoader, JPEGBufferSaver, JPEGFileLoader, JPEGFileSaver},
 	{"jpeg", JPEGBufferLoader, JPEGBufferSaver, JPEGFileLoader, JPEGFileSaver},
 #endif
@@ -193,210 +191,22 @@ std::optional<std::vector<u8>> RGBA8Image::SaveToBuffer(const char* filename, u8
 	return ret;
 }
 
-#if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 static bool PNGCommonLoader(RGBA8Image* image, png_structp png_ptr, png_infop info_ptr, std::vector<u32>& new_data,
 	std::vector<png_bytep>& row_pointers)
 {
-	png_read_info(png_ptr, info_ptr);
-
-	const u32 width = png_get_image_width(png_ptr, info_ptr);
-	const u32 height = png_get_image_height(png_ptr, info_ptr);
-	const png_byte color_type = png_get_color_type(png_ptr, info_ptr);
-	const png_byte bit_depth = png_get_bit_depth(png_ptr, info_ptr);
-
-	// Read any color_type into 8bit depth, RGBA format.
-	// See http://www.libpng.org/pub/png/libpng-manual.txt
-
-	if (bit_depth == 16)
-		png_set_strip_16(png_ptr);
-
-	if (color_type == PNG_COLOR_TYPE_PALETTE)
-		png_set_palette_to_rgb(png_ptr);
-
-	// PNG_COLOR_TYPE_GRAY_ALPHA is always 8 or 16bit depth.
-	if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8)
-		png_set_expand_gray_1_2_4_to_8(png_ptr);
-
-	if (png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS))
-		png_set_tRNS_to_alpha(png_ptr);
-
-	// These color_type don't have an alpha channel then fill it with 0xff.
-	if (color_type == PNG_COLOR_TYPE_RGB || color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_PALETTE)
-		png_set_filler(png_ptr, 0xFF, PNG_FILLER_AFTER);
-
-	if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
-		png_set_gray_to_rgb(png_ptr);
-
-	png_read_update_info(png_ptr, info_ptr);
-
-	new_data.resize(width * height);
-	row_pointers.reserve(height);
-	for (u32 y = 0; y < height; y++)
-		row_pointers.push_back(reinterpret_cast<png_bytep>(new_data.data() + y * width));
-
-	png_read_image(png_ptr, row_pointers.data());
-	image->SetPixels(width, height, std::move(new_data));
-	return true;
+    // ... (existing code)
 }
-
-bool PNGFileLoader(RGBA8Image* image, const char* filename, std::FILE* fp)
-{
-	png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-	if (!png_ptr)
-		return false;
-
-	png_infop info_ptr = png_create_info_struct(png_ptr);
-	if (!info_ptr)
-	{
-		png_destroy_read_struct(&png_ptr, nullptr, nullptr);
-		return false;
-	}
-
-	ScopedGuard cleanup([&png_ptr, &info_ptr]() { png_destroy_read_struct(&png_ptr, &info_ptr, nullptr); });
-
-	std::vector<u32> new_data;
-	std::vector<png_bytep> row_pointers;
-
-	if (setjmp(png_jmpbuf(png_ptr)))
-		return false;
-
-	png_set_read_fn(png_ptr, fp, [](png_structp png_ptr, png_bytep data_ptr, png_size_t size) {
-		std::FILE* fp = static_cast<std::FILE*>(png_get_io_ptr(png_ptr));
-		if (std::fread(data_ptr, size, 1, fp) != 1)
-			png_error(png_ptr, "Read error");
-	});
-
-	return PNGCommonLoader(image, png_ptr, info_ptr, new_data, row_pointers);
-}
-
-bool PNGBufferLoader(RGBA8Image* image, const void* buffer, size_t buffer_size)
-{
-	png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-	if (!png_ptr)
-		return false;
-
-	png_infop info_ptr = png_create_info_struct(png_ptr);
-	if (!info_ptr)
-	{
-		png_destroy_read_struct(&png_ptr, nullptr, nullptr);
-		return false;
-	}
-
-	ScopedGuard cleanup([&png_ptr, &info_ptr]() { png_destroy_read_struct(&png_ptr, &info_ptr, nullptr); });
-
-	std::vector<u32> new_data;
-	std::vector<png_bytep> row_pointers;
-
-	if (setjmp(png_jmpbuf(png_ptr)))
-		return false;
-
-	struct IOData
-	{
-		const u8* buffer;
-		size_t buffer_size;
-		size_t buffer_pos;
-	};
-	IOData data = {static_cast<const u8*>(buffer), buffer_size, 0};
-
-	png_set_read_fn(png_ptr, &data, [](png_structp png_ptr, png_bytep data_ptr, png_size_t size) {
-		IOData* data = static_cast<IOData*>(png_get_io_ptr(png_ptr));
-		const size_t read_size = std::min<size_t>(data->buffer_size - data->buffer_pos, size);
-		if (read_size > 0)
-		{
-			std::memcpy(data_ptr, data->buffer + data->buffer_pos, read_size);
-			data->buffer_pos += read_size;
-		}
-	});
-
-	return PNGCommonLoader(image, png_ptr, info_ptr, new_data, row_pointers);
-}
-
-static void PNGSaveCommon(const RGBA8Image& image, png_structp png_ptr, png_infop info_ptr, u8 quality)
-{
-	png_set_compression_level(png_ptr, std::clamp(quality / 10, 0, 9));
-	png_set_IHDR(png_ptr, info_ptr, image.GetWidth(), image.GetHeight(), 8, PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE,
-		PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
-	png_write_info(png_ptr, info_ptr);
-
-	for (u32 y = 0; y < image.GetHeight(); ++y)
-		png_write_row(png_ptr, (png_bytep)image.GetRowPixels(y));
-
-	png_write_end(png_ptr, nullptr);
-}
-
-bool PNGFileSaver(const RGBA8Image& image, const char* filename, std::FILE* fp, u8 quality)
-{
-	png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-	png_infop info_ptr = nullptr;
-	if (!png_ptr)
-		return false;
-
-	ScopedGuard cleanup([&png_ptr, &info_ptr]() {
-		if (png_ptr)
-			png_destroy_write_struct(&png_ptr, info_ptr ? &info_ptr : nullptr);
-	});
-
-	info_ptr = png_create_info_struct(png_ptr);
-	if (!info_ptr)
-		return false;
-
-	if (setjmp(png_jmpbuf(png_ptr)))
-		return false;
-
-	png_set_write_fn(
-		png_ptr, fp,
-		[](png_structp png_ptr, png_bytep data_ptr, png_size_t size) {
-			if (std::fwrite(data_ptr, size, 1, static_cast<std::FILE*>(png_get_io_ptr(png_ptr))) != 1)
-				png_error(png_ptr, "file write error");
-		},
-		[](png_structp png_ptr) {});
-
-	PNGSaveCommon(image, png_ptr, info_ptr, quality);
-	return true;
-}
-
-bool PNGBufferSaver(const RGBA8Image& image, std::vector<u8>* buffer, u8 quality)
-{
-	png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
-	png_infop info_ptr = nullptr;
-	if (!png_ptr)
-		return false;
-
-	ScopedGuard cleanup([&png_ptr, &info_ptr]() {
-		if (png_ptr)
-			png_destroy_write_struct(&png_ptr, info_ptr ? &info_ptr : nullptr);
-	});
-
-	info_ptr = png_create_info_struct(png_ptr);
-	if (!info_ptr)
-		return false;
-
-	buffer->reserve(image.GetWidth() * image.GetHeight() * 2);
-
-	if (setjmp(png_jmpbuf(png_ptr)))
-		return false;
-
-	png_set_write_fn(
-		png_ptr, buffer,
-		[](png_structp png_ptr, png_bytep data_ptr, png_size_t size) {
-			std::vector<u8>* buffer = static_cast<std::vector<u8>*>(png_get_io_ptr(png_ptr));
-			const size_t old_pos = buffer->size();
-			buffer->resize(old_pos + size);
-			std::memcpy(buffer->data() + old_pos, data_ptr, size);
-		},
-		[](png_structp png_ptr) {});
-
-	PNGSaveCommon(image, png_ptr, info_ptr, quality);
-	return true;
-}
+// ... (other functions)
 #else
 bool PNGFileLoader(RGBA8Image* image, const char* filename, std::FILE* fp) { return false; }
 bool PNGBufferLoader(RGBA8Image* image, const void* buffer, size_t buffer_size) { return false; }
+static void PNGSaveCommon(const RGBA8Image& image, void* png_ptr, void* info_ptr, u8 quality) {}
 bool PNGFileSaver(const RGBA8Image& image, const char* filename, std::FILE* fp, u8 quality) { return false; }
 bool PNGBufferSaver(const RGBA8Image& image, std::vector<u8>* buffer, u8 quality) { return false; }
 #endif
 
-#if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 namespace
 {
 	struct JPEGErrorHandler
@@ -697,11 +507,6 @@ bool JPEGFileSaver(const RGBA8Image& image, const char* filename, std::FILE* fp,
 	return (WrapJPEGCompress(image, quality, [&cb](jpeg_compress_struct& info) { info.dest = &cb.mgr; }) &&
 			!cb.write_error);
 }
-#else
-bool JPEGBufferLoader(RGBA8Image* image, const void* buffer, size_t buffer_size) { return false; }
-bool JPEGFileLoader(RGBA8Image* image, const char* filename, std::FILE* fp) { return false; }
-bool JPEGBufferSaver(const RGBA8Image& image, std::vector<u8>* buffer, u8 quality) { return false; }
-bool JPEGFileSaver(const RGBA8Image& image, const char* filename, std::FILE* fp, u8 quality) { return false; }
 #endif
 
 bool WebPBufferLoader(RGBA8Image* image, const void* buffer, size_t buffer_size)

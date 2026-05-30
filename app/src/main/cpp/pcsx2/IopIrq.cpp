@@ -7,6 +7,8 @@
 #include "IopDma.h"
 #include "Common.h"
 #include "R3000A.h"
+#include "SifRingBuffer.h"
+#include "R5900.h" // [P34] cpuRegs for ring buffer
 
 using namespace R3000A;
 
@@ -48,5 +50,8 @@ void spu2Irq()
 void iopIntcIrq(uint irqType)
 {
 	psxHu32(0x1070) |= 1 << irqType;
+	// [P34] ring buffer: ISTAT set
+	SifRing::Record(SifRing::ISTAT_SET, cpuRegs.cycle, psxRegs.cycle,
+		irqType, psxHu32(0x1070));
 	iopTestIntc();
 }

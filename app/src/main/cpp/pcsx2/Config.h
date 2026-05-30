@@ -321,7 +321,7 @@ enum class BiFiltering : u8
 
 enum class TriFiltering : s8
 {
-	Automatic,
+	Automatic = -1,
 	Off,
 	PS2,
 	Forced,
@@ -855,7 +855,6 @@ struct Pcsx2Config
 
 		std::string Adapter;
 		std::string CustomDriverPath;
-		std::string AndroidGpuProfileOverride = "auto";
 		std::string HWDumpDirectory;
 		std::string SWDumpDirectory;
 
@@ -896,10 +895,11 @@ struct Pcsx2Config
 		};
 
 		static constexpr s32 MAX_VOLUME = 200;
-#if defined(__ANDROID__)
-		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Oboe;
-#else
+		// [P14] iOS では Oboe スタブ / Cubeb は cubeb_init fail。SDL3 がbehaviorする。
+#if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::SDL;
+#else
+		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Oboe;
 #endif
 		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::TimeStretch;
 
@@ -1456,18 +1456,17 @@ namespace EmuFolders
 
 //------------ EE Recompiler defines - Comment to disable a recompiler ---------------
 
-#define SHIFT_RECOMPILE // Speed majorly reduced if disabled
-#define BRANCH_RECOMPILE // Speed extremely reduced if disabled - more then shift
-
-// Disabling all the recompilers in this block is interesting, as it still runs at a reasonable rate.
-// It also adds a few glitches. Really reminds me of the old Linux 64-bit version. --arcum42
+// [TEMP_DIAG] Enabling more recompile categories with NORENAME fix applied
+// Removal condition: all categories confirmed working
+#define SHIFT_RECOMPILE
+#define BRANCH_RECOMPILE
 #define ARITHMETICIMM_RECOMPILE
 #define ARITHMETIC_RECOMPILE
 #define MULTDIV_RECOMPILE
 #define JUMP_RECOMPILE
 #define LOADSTORE_RECOMPILE
 #define MOVE_RECOMPILE
-//#define MMI_RECOMPILE
+//#define MMI_RECOMPILE   // x86 code not ported to ARM64
 //#define MMI0_RECOMPILE
 //#define MMI1_RECOMPILE
 //#define MMI2_RECOMPILE

@@ -100,10 +100,29 @@ static void CDVD_INT(int eCycle)
 // test (which will cause the exception to be handled).
 static void cdvdSetIrq(uint id = (1 << Irq_CommandComplete))
 {
+	// [P15] PC PCSX2 同期: 二重 IRQ ガードadd
+	// [TEMP_DIAG] @@CDVD_IRQ_STATS@@ — track IRQ delivery vs block rate
+	// Removal condition: CDVD データtransferissue解決後
+	static u32 s_irq_pass = 0, s_irq_block = 0;
+	if (!(cdvd.IntrStat & id))
+	{
+		iopIntcIrq(2);
+		psxSetNextBranchDelta(20);
+		s_irq_pass++;
+		if (s_irq_pass <= 50 || (s_irq_pass % 100 == 0))
+			Console.WriteLn("@@CDVD_IRQ@@ PASS n=%u id=%x IntrStat=%x blocked_total=%u",
+				s_irq_pass, id, cdvd.IntrStat, s_irq_block);
+	}
+	else
+	{
+		s_irq_block++;
+		if (s_irq_block <= 20 || (s_irq_block % 100 == 0))
+			Console.WriteLn("@@CDVD_IRQ@@ BLOCK n=%u id=%x IntrStat=%x passed_total=%u",
+				s_irq_block, id, cdvd.IntrStat, s_irq_pass);
+	}
+
 	cdvd.IntrStat |= id;
 	cdvd.AbortRequested = false;
-	iopIntcIrq(2);
-	psxSetNextBranchDelta(20);
 }
 
 static int mg_BIToffset(u8* buffer)
@@ -256,6 +275,10 @@ static void cdvdWriteNVM(const u8* src, int offset, int bytes)
 
 	if (to_write > 0) [[likely]]
 		std::memcpy(&s_nvram[offset], src, to_write);
+
+	// [P28] Immediate NVM persist on write.
+	// iOS apps can be SIGTERM'd without lifecycle callbacks.
+	cdvdSaveNVRAM();
 }
 
 static void cdvdReadConsoleID(u8* id)
@@ -342,9 +365,11 @@ s32 cdvdReadConfig(u8* config)
 		default:
 		{
 			cdvdReadNVM(config, nvmLayout->config1 + (cdvd.CBlockIndex * 16), 16);
-			if (cdvd.CBlockIndex == 1 && (NoOSD || VMManager::Internal::WasFastBooted()))
+			if (cdvd.CBlockIndex == 1)
 			{
-				// HACK: Set the "initialized" flag when fast booting, otherwise some games crash (e.g. Jak 1).
+				// HACK: Set the "initialized" flag — needed for both fast boot and slow boot on iPSX2.
+				// Without this, the BIOS thinks settings are uninitialized and shows the browser
+				// instead of auto-starting the disc. On a real PS2, this flag is set after first-time setup.
 				config[2] |= 0x80;
 			}
 
@@ -435,6 +460,52 @@ bool cdvdLoadElf(ElfObject* elfo, const std::string_view elfpath, bool isPSXElf,
 			return false;
 
 		return cdvdLoadDiscElf(elfo, isor, elfpath, isPSXElf, error);
+	}
+	else if (elfpath.starts_with("rom0:"))
+	{
+		// [iter159] HLE: load module from BIOS ROM via ROMDIR scan (iOS iPSX2 – no kernel ELF loader)
+		// Removal condition: BIOS カーネルが正常初期化され BEV=0 でbehaviorした後delete
+		const std::string_view modname = elfpath.substr(5);
+		struct RomDirEnt { char fileName[10]; u16 extInfoSize; u32 fileSize; };
+		static_assert(sizeof(RomDirEnt) == 16, "romdir must be 16 bytes");
+		const u8* romdata = BiosRom.data();
+		const size_t romsize = BiosRom.size();
+		if (romdata && romsize >= sizeof(RomDirEnt)) {
+			u32 dir_offset = UINT32_MAX;
+			for (u32 i = 0; i + sizeof(RomDirEnt) <= romsize; i++) {
+				const RomDirEnt* rd = reinterpret_cast<const RomDirEnt*>(romdata + i);
+				if (std::strncmp(rd->fileName, "RESET", 10) == 0) { dir_offset = i; break; }
+			}
+			if (dir_offset != UINT32_MAX) {
+				u32 file_offset = 0;
+				const RomDirEnt* entry = reinterpret_cast<const RomDirEnt*>(romdata + dir_offset);
+				const u32 max_entries = static_cast<u32>((romsize - dir_offset) / sizeof(RomDirEnt));
+				for (u32 n = 0; n < max_entries && entry->fileName[0] != '\0'; n++, entry++) {
+					char ent_name[11] = {};
+					std::memcpy(ent_name, entry->fileName, 10);
+					if (std::string_view(ent_name) == modname) {
+						if (entry->fileSize > 0 && file_offset + entry->fileSize <= romsize) {
+							const std::string tmp_path = "/tmp/pcsx2_rom0_module.elf";
+							FILE* fp = std::fopen(tmp_path.c_str(), "wb");
+							if (fp) {
+								std::fwrite(romdata + file_offset, 1, entry->fileSize, fp);
+								std::fclose(fp);
+								Console.WriteLn("@@ROM0_ELF@@ mod=%s rom_offset=%05x size=%05x",
+									ent_name, file_offset, entry->fileSize);
+								return elfo->OpenFile(tmp_path, isPSXElf, error);
+							}
+						}
+						break;
+					}
+					if ((entry->fileSize % 0x10) == 0)
+						file_offset += entry->fileSize;
+					else
+						file_offset += (entry->fileSize + 0x10) & 0xFFFFFFF0u;
+				}
+			}
+		}
+		Error::SetString(error, fmt::format("Module '{}' not found in BIOS ROM", modname));
+		return false;
 	}
 	else
 	{
@@ -1024,7 +1095,7 @@ void cdvdNewDiskCB()
 		cdvdSetIrq(1 << Irq_Eject);
 		// If it really got ejected, the DVD Reader will report Type 0, so no need to simulate ejection
 		if (cdvd.DiscType > 0)
-			cdvd.Tray.cdvdActionSeconds = 3;
+				cdvd.Tray.cdvdActionSeconds = 3;
 	}
 	else if (cdvd.DiscType > 0)
 	{
@@ -1658,6 +1729,24 @@ u8 cdvdRead(u8 key)
 
 		case 0x05: // N-READY
 			CDVD_LOG("cdvdRead05(NReady) %x", cdvd.Ready);
+			// [P15] @@CDVD_NREADY_READ@@ IOP が N-READY を読んだ値を記録
+			// 目的: IOP cdvdfsv が hardware ready を正しく読めているかverify
+			// Removal condition: CDVD RPC 応答issue解消後
+			{
+				static int s_nready_n = 0;
+				static int s_nready_late_n = 0;
+				if (s_nready_n < 30 || (s_nready_n % 500 == 0)) {
+					Console.WriteLn("@@CDVD_NREADY_READ@@ n=%d val=%02x status=%02x intr=%02x ncmd=%02x iop_pc=%08x",
+						s_nready_n, cdvd.Ready, cdvd.Status, cdvd.IntrStat, cdvd.nCommand, psxRegs.pc);
+				}
+				// [TEMP_DIAG] Late phase ready reads
+				if (cpuRegs.cycle > 1700000000u && s_nready_late_n < 10) {
+					Console.WriteLn("@@CDVD_NREADY_LATE@@ n=%d val=%02x status=%02x type=%02x spin=%d tray=%d err=%02x iop_pc=%08x",
+						s_nready_late_n++, cdvd.Ready, cdvd.Status, cdvd.DiscType, cdvd.Spinning,
+						cdvd.Tray.trayState, cdvd.Error, psxRegs.pc);
+				}
+				s_nready_n++;
+			}
 			return cdvd.Ready;
 
 		case 0x06: // ERROR
@@ -1677,6 +1766,16 @@ u8 cdvdRead(u8 key)
 
 		case 0x0A: // STATUS
 			CDVD_LOG("cdvdRead0A(Status) %x", cdvd.Status);
+			// [P15] @@CDVD_STATUS_READ@@ IOP が STATUS を読んだ値を記録
+			// Removal condition: CDVD RPC 応答issue解消後
+			{
+				static int s_status_n = 0;
+				if (s_status_n < 30 || (s_status_n % 500 == 0)) {
+					Console.WriteLn("@@CDVD_STATUS_READ@@ n=%d val=%02x ready=%02x tray=%d disctype=%02x iop_pc=%08x",
+						s_status_n, cdvd.Status, cdvd.Ready, (int)cdvd.Tray.trayState, cdvd.DiscType, psxRegs.pc);
+				}
+				s_status_n++;
+			}
 			return cdvd.Status;
 
 		case 0x0B: // STATUS STICKY
@@ -1862,6 +1961,34 @@ static void cdvdWrite04(u8 rt)
 { // NCOMMAND
 	CDVD_LOG("cdvdWrite04: NCMD %s (%x) (ParamP = %x)", nCmdName[rt], rt, cdvd.NCMDParamPos);
 
+	// [P15] @@CDVD_NCMD@@ N コマンド発行記録
+	// Removal condition: CDVD 読み取りissue解消後
+	{
+		static int s_ncmd_n = 0;
+		static int s_ncmd_late_n = 0;
+		if (s_ncmd_n < 200) {
+			if (s_ncmd_n < 30 || rt != 0x06 || (s_ncmd_n % 50) == 0) {
+				Console.WriteLn("@@CDVD_NCMD@@ n=%d cmd=%02x(%s) ready=%02x paramCnt=%d paramPos=%d",
+					s_ncmd_n, rt, (rt < 16 ? nCmdName[rt] : "?"),
+					cdvd.Ready, cdvd.NCMDParamCnt, cdvd.NCMDParamPos);
+			}
+			s_ncmd_n++;
+		}
+		// [TEMP_DIAG] Log late CDVD commands during game file read phase
+		if (cpuRegs.cycle > 1700000000u && s_ncmd_late_n < 50) {
+			Console.WriteLn("@@CDVD_NCMD_LATE@@ n=%d cmd=%02x(%s) ready=%02x cycle=%u seek=%u",
+				s_ncmd_late_n++, rt, (rt < 16 ? nCmdName[rt] : "?"),
+				cdvd.Ready, cpuRegs.cycle,
+				cdvd.SeekToSector);
+		}
+		// [TEMP_DIAG] One-shot CDVD state dump at game file-read phase
+		if (s_ncmd_n == 0 || (cpuRegs.cycle > 1700000000u && s_ncmd_late_n == 1)) {
+			Console.WriteLn("@@CDVD_STATE@@ ready=%02x status=%02x type=%02x spin=%d tray=%d action=%d err=%02x",
+				cdvd.Ready, cdvd.Status, cdvd.DiscType, cdvd.Spinning,
+				cdvd.Tray.trayState, cdvd.Action, cdvd.Error);
+		}
+	}
+
 	if (!(cdvd.Ready & CDVD_DRIVE_READY))
 	{
 		DevCon.Warning("CDVD: Error drive not ready on command issue");
@@ -1941,6 +2068,16 @@ static void cdvdWrite04(u8 rt)
 
 		case N_CD_READ: // CdRead
 		{
+			// [TEMP_DIAG] CDVD N_CD_READ probe — IOP reboot 後の CDVD read 追跡
+			{
+				static int s_nread_log = 0;
+				u32 sector = GetBufferU32(&cdvd.NCMDParamBuff[0], 0);
+				u32 count = GetBufferU32(&cdvd.NCMDParamBuff[0], 4);
+				if (s_nread_log < 50) {
+					Console.WriteLn("@@CDVD_NREAD@@ n=%d sector=%u count=%u status=%02x ready=%02x tray=%d",
+						s_nread_log++, sector, count, cdvd.Status, cdvd.Ready, (int)cdvd.Tray.trayState);
+				}
+			}
 			// Assign the seek to sector based on cdvd.Param[0]-[3], and the number of  sectors based on cdvd.Param[4]-[7].
 			cdvd.SeekToSector = GetBufferU32(&cdvd.NCMDParamBuff[0], 0);
 			cdvd.SectorCnt = GetBufferU32(&cdvd.NCMDParamBuff[0], 4);
@@ -2378,6 +2515,15 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 		u8 tmp;
 
 		CDVD_LOG("cdvdWrite16: SCMD %s (%x) (ParamP = %x)", sCmdName[rt], rt, cdvd.SCMDParamPos);
+
+		// [TEMP_DIAG] Log late SCMD activity during game file-read phase
+		{
+			static int s_scmd_late_n = 0;
+			if (cpuRegs.cycle > 1500000000u && s_scmd_late_n < 20) {
+				Console.WriteLn("@@CDVD_SCMD_LATE@@ n=%d cmd=%02x ready=%02x type=%02x status=%02x cycle=%u",
+					s_scmd_late_n++, rt, cdvd.Ready, cdvd.DiscType, cdvd.Status, cpuRegs.cycle);
+			}
+		}
 
 		cdvd.sCommand = rt;
 		std::memset(&cdvd.SCMDResultBuff[0], 0, sizeof(cdvd.SCMDResultBuff));

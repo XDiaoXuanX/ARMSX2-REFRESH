@@ -9,10 +9,17 @@
 #include "CDVD/Ps1CD.h"
 #include "SPU2/spu2.h"
 #include "DEV9/DEV9.h"
+#include "Common.h"
+#include "IopMem.h"
+#include "IopHw.h"
 #include "USB/USB.h"
 #include "IopCounters.h"
 #include "IopDma.h"
+
+
 #include "R3000A.h"
+
+extern "C" void LogUnified(const char* fmt, ...);
 
 #include "ps2/pgif.h"
 #include "Mdec.h"
@@ -27,6 +34,66 @@ namespace IopMemory {
 
 using namespace Internal;
 
+struct Iop3204WriteEntry
+{
+	u32 pc;
+	u32 addr;
+	u32 value;
+	u8 width;
+};
+
+static Iop3204WriteEntry s_iop3204_ring[16];
+static u32 s_iop3204_ring_count = 0;
+static u32 s_iop3204_ring_idx = 0;
+
+static __fi void RecordIop3204Write(u32 addr, u32 value, u8 width, const char* handler)
+{
+	if (addr != 0x1f803204)
+		return;
+
+	static bool s_iop3204_wr_logged = false;
+	if (!s_iop3204_wr_logged)
+	{
+		s_iop3204_wr_logged = true;
+		fprintf(stderr, "@@IOP3204_WR@@ addr=%08x val=%08x width=%u handler=%s\n",
+			addr, value, width, handler);
+	}
+
+	Iop3204WriteEntry& e = s_iop3204_ring[s_iop3204_ring_idx];
+	e.pc = psxRegs.pc;
+	e.addr = addr;
+	e.value = value;
+	e.width = width;
+
+	s_iop3204_ring_idx = (s_iop3204_ring_idx + 1) & 15;
+	if (s_iop3204_ring_count < 16)
+		s_iop3204_ring_count++;
+}
+
+void DumpIop3204Ring()
+{
+	static bool s_dumped = false;
+	if (s_dumped)
+		return;
+	s_dumped = true;
+
+	if (s_iop3204_ring_count == 0)
+	{
+		fprintf(stderr, "@@IOP3204_DUMP@@ count=0\n");
+		return;
+	}
+
+	fprintf(stderr, "@@IOP3204_DUMP@@ count=%u\n", s_iop3204_ring_count);
+	const u32 start = (s_iop3204_ring_idx + 16 - s_iop3204_ring_count) & 15;
+	for (u32 i = 0; i < s_iop3204_ring_count; i++)
+	{
+		const u32 idx = (start + i) & 15;
+		const Iop3204WriteEntry& e = s_iop3204_ring[idx];
+		fprintf(stderr, "@@IOP3204_DUMP@@ i=%u pc=%08x addr=%08x width=%u val=%08x\n",
+			i, e.pc, e.addr, e.width, e.value);
+	}
+}
+
 // Template-compatible version of the psxHu macro.  Used for writing.
 #define psxHu(mem)	(*(u32*)&iopHw[(mem) & 0xffff])
 
@@ -38,6 +105,15 @@ static __fi void _generic_write( u32 addr, T val )
 {
 	//int bitsize = (sizeof(T) == 1) ? 8 : ( (sizeof(T) == 2) ? 16 : 32 );
 	IopHwTraceLog<T>( addr, val, false );
+	if (sizeof(T) == 1)
+	{
+		static u32 s_iop2070_generic_count = 0;
+		if (addr == 0x1f802070 && s_iop2070_generic_count < 8)
+		{
+			LogUnified("@@IOP2070_WR@@ addr=%08x val=%02x src=iopHwWrite8_generic\n", addr, (u32)val & 0xff);
+			s_iop2070_generic_count++;
+		}
+	}
 	psxHu(addr) = val;
 }
 
@@ -128,6 +204,8 @@ void iopHwWrite8_Page3( u32 addr, mem8_t val )
 	// all addresses are assumed to be prefixed with 0x1f803xxx:
 	pxAssert( (addr >> 12) == 0x1f803 );
 
+	RecordIop3204Write(addr, val, 8, "iopHwWrite8_Page3");
+
 	if(ConsoleLogging.iopConsole.IsActive() && (addr == 0x1f80380c))	// STDOUT
 	{
 		static char pbuf[1024];
@@ -152,8 +230,8 @@ void iopHwWrite8_Page3( u32 addr, mem8_t val )
 			pidx = 0;
 		}
 	}
-
-	psxHu8( addr ) = val;
+ 
+    psxHu8( addr ) = val;
 	IopHwTraceLog<mem8_t>( addr, val, false );
 }
 
@@ -287,6 +365,14 @@ static __fi void _HwWrite_16or32_Page1( u32 addr, T val )
 		switch( masked_addr )
 		{
 			case 0x450:
+				{
+					static u32 s_icfg_log_count = 0;
+					if (s_icfg_log_count < 8)
+					{
+						LogUnified("@@ICFG_WR@@ addr=%08x val=%08x width=%u\n", addr, (u32)val, (u32)(sizeof(T) * 8));
+						s_icfg_log_count++;
+					}
+				}
 				psxHu(addr) = val;
 				if (val & (1 << 1))
 				{
@@ -412,7 +498,7 @@ static __fi void _HwWrite_16or32_Page1( u32 addr, T val )
 
 			mcase(0x1f801528):	// DMA9 CHCR -- SIF0
 				psxHu(addr) = val;
-				DmaExec2(9);
+					DmaExec2(9);
 			break;
 
 			mcase(0x1f801538):	// DMA10 CHCR -- SIF1
@@ -557,7 +643,10 @@ void iopHwWrite16_Page3( u32 addr, mem16_t val )
 {
 	// all addresses are assumed to be prefixed with 0x1f803xxx:
 	pxAssert( (addr >> 12) == 0x1f803 );
-	psxHu16(addr) = val;
+
+	RecordIop3204Write(addr, val, 16, "iopHwWrite16_Page3");
+
+    psxHu16(addr) = val;
 	IopHwTraceLog<mem16_t>( addr, val, false );
 }
 
@@ -573,6 +662,17 @@ void iopHwWrite16_Page8( u32 addr, mem16_t val )
 //
 void iopHwWrite32_Page1( u32 addr, mem32_t val )
 {
+	// Log SIF register access (first 32 writes unconditionally)
+	if (addr == 0x1f801020) {
+		static int write_log_count = 0;
+		// static u32 last_value = 0; // Disabled for unconditional logging
+		
+		if (write_log_count < 32) {
+			DevCon.Error("@@CP0HACK@@ IOP_HW_WRITE i=%d addr=%08x val=%08x PC=%08x", write_log_count, addr, val, cpuRegs.pc);
+			write_log_count++;
+		}
+	}
+	
 	_HwWrite_16or32_Page1<mem32_t >( addr, val );
 }
 
@@ -580,7 +680,10 @@ void iopHwWrite32_Page3( u32 addr, mem32_t val )
 {
 	// all addresses are assumed to be prefixed with 0x1f803xxx:
 	pxAssert( (addr >> 12) == 0x1f803 );
-	psxHu16(addr) = val;
+
+	RecordIop3204Write(addr, val, 32, "iopHwWrite32_Page3");
+
+    psxHu32(addr) = val;
 	IopHwTraceLog<mem32_t>( addr, val, false );
 }
 

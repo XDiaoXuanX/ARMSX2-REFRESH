@@ -6,6 +6,7 @@
 #include "R3000A.h"
 #include "Common.h"
 #include "Sif.h"
+#include "IopDma.h"
 #include "IopHw.h"
 
 _sif sif0;
@@ -39,8 +40,27 @@ static __fi bool WriteFifoToEE()
 
 	sif0.fifo.read((u32*)ptag, readSize << 2);
 
-	// Clearing handled by vtlb memory protection and manual blocks.
-	//Cpu->Clear(sif0ch.madr, readSize*4);
+	// [TEMP_DIAG] @@SIF0_FIFO2EE@@ — data written from IOP→EE via SIF0
+	// Removal condition: deviceBIOSdisplayafter success
+	{
+		static int s_f2e = 0;
+		if (s_f2e < 20) {
+			u32* d = (u32*)ptag;
+			Console.WriteLn("@@SIF0_FIFO2EE@@ n=%d madr=%08x qwc=%d data=%08x %08x %08x %08x",
+				s_f2e++, sif0ch.madr, readSize,
+				readSize >= 1 ? d[0] : 0xDEAD,
+				readSize >= 2 ? d[1] : 0xDEAD,
+				readSize >= 3 ? d[2] : 0xDEAD,
+				readSize >= 4 ? d[3] : 0xDEAD);
+		}
+	}
+
+	// [FIX] ARM64/iOS: vtlb memory protection による自動 invalidation が
+	// 機能しないため、SIF0 DMA で EE memoryにコード書き込み時に
+	// JIT ブロックキャッシュを明示的に invalidate する。
+	// これがないとゲーム ELF ロード後に古い PS2LOGO/OSDSYS の
+	// JIT ブロックが実行され、ゲームがbootしない。
+	Cpu->Clear(sif0ch.madr, readSize*4);
 
 	sif0ch.madr += readSize << 4;
 	sif0.ee.cycles += readSize;	// fixme : BIAS is factored in above
@@ -146,6 +166,13 @@ static __fi bool ProcessIOPTag()
 // Stop transferring ee, and signal an interrupt.
 static __fi void EndEE()
 {
+	// [TEMP_DIAG] @@SIF0_ENDEE@@ — SIF0 EE transfer completion + interrupt schedule
+	{
+		static int s_endee = 0;
+		if (s_endee < 20)
+			Console.WriteLn("@@SIF0_ENDEE@@ n=%d cycles=%d bias_delay=%d ee_cyc=%u",
+				s_endee++, sif0.ee.cycles, sif0.ee.cycles*BIAS, cpuRegs.cycle);
+	}
 	SIF_LOG("Sif0: End EE");
 	sif0.ee.end = false;
 	sif0.ee.busy = false;
@@ -330,18 +357,43 @@ __fi void SIF0Dma()
 
 __fi void  sif0Interrupt()
 {
+	// [TEMP_DIAG] @@SIF0_IOPINT@@ — SIF0 IOP DMA interrupt delivery
+	{
+		static int s_iopint = 0;
+		if (s_iopint < 20)
+			Console.WriteLn("@@SIF0_IOPINT@@ n=%d iop_cyc=%u D9_CHCR=%08x",
+				s_iopint++, psxRegs.cycle, HW_DMA9_CHCR);
+	}
 	HW_DMA9_CHCR &= ~0x01000000;
+
 	psxDmaInterrupt2(2);
 }
 
 __fi void  EEsif0Interrupt()
 {
+	// [TEMP_DIAG] @@SIF0_EEINT@@ — SIF0 EE DMAC interrupt delivery
+	{
+		static int s_eeint = 0;
+		if (s_eeint < 20)
+			Console.WriteLn("@@SIF0_EEINT@@ n=%d ee_cyc=%u DSTAT=%08x DMASK=%08x INTC_STAT=%08x INTC_MASK=%08x",
+				s_eeint++, cpuRegs.cycle, dmacRegs.stat._u32, dmacRegs.stat._u32 >> 16,
+				psHu32(INTC_STAT), psHu32(INTC_MASK));
+	}
 	hwDmacIrq(DMAC_SIF0);
 	sif0ch.chcr.STR = false;
 }
 
 __fi void dmaSIF0()
 {
+	// [TEMP_DIAG] @@DMASIF0_EE@@ — EE-side SIF0 (D5 IOP→EE) DMA start
+	// Removal condition: deviceBIOSdisplayafter success
+	{
+		static int s_d0_n = 0;
+		if (s_d0_n < 30)
+			Console.WriteLn("@@DMASIF0_EE@@ n=%d chcr=%08x madr=%08x qwc=%04x tadr=%08x ee_cyc=%u fifo_sz=%d iop_busy=%d",
+				s_d0_n++, sif0ch.chcr._u32, sif0ch.madr, sif0ch.qwc, sif0ch.tadr, cpuRegs.cycle,
+				sif0.fifo.size, (int)sif0.iop.busy);
+	}
 	SIF_LOG("dmaSIF0 %s", sif0ch.cmqt_to_str().c_str());
 
 	if (sif0.fifo.readPos != sif0.fifo.writePos)

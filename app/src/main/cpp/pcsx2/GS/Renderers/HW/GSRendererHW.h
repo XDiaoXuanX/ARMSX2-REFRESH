@@ -140,6 +140,7 @@ private:
 	struct HWCachedCtx
 	{
 		GIFRegTEX0 TEX0;
+		GIFRegTEXA TEXA;
 		GIFRegCLAMP CLAMP;
 		GIFRegTEST TEST;
 		GIFRegFRAME FRAME;
@@ -178,6 +179,7 @@ private:
 	u32 m_last_channel_shuffle_tbp = 0;
 	u32 m_last_channel_shuffle_end_block = 0;
 	u32 m_channel_shuffle_width = 0;
+	bool m_channel_shuffle_finish = false;
 	GSVector4i m_channel_shuffle_src_valid = GSVector4i::zero();
 	bool m_full_screen_shuffle = false;
 
@@ -221,6 +223,7 @@ public:
 	void ConvertSpriteTextureShuffle(u32& process_rg, u32& process_ba, bool& shuffle_across, GSTextureCache::Target* rt, GSTextureCache::Source* tex);
 	GSVector4 RealignTargetTextureCoordinate(const GSTextureCache::Source* tex);
 	GSVector4i ComputeBoundingBox(const GSVector2i& rtsize, float rtscale);
+	std::size_t ComputeDrawlistGetSize(float scale);
 	void MergeSprite(GSTextureCache::Source* tex);
 	float GetTextureScaleFactor() override;
 	GSVector2i GetValidSize(const GSTextureCache::Source* tex = nullptr, const bool is_shuffle = false);

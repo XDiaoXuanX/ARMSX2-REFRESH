@@ -32,8 +32,6 @@
 #include <fstream>
 #include <algorithm>
 #include <mutex>
-#include "pcsx2/CDVD/CDVDcommon.h"
-#include "pcsx2/CDVD/CDVD.h"
 
 namespace
 {
@@ -268,64 +266,6 @@ std::string GetJavaString(JNIEnv *env, jstring jstr) {
 }
 
 extern "C"
-JNIEXPORT jstring JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_getDiskInfo(JNIEnv* env, jclass, jstring j_path) {
-    std::string path = GetJavaString(env, j_path);
-
-    const CDVD_API* old_api = CDVD;
-    CDVD = &CDVDapi_Iso;
-    Error error;
-    if (!CDVD->open(path, &error)) {
-        CDVD = old_api;
-        return nullptr;
-    }
-
-    std::string serial, version, elf_path;
-    u32 crc = 0;
-    CDVDDiscType disc_type;
-    cdvdGetDiscInfo(&serial, &elf_path, &version, &crc, &disc_type);
-    CDVD->close();
-    CDVD = old_api;
-    if (serial.empty()) return nullptr;
-
-    std::string finalTitle;
-    std::string region = "Unknown";
-
-    const auto* db_entry = GameDatabase::findGame(serial);
-    if (db_entry) {
-        if (!db_entry->name.empty()) {
-            finalTitle = db_entry->name;
-        } else {
-            finalTitle = Path::URLDecode(std::string(Path::GetFileTitle(path)));
-        }
-
-        if (!db_entry->region.empty()) {
-            region = db_entry->region;
-        }
-    } else {
-        finalTitle = Path::URLDecode(std::string(Path::GetFileTitle(path)));
-    }
-    std::string result = finalTitle + "|" + serial + "|" + region;
-    return env->NewStringUTF(result.c_str());
-}
-
-extern "C"
-JNIEXPORT void JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_reloadCheats(JNIEnv *env, jclass clazz) {
-    if (!VMManager::HasValidVM())
-        return;
-    const std::string serial = VMManager::GetDiscSerial();
-    const u32 crc = VMManager::GetDiscCRC();
-    Patch::ReloadPatches(serial, crc, true, true, true, false);
-}
-
-extern "C"
-JNIEXPORT jint JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_getGameCRC(JNIEnv *env, jclass clazz) {
-    return (jint)VMManager::GetDiscCRC();
-}
-
-extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
                                                 jstring p_szpath, jint p_apiVer) {
@@ -360,7 +300,6 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
             s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowGSStats", false);
             s_settings_interface->SetIntValue("EmuCore/GS", "OsdPerformancePos", 0); 
             s_settings_interface->SetBoolValue("UI", "EnableFullscreenUI", false);
-            s_settings_interface->SetBoolValue("UI", "ExpandIntoDisplayCutout", true);
             s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
             s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
             s_settings_interface->SetBoolValue("Achievements", "AndroidMigrationV1", true);
@@ -379,11 +318,6 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
             if (!s_settings_interface->ContainsValue("Achievements", "ChallengeMode"))
             {
                 s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
-                needs_save = true;
-            }
-            if (!s_settings_interface->ContainsValue("UI", "ExpandIntoDisplayCutout"))
-            {
-                s_settings_interface->SetBoolValue("UI", "ExpandIntoDisplayCutout", true);
                 needs_save = true;
             }
             if (needs_save)
@@ -443,7 +377,6 @@ Java_kr_co_iefriends_pcsx2_NativeApp_reloadDataRoot(JNIEnv* env, jclass, jstring
         s_settings_interface->SetBoolValue("EmuCore/GS", "OsdShowGSStats", false);
         s_settings_interface->SetIntValue("EmuCore/GS", "OsdPerformancePos", 0);
         s_settings_interface->SetBoolValue("UI", "EnableFullscreenUI", false);
-        s_settings_interface->SetBoolValue("UI", "ExpandIntoDisplayCutout", true);
         s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
         s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
         s_settings_interface->SetBoolValue("Achievements", "AndroidMigrationV1", true);
@@ -462,11 +395,6 @@ Java_kr_co_iefriends_pcsx2_NativeApp_reloadDataRoot(JNIEnv* env, jclass, jstring
         if (!s_settings_interface->ContainsValue("Achievements", "ChallengeMode"))
         {
             s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
-            needs_save = true;
-        }
-        if (!s_settings_interface->ContainsValue("UI", "ExpandIntoDisplayCutout"))
-        {
-            s_settings_interface->SetBoolValue("UI", "ExpandIntoDisplayCutout", true);
             needs_save = true;
         }
         if (needs_save)
@@ -744,7 +672,7 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderUpscalemultiplier(JNIEnv *env, jclass clazz,
                                                              jfloat p_value) {
-    const float clamped = std::clamp(p_value, 0.25f, 12.0f);
+    const float clamped = std::clamp(p_value, 1.0f, 12.0f);
 
     EmuConfig.GS.UpscaleMultiplier = clamped;
     GSConfig.UpscaleMultiplier = clamped;
@@ -1238,6 +1166,10 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
     // fast_boot : (false: bios->game, true: direct-to-game)
     VMBootParameters boot_params;
     boot_params.filename = _szPath;
+    if (!_szPath.empty())
+        boot_params.fast_boot = true;
+    else
+        boot_params.fast_boot = false;
 
     if (!VMManager::Internal::CPUThreadInitialize()) {
         VMManager::Internal::CPUThreadShutdown();
@@ -1505,19 +1437,6 @@ Java_kr_co_iefriends_pcsx2_utils_RetroAchievementsBridge_nativeSetHardcore(JNIEn
     NotifyRetroAchievementsState();
 }
 
-extern "C"
-JNIEXPORT jboolean JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_changeDisc(JNIEnv* env, jclass clazz, jstring p_path) {
-    std::string path = GetJavaString(env, p_path);
-    if (!VMManager::HasValidVM()) return JNI_FALSE;
-
-    std::string displayName = path;
-    size_t lastSlash = path.find_last_of("");
-    if (lastSlash != std::string::npos) {
-        displayName = path.substr(lastSlash + 1);
-    }
-    return VMManager::ChangeDisc(CDVD_SourceType::Iso, path) ? JNI_TRUE : JNI_FALSE;
-}
 
 void Host::CommitBaseSettingChanges()
 {

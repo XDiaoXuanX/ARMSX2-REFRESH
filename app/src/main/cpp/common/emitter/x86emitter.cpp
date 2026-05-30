@@ -1,3 +1,5 @@
+// [P63] Guard: macOS native build doesn't compile x86 emitter
+#if !defined(iPSX2_MACOS)
 // SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -57,8 +59,7 @@ thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM] = {XMMT_INT};
 
 #if defined(__ANDROID__) || (defined(_M_ARM64) && defined(PCSX2_ARM64_DYNAREC))
 
-namespace x86Emitter
-{
+namespace x86Emitter {
 
 const a64::VRegister
     xmm0=a64::QRegister(0), xmm1=a64::QRegister(1),
@@ -99,6 +100,12 @@ const a64::WRegister
 #else
 
 thread_local u8* x86Ptr;
+
+#if defined(__APPLE__) && defined(_M_ARM64)
+// [P43] Alias for DarwinMisc::g_code_rw_offset, used by xWrite<T> in internal.h
+// Avoids pulling DarwinMisc.h into the emitter header
+ptrdiff_t g_code_rw_offset_for_emitter = 0;
+#endif
 
 namespace x86Emitter
 {
@@ -1376,3 +1383,4 @@ const xRegister32
 } // End namespace x86Emitter
 
 #endif
+#endif // !iPSX2_MACOS

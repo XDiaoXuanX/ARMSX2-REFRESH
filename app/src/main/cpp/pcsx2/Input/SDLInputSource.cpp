@@ -678,6 +678,11 @@ void SDLInputSource::ShutdownSubsystem()
 
 void SDLInputSource::PollEvents()
 {
+#if defined(iPSX2_MACOS)
+	// [V34] On macOS native, AppKit forbids event pump from non-main threads.
+	// ios_main.mm's main loop already pumps SDL events; VM thread must skip.
+	return;
+#else
 	for (;;)
 	{
 		SDL_Event ev;
@@ -686,6 +691,7 @@ void SDLInputSource::PollEvents()
 		else
 			break;
 	}
+#endif
 }
 
 std::vector<std::pair<std::string, std::string>> SDLInputSource::EnumerateDevices()

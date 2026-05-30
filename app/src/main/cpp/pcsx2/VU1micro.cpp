@@ -6,8 +6,15 @@
 
 #include "Common.h"
 #include <cmath>
+#include <atomic>
+#include <sys/time.h> // [CLIFF_DIAG]
 #include "VUmicro.h"
 #include "MTVU.h"
+#include "Gif_Unit.h" // for gifUnit
+
+// [TEMP_DIAG] VU1 kick counter — defined in Counters.cpp
+// Removal condition: BIOS browserafter confirmed
+extern std::atomic<uint32_t> g_vu1_kick_count;
 
 #ifdef PCSX2_DEBUG
 u32 vudump = 0;
@@ -48,6 +55,14 @@ void vu1Finish(bool add_cycles) {
 
 void vu1ExecMicro(u32 addr)
 {
+	// [CLIFF_DIAG] Time the entire vu1ExecMicro call
+	struct timeval _vu1_tv0;
+	gettimeofday(&_vu1_tv0, nullptr);
+
+	g_vu1_kick_count.fetch_add(1, std::memory_order_relaxed); // [TEMP_DIAG]
+
+	// [P24] Per-kick drain removed — replaced by VSync-level pacing in Counters.cpp.
+
 	if (THREAD_VU1) {
 		VU0.VI[REG_VPU_STAT].UL &= ~0xFF00;
 		// Okay this is a little bit of a hack, but with good reason.
@@ -60,6 +75,14 @@ void vu1ExecMicro(u32 addr)
 		// }
 		// Update 25/06/2022: Disabled this for now, let games YOLO it, if it breaks MTVU, disable MTVU (it doesn't work properly anyway) - Refraction
 		vu1Thread.ExecuteVU(addr, vif1Regs.top, vif1Regs.itop, VU0.VI[REG_FBRST].UL);
+		// [CLIFF_DIAG] end timing (MTVU path — unlikely on interpreter)
+		{
+			struct timeval _vu1_tv1;
+			gettimeofday(&_vu1_tv1, nullptr);
+			uint32_t dt = (uint32_t)((_vu1_tv1.tv_sec - _vu1_tv0.tv_sec) * 1000000 + (_vu1_tv1.tv_usec - _vu1_tv0.tv_usec));
+			CliffDiag::vu1ExecUs.fetch_add(dt, std::memory_order_relaxed);
+			CliffDiag::vu1Kicks.fetch_add(1, std::memory_order_relaxed);
+		}
 		return;
 	}
 	static int count = 0;
@@ -77,6 +100,15 @@ void vu1ExecMicro(u32 addr)
 		CpuVU1->ExecuteBlock(1);
 	else
 		CpuVU1->Execute(vu1RunCycles);
+
+	// [CLIFF_DIAG] end timing (interpreter path)
+	{
+		struct timeval _vu1_tv1;
+		gettimeofday(&_vu1_tv1, nullptr);
+		uint32_t dt = (uint32_t)((_vu1_tv1.tv_sec - _vu1_tv0.tv_sec) * 1000000 + (_vu1_tv1.tv_usec - _vu1_tv0.tv_usec));
+		CliffDiag::vu1ExecUs.fetch_add(dt, std::memory_order_relaxed);
+		CliffDiag::vu1Kicks.fetch_add(1, std::memory_order_relaxed);
+	}
 }
 
 void MTVUInterrupt()

@@ -260,7 +260,6 @@ private:
 	void RenderImGui();
 	void RenderBlankFrame();
 
-	GLuint GetWindowFramebuffer() const;
 	void OMAttachRt(GSTexture* rt = nullptr);
 	void OMAttachDs(GSTexture* ds = nullptr);
 	void OMSetFBO(GLuint fbo);

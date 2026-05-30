@@ -7,10 +7,7 @@
 #include <map>
 
 #include "common/Assertions.h"
-#include "common/Darwin/ApplePlatform.h"
-#if ARMSX2_APPLE_MAC_RUNTIME
 #include "common/HostSys.h"
-#endif
 #include "arm64/VixlHelpers.h"
 
 // Every potential jump point in the PS2's addressable memory has a BASEBLOCK
@@ -175,10 +172,14 @@ public:
 	[[nodiscard]] __fi int Index(u32 startpc) const
 	{
 		int idx = LastIndex(startpc);
+        // [iPSX2] Fix OOB access (Host SIGBUS)
+        if (idx == -1)
+            return -1;
+
         u32 block_startpc = blocks[idx].startpc;
         u32 block_size = (blocks[idx].size);
 
-		if ((idx == -1) || (startpc < block_startpc) ||
+		if ((startpc < block_startpc) ||
 			(block_size && (startpc >= block_startpc + block_size << 2))) // blocks[idx].size * 4
 			return -1;
 		else
@@ -208,13 +209,14 @@ public:
 
 			//u32 startpc = blocks[idx].startpc;
 			auto range = links.equal_range(blocks[idx].startpc);
-			for (auto i = range.first; i != range.second; ++i) {
-#if ARMSX2_APPLE_MAC_RUNTIME
-				HostSys::AutoCodeWrite code_write(reinterpret_cast<void*>(i->second), sizeof(u32));
-#endif
-//                *(u32 *) i->second = recompiler - (i->second + 4);
-                armEmitJmpPtr((void*)i->second, (void*)recompiler, true);
-            }
+			if (range.first != range.second) {
+				HostSys::BeginCodeWrite();
+				for (auto i = range.first; i != range.second; ++i) {
+	//                *(u32 *) i->second = recompiler - (i->second + 4);
+					armEmitJmpPtr((void*)i->second, (void*)recompiler, true);
+				}
+				HostSys::EndCodeWrite();
+			}
 
 			if (IsDevBuild)
 			{
@@ -222,12 +224,11 @@ public:
 				// static jumps get left behind to this block.  Note: Do not clear more than the
 				// first byte, since this code is called during exception handlers and event handlers
 				// both of which expect to be able to return to the recompiled code.
-
+				
+				HostSys::BeginCodeWrite();
 				BASEBLOCKEX effu(blocks[idx]);
-#if ARMSX2_APPLE_MAC_RUNTIME
-				HostSys::AutoCodeWrite code_write(reinterpret_cast<void*>(effu.fnptr), 1);
-#endif
 				memset((void*)effu.fnptr, 0xcc, 1);
+				HostSys::EndCodeWrite();
 			}
 		} while (idx++ < last);
 

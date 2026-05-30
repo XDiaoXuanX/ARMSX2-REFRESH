@@ -32,9 +32,11 @@ namespace a64 = vixl::aarch64;
 #define RQSCRATCH2 a64::q31
 #define RDSCRATCH2 a64::d31
 #define RSSCRATCH2 a64::s31
-#define RQSCRATCH3 a64::q29
-#define RDSCRATCH3 a64::d29
-#define RSSCRATCH3 a64::s29
+// [iPSX2] Changed from q29 to q28 to avoid any potential conflict with x29 (FP)
+// V28 is still volatile and safe to use as scratch
+#define RQSCRATCH3 a64::q28
+#define RDSCRATCH3 a64::d28
+#define RSSCRATCH3 a64::s28
 
 #define EAX a64::w0
 #define ECX a64::w1
@@ -71,7 +73,11 @@ namespace a64 = vixl::aarch64;
 #define PTR_MVU(field) a64::MemOperand(RSTATE_MVU, offsetof(vuRegistersPack, field))
 
 // recLUT, psxRecLUT
-#define RSTATE_x29 a64::x29
+// NOTE: x29 is reserved as Frame Pointer (FP) on ARM64 and causes VIXL BRK assertions.
+// We use x23 for recLUT pointer instead (was RSTATE_x23, but we can share with RSTATE_x29 users)
+#define RSTATE_RECLUT a64::x23
+// Keep legacy name for compatibility but map to safe register
+#define RSTATE_x29 a64::x23
 
 // eeHw[Ps2MemSize::Hardware]
 #define psHu(mem) (mem & 0xffff)

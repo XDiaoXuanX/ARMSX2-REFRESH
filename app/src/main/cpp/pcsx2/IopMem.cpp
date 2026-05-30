@@ -8,6 +8,9 @@
 #include "SPU2/spu2.h"
 #include "DEV9/DEV9.h"
 #include "IopHw.h"
+#include "Hw.h" // [P32] hwIntcIrq for IOP→EE SBUS interrupt
+
+extern "C" void LogUnified(const char* fmt, ...);
 
 uptr *psxMemWLUT = nullptr;
 const uptr *psxMemRLUT = nullptr;
@@ -212,6 +215,16 @@ u32 iopMemRead32(u32 mem)
 	{
 		//see also Hw.c
 		const u8* p = (const u8*)(psxMemRLUT[mem >> 16]);
+		// [iter100] @@IOP_ROM_SCAN32@@ – magic scan range 0x1FC02600-0x1FC02900 (first 30)
+		{
+			static u32 s_iop_scan_n = 0;
+			if (mem >= 0x1FC02600u && mem < 0x1FC02900u && s_iop_scan_n < 30) {
+				u32 val = (p != NULL) ? *(const u32*)(p + (mem & 0xffff)) : 0xDEADBEEFu;
+				Console.WriteLn("@@IOP_ROM_SCAN32@@ n=%u mem=%08x p=%s val=%08x",
+					s_iop_scan_n, mem, (p != NULL) ? "OK" : "NULL", val);
+				s_iop_scan_n++;
+			}
+		}
 		if (p != NULL)
 		{
 			if (t == 0x1d00)
@@ -245,7 +258,28 @@ u32 iopMemRead32(u32 mem)
 				//SIF_LOG("Sif reg read %x value %x", mem, ret);
 				return ret;
 			}
-			return *(const u32 *)(p + (mem & 0xffff));
+			{
+				const u32 result = *(const u32 *)(p + (mem & 0xffff));
+				// [iter132] probe: detect low IOP RAM reads (pc=0 source hypothesis)
+				if (mem < 0x00001000u) {
+					static u32 s_lowrd_n = 0;
+					if (s_lowrd_n < 8) {
+						++s_lowrd_n;
+						Console.WriteLn("@@IOP_LOWRD32@@ n=%u mem=0x%08x result=0x%08x",
+							s_lowrd_n, mem, result);
+					}
+				}
+				// [iter133] probe: log all iopMemRead32 calls for bfc4b138 dispatch address (cap 8)
+				if (mem == 0x1FC4B138u) {
+					static u32 s_b138_n = 0;
+					if (s_b138_n < 8) {
+						++s_b138_n;
+						Console.WriteLn("@@IOP_MEM_RD32_4B138@@ n=%u p=%p off=0x%x result=0x%08x",
+							s_b138_n, (const void*)p, (mem & 0xffff), result);
+					}
+				}
+				return result;
+			}
 		}
 		else
 		{
@@ -258,6 +292,8 @@ u32 iopMemRead32(u32 mem)
 
 void iopMemWrite8(u32 mem, u8 value)
 {
+	static u32 s_iop2070_count = 0;
+	static bool s_iop2070_cond_logged = false;
 	mem &= 0x1fffffff;
 	u32 t = mem >> 16;
 
@@ -270,7 +306,21 @@ void iopMemWrite8(u32 mem, u8 value)
 			case 0x8000: IopMemory::iopHwWrite8_Page8(mem,value); break;
 
 			default:
+				bool log_cond = false;
+				if (mem == 0x1f802070 && s_iop2070_count < 8)
+				{
+					LogUnified("@@IOP2070_WR@@ addr=%08x val=%02x src=iopMemWrite8\n", mem, value);
+					s_iop2070_count++;
+					log_cond = true;
+				}
 				psxHu8(mem) = value;
+				if (log_cond && !s_iop2070_cond_logged)
+				{
+					const u8 rb = psxHu8(mem);
+					const u8 reg3204 = psxHu8(0x1f803204);
+					LogUnified("@@COND@@ addr=%08x write=%02x readback=%02x reg3204=%02x\n", mem, value, rb, reg3204);
+					s_iop2070_cond_logged = true;
+				}
 			break;
 		}
 	}
@@ -341,6 +391,13 @@ void iopMemWrite16(u32 mem, u16 value)
 						return;
 					case 0x40:
 					{
+						// [iter230] TEMP_DIAG: IOP 16-bit SBUS_F240 write
+						{
+							static u32 s_f240_16_n = 0;
+							if (s_f240_16_n++ < 10)
+								Console.WriteLn("@@IOP_SBUS_F240_W16@@ n=%u val=%04x f240_before=%08x iop_pc=%08x",
+									s_f240_16_n, (unsigned)value, psHu32(SBUS_F240), psxRegs.pc);
+						}
 						u32 temp = value & 0xF0;
 						// write to ps2 mem
 						if(value & 0x20 || value & 0x80)
@@ -379,8 +436,43 @@ void iopMemWrite16(u32 mem, u16 value)
 void iopMemWrite32(u32 mem, u32 value)
 {
 	mem &= 0x1fffffff;
+	// [TEMP_DIAG] iter645: @@IOP_125C4_WRITE@@ — 0x125c4 書き込みdetect (cap=20)
+	// 根拠: RegisterGPUCallback 全パス decode で 0x125c4 書き込みなし確定。
+	//        VBlank ISR が永続 0x125c4=0 を見て毎回 RegisterGPUCallback を呼ぶcauseを確定。
+	// Removal condition: 0x125c4 の書き込み元 (IOP PC) がafter identified
+	if ((mem & 0x1FFFFFu) == 0x125c4u) {
+		static u32 s_125c4_w_n = 0;
+		if (s_125c4_w_n < 20) {
+			Console.WriteLn("@@IOP_125C4_WRITE@@ n=%u val=%08x ioppc=%08x",
+				s_125c4_w_n, value, psxRegs.pc);
+			s_125c4_w_n++;
+		}
+	}
+	// [TEMP_DIAG] @@IOP_EXCVEC_WRITE@@ — 0x80-0x8C への異常書き込みdetect
+	// Removal condition: IOP excvec 破損causeafter identified
+	if ((mem & 0x1FFFFF) >= 0x80 && (mem & 0x1FFFFF) <= 0x8C) {
+		// Only fire if value looks like float data (not normal MIPS instructions)
+		// Normal handler: ac010400, ac1a0410, 401a7000, 40016000
+		bool suspicious = (value == 0x4b2ab970 || value == 0xc2400000 ||
+		                   value == 0x43060000 || value == 0x3f800000 ||
+		                   (value & 0xFC000000) == 0x40000000); // COP1/float-like
+		if (suspicious) {
+			Console.Error("@@IOP_EXCVEC_WRITE_BAD@@ mem=%08x val=%08x ioppc=%08x ee_pc=%08x iop_cyc=%u",
+				mem, value, psxRegs.pc, cpuRegs.pc, psxRegs.cycle);
+		}
+	}
+	// [TEMP_DIAG] @@IOP_WATCH_179A8_W@@ write watchpoint
+	if ((mem & 0x1FFFFF) == 0x179A8) {
+		static u32 s_watch_w_n = 0;
+		if (s_watch_w_n < 20) {
+			Console.WriteLn("@@IOP_WATCH_179A8_W@@ n=%u mem=%08x val=%08x ioppc=%08x",
+				s_watch_w_n, mem, value, psxRegs.pc);
+			s_watch_w_n++;
+		}
+	}
 	u32 t = mem >> 16;
 
+	// removed: 0x179BC watchpoint (BSS is correctly zeroed)
 	if (t == 0x1f80)
 	{
 		switch( mem & 0xf000 )
@@ -413,6 +505,15 @@ void iopMemWrite32(u32 mem, u32 value)
 						return;		// this is the IOP, so read-only (do nothing)
 
 					case 0x10:		// IOP write path (EE/IOP readable)
+						// [TEMP_DIAG] @@IOP_SMCOM_WRITE@@ - IOP SMCOM write tracker (remove after root cause found)
+						{
+							static u32 s_smcom_n = 0;
+							if (s_smcom_n < 20) {
+								++s_smcom_n;
+								Console.WriteLn("@@IOP_SMCOM_WRITE@@ n=%u iop_pc=0x%08x val=0x%08x old=0x%08x iopcyc=%u",
+									s_smcom_n, psxRegs.pc, value, psHu32(SBUS_F210), psxRegs.cycle);
+							}
+						}
 						psHu32(SBUS_F210) = value;
 						return;
 
@@ -421,16 +522,46 @@ void iopMemWrite32(u32 mem, u32 value)
 						return;
 
 					case 0x30:		// bits set when written from IOP
+						// [iter672] @@IOP_SBUS_F230_WRITE@@ – IOP が EE向けメッセージ(SMFLG)をconfig
+						// cap 8→30, bit18 特別追跡
+						// Removal condition: SMFLG bit18 差異のroot causeafter identified
+						{
+							static u32 s_iop_f230_n = 0;
+							static bool s_bit18_logged = false;
+							if (s_iop_f230_n < 30) {
+								++s_iop_f230_n;
+								Console.WriteLn("@@IOP_SBUS_F230_WRITE@@ n=%u iop_pc=0x%08x val=0x%08x f230_before=0x%08x",
+									s_iop_f230_n, psxRegs.pc, value, psHu32(SBUS_F230));
+							}
+							if (!s_bit18_logged && (value & 0x40000)) {
+								s_bit18_logged = true;
+								Console.WriteLn("@@SMFLG_BIT18_SET@@ iop_pc=0x%08x val=0x%08x f230_before=0x%08x iopcyc=%u",
+									psxRegs.pc, value, psHu32(SBUS_F230), psxRegs.cycle);
+							}
+						}
 						psHu32(SBUS_F230) |= value;
 						return;
 
 					case 0x40:		// Control Register
 					{
+						// [iter99] @@IOP_SBUS_F240_WRITE@@ – IOP が SBUS_F240 controlregisterに書き込む = SIF ハンドシェイク到達verify
+						{
+							static u32 s_iop_sbus_n = 0;
+							if (s_iop_sbus_n < 8)
+							{
+								Console.WriteLn("@@IOP_SBUS_F240_WRITE@@ n=%u mem=%08x val=%08x f240_before=%08x",
+									s_iop_sbus_n, mem, value, psHu32(SBUS_F240));
+								s_iop_sbus_n++;
+							}
+						}
 						u32 temp = value & 0xF0;
 						if (value & 0x20 || value & 0x80)
 						{
 							psHu32(SBUS_F240) &= ~0xF000;
 							psHu32(SBUS_F240) |= 0x2000;
+							// [P32] hwIntcIrq(INTC_SBUS) は逆効果: カーネル SBUS handlerが
+							// [0x80024124] を 0x27 に再書き込みし、P31 フラグをcorruptする。
+							// 実機準拠の割り込みは P31 フラグ撤去後にenabled化する。
 						}
 
 

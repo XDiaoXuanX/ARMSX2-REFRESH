@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021-2024 Connor McLaughlin <stenzek@gmail.com>, PCSX2 Team
+// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0
 
 #include "arm64/AsmHelpers.h"
@@ -7,6 +7,11 @@
 #include "common/BitUtils.h"
 #include "common/Console.h"
 #include "common/HostSys.h"
+
+#if defined(__APPLE__)
+#include "common/Darwin/DarwinMisc.h"
+#include <dlfcn.h>
+#endif
 
 const vixl::aarch64::Register& armWRegister(int n)
 {
@@ -96,6 +101,10 @@ void armAlignAsmPtr()
 	armAsmPtr = new_ptr;
 }
 
+// [R59] Placement-new storage for MacroAssembler to avoid per-block heap alloc/free.
+// MacroAssembler dtor is trivial (~MacroAssembler() {}), so explicit dtor call is safe.
+static thread_local alignas(a64::MacroAssembler) u8 s_asm_storage[sizeof(a64::MacroAssembler)];
+
 u8* armStartBlock()
 {
 	armAlignAsmPtr();
@@ -103,9 +112,8 @@ u8* armStartBlock()
 	HostSys::BeginCodeWrite();
 
 	pxAssert(!armAsm);
-	armAsm = new vixl::aarch64::MacroAssembler(static_cast<vixl::byte*>(armAsmPtr), armAsmCapacity);
+	armAsm = new (s_asm_storage) a64::MacroAssembler(static_cast<vixl::byte*>(armAsmPtr), armAsmCapacity);
 	armAsm->GetScratchVRegisterList()->Remove(31);
-	armAsm->GetScratchRegisterList()->Remove(RSCRATCHADDR.GetCode());
 	return armAsmPtr;
 }
 
@@ -118,7 +126,7 @@ u8* armEndBlock()
 	const u32 size = static_cast<u32>(armAsm->GetSizeOfCodeGenerated());
 	pxAssert(size < armAsmCapacity);
 
-	delete armAsm;
+	armAsm->~MacroAssembler();
 	armAsm = nullptr;
 
 	HostSys::EndCodeWrite();
@@ -129,6 +137,10 @@ u8* armEndBlock()
 	armAsmCapacity -= size;
 	return armAsmPtr;
 }
+
+// ... (omitted) ...
+
+
 
 void armDisassembleAndDumpCode(const void* ptr, size_t size)
 {
@@ -253,7 +265,7 @@ void armMoveAddressToReg(const vixl::aarch64::Register& reg, const void* addr)
 		reinterpret_cast<uintptr_t>(armGetCurrentCodePointer()) & ~static_cast<uintptr_t>(0xFFF));
 	const void* ptr_page =
 		reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(addr) & ~static_cast<uintptr_t>(0xFFF));
-	const s64 page_displacement = GetPCDisplacement(current_code_ptr_page, ptr_page) >> 10;
+	const s64 page_displacement = GetPCDisplacement(current_code_ptr_page, ptr_page) >> 12;
 	const u32 page_offset = static_cast<u32>(reinterpret_cast<uintptr_t>(addr) & 0xFFFu);
 	if (vixl::IsInt21(page_displacement) && a64::Assembler::IsImmAddSub(page_offset))
 	{

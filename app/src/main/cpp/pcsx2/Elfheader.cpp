@@ -158,6 +158,18 @@ void ElfObject::InitElfHeaders()
 	ELF_LOG("sh num:    %08x",header.e_shnum);
 	ELF_LOG("sh strndx: %08x",header.e_shstrndx);
 
+	// [P15] @@ELF_PHDR_DUMP@@ — dump PT_LOAD program headers to identify BSS vs code regions
+	// Removal condition: game code zeros (0x26FDF0) issue解消後
+	if (header.e_phnum > 0 && proghead) {
+		Console.WriteLn("@@ELF_PHDR_DUMP@@ entry=%08x phnum=%d filesize=%zu",
+			header.e_entry, header.e_phnum, data.size());
+		for (int i = 0; i < header.e_phnum && i < 16; i++) {
+			Console.WriteLn("@@ELF_PHDR_DUMP@@ [%d] type=%d vaddr=%08x filesz=%08x memsz=%08x offset=%08x flags=%08x",
+				i, proghead[i].p_type, proghead[i].p_vaddr, proghead[i].p_filesz,
+				proghead[i].p_memsz, proghead[i].p_offset, proghead[i].p_flags);
+		}
+	}
+
 	ELF_LOG("\n");
 
 	//applyPatches();

@@ -20,10 +20,9 @@
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #include <UIKit/UIKit.h>
-using GSMTLView = UIView;
+using NSView = UIView;
 #else
 #include <AppKit/AppKit.h>
-using GSMTLView = NSView;
 #endif
 #include <Metal/Metal.h>
 #include <QuartzCore/QuartzCore.h>
@@ -229,7 +228,7 @@ public:
 	MTLResourceOptions m_resource_options_shared_wc;
 
 	// Previously in MetalHostDisplay.
-	MRCOwned<GSMTLView*> m_view;
+	MRCOwned<NSView*> m_view;
 	MRCOwned<CAMetalLayer*> m_layer;
 	MRCOwned<id<CAMetalDrawable>> m_current_drawable;
 	MRCOwned<MTLRenderPassDescriptor*> m_pass_desc;

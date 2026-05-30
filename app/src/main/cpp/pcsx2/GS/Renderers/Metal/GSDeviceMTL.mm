@@ -13,8 +13,7 @@
 #include "cpuinfo.h"
 #include "imgui.h"
 
-#include <cstdio>
-
+// [iPSX2]
 extern "C" void LogUnified(const char* fmt, ...);
 
 #ifdef __APPLE__
@@ -38,7 +37,7 @@ std::vector<GSAdapterInfo> GetMetalAdapterList()
 	{
 		GSAdapterInfo ai;
 		ai.name = [[dev name] UTF8String];
-
+		
 		ai.max_texture_size = 8192;
 		#if !TARGET_OS_IPHONE
 		if ([dev supportsFeatureSet:MTLFeatureSet_macOS_GPUFamily1_v1])
@@ -259,22 +258,6 @@ id<MTLFence> GSDeviceMTL::GetSpinFence()
 
 void GSDeviceMTL::DrawCommandBufferFinished(u64 draw, id<MTLCommandBuffer> buffer)
 {
-#if TARGET_OS_MACCATALYST
-	if ([buffer status] == MTLCommandBufferStatusError)
-	{
-		static std::atomic<int> s_error_log_count{0};
-		const int log_index = s_error_log_count.fetch_add(1, std::memory_order_relaxed);
-		if (log_index < 16)
-		{
-			NSError* error = [buffer error];
-			NSString* description = error ? [error localizedDescription] : @"(no error description)";
-			LogUnified("@@MAC_METAL_CMDBUF_ERROR@@ draw=%llu status=%lu error=%s\n",
-				static_cast<unsigned long long>(draw),
-				static_cast<unsigned long>([buffer status]),
-				[description UTF8String]);
-		}
-	}
-#endif
 	// We can do the update non-atomically because we only ever update under the lock
 	u64 newval = std::max(draw, m_last_finished_draw.load(std::memory_order_relaxed));
 	m_last_finished_draw.store(newval, std::memory_order_release);
@@ -791,14 +774,14 @@ bool GSDeviceMTL::HasSurface()  const { return static_cast<bool>(m_layer);}
 void GSDeviceMTL::AttachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
-	m_view = MRCRetain((__bridge GSMTLView*)m_window_info.window_handle);
+	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
 #if TARGET_OS_IPHONE
-	pxAssert(m_window_info.type == WindowInfo::Type::iOS || m_window_info.type == WindowInfo::Type::MacCatalyst);
+	// [P51-6] Use view's backing layer (layerClass = CAMetalLayer)
 	m_layer = MRCRetain((CAMetalLayer*)[m_view layer]);
 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
 	[m_layer setDevice:m_dev.dev];
+	// No addSublayer — backing layer is managed by UIKit
 #else
-	pxAssert(m_window_info.type == WindowInfo::Type::MacOS);
 	m_layer = MRCRetain([CAMetalLayer layer]);
 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
 	[m_layer setDevice:m_dev.dev];
@@ -811,6 +794,7 @@ void GSDeviceMTL::DetachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
 #if TARGET_OS_IPHONE
+	// [P51-6] Backing layer is owned by UIKit — don't remove, just release reference
 #else
 	[m_view setLayer:nullptr];
 	[m_view setWantsLayer:NO];
@@ -981,16 +965,6 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	m_features.cas_sharpening = true;
 	m_features.test_and_sample_depth = true;
 	m_max_texture_size = m_dev.features.max_texsize;
-
-#if TARGET_OS_MACCATALYST
-	LogUnified(
-		"@@MAC_METAL_FEATURES@@ dev_fbfetch=%d final_fbfetch=%d texbarrier=%d primid=%d fast_half=%d shader=%s max_tex=%u layer_fmt=%lu window=%dx%d\n",
-		m_dev.features.framebuffer_fetch ? 1 : 0, m_features.framebuffer_fetch ? 1 : 0,
-		m_features.texture_barrier ? 1 : 0, m_features.primitive_id ? 1 : 0,
-		m_dev.features.has_fast_half ? 1 : 0, to_string(m_dev.features.shader_version),
-		static_cast<unsigned>(m_max_texture_size), static_cast<unsigned long>(layer_px_fmt),
-		m_window_info.surface_width, m_window_info.surface_height);
-#endif
 
 	// Init metal stuff
 	m_fn_constants = MRCTransfer([MTLFunctionConstantValues new]);
@@ -1365,10 +1339,6 @@ static bool s_capture_next = false;
 GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 { @autoreleasepool {
 	static int p_log = 0;
-#if TARGET_OS_MACCATALYST
-	const int mac_present_count = p_log;
-	const bool mac_trace = mac_present_count < 300 || ((mac_present_count % 120) == 0);
-#endif
 	if ((p_log % 60) == 0) Console.WriteLn("Debug: BeginPresent called (count: %d, sk: %d)", p_log, frame_skip);
 	p_log++;
 
@@ -1376,11 +1346,6 @@ GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 		s_capture_next = true;
 	if (frame_skip || m_window_info.type == WindowInfo::Type::Surfaceless || !g_gs_device)
 	{
-#if TARGET_OS_MACCATALYST
-		if (mac_trace)
-			LogUnified("@@MAC_METAL_BEGIN_PRESENT_SKIP@@ count=%d frame_skip=%d window_type=%d gs_device=%p\n",
-				mac_present_count, frame_skip ? 1 : 0, static_cast<int>(m_window_info.type), static_cast<void*>(g_gs_device.get()));
-#endif
 		ImGui::EndFrame();
 		return PresentResult::FrameSkipped;
 	}
@@ -1389,54 +1354,33 @@ GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 	EndRenderPass();
 	if (!m_current_drawable)
 	{
-#if TARGET_OS_MACCATALYST
-		if (mac_trace)
-			LogUnified("@@MAC_METAL_NO_DRAWABLE@@ count=%d layer=%p window=%dx%d\n",
-				mac_present_count, static_cast<void*>(m_layer.Get()), m_window_info.surface_width, m_window_info.surface_height);
-#endif
 		[buf pushDebugGroup:@"Present Skipped"];
 		[buf popDebugGroup];
 		FlushEncoders();
 		ImGui::EndFrame();
 		return PresentResult::FrameSkipped;
 	}
-
+	
 	id<MTLTexture> targetTex = [m_current_drawable texture];
 	if (!targetTex) {
 		Console.Error("GSDeviceMTL::BeginPresent: Drawable texture is null!");
-#if TARGET_OS_MACCATALYST
-		if (mac_trace)
-			LogUnified("@@MAC_METAL_NULL_DRAWABLE_TEXTURE@@ count=%d drawable=%p\n",
-				mac_present_count, static_cast<void*>(m_current_drawable.Get()));
-#endif
 		return PresentResult::FrameSkipped;
 	}
 
-#if TARGET_OS_MACCATALYST
-	if (mac_trace)
-	{
-		LogUnified(
-			"@@MAC_METAL_BEGIN_PRESENT@@ count=%d drawable=%p target=%p target_size=%lux%lu layer=%p window=%dx%d draw=%llu\n",
-			mac_present_count, static_cast<void*>(m_current_drawable.Get()), static_cast<void*>(targetTex),
-			static_cast<unsigned long>([targetTex width]), static_cast<unsigned long>([targetTex height]),
-			static_cast<void*>(m_layer.Get()), m_window_info.surface_width, m_window_info.surface_height,
-			static_cast<unsigned long long>(m_current_draw));
-	}
-#endif
-
 	[m_pass_desc colorAttachments][0].texture = targetTex;
-
+	
+	// Debug logging for descriptor
 	if (!m_pass_desc) {
 		Console.Error("GSDeviceMTL::BeginPresent: Pass descriptor is null!");
 		return PresentResult::FrameSkipped;
 	}
-
+	
 	id<MTLRenderCommandEncoder> enc = [buf renderCommandEncoderWithDescriptor:m_pass_desc];
 	if (!enc) {
 		Console.Error("GSDeviceMTL::BeginPresent: Failed to create render command encoder!");
 		return PresentResult::FrameSkipped;
 	}
-
+	
 	[enc setLabel:@"Present"];
 	m_current_render.encoder = MRCRetain(enc);
 
@@ -1746,21 +1690,6 @@ void GSDeviceMTL::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture
 	cb.SetTarget(dRect, ds);
 	cb.SetTime(shaderTime);
 	id<MTLRenderPipelineState> pipe = m_present_pipeline[static_cast<int>(shader)];
-#if TARGET_OS_MACCATALYST
-	{
-		static std::atomic<unsigned> s_present_rect_count{0};
-		const unsigned log_index = s_present_rect_count.fetch_add(1, std::memory_order_relaxed);
-		if (log_index < 300 || ((log_index % 120) == 0))
-		{
-			id<MTLTexture> native_texture = static_cast<GSTextureMTL*>(sTex)->GetTexture();
-			LogUnified(
-				"@@MAC_METAL_PRESENT_RECT@@ count=%u sTex=%p native=%p s_size=%dx%d dTex=%p ds=%dx%d sRect=%.5f,%.5f,%.5f,%.5f dRect=%.1f,%.1f,%.1f,%.1f shader=%d linear=%d pipe=%p\n",
-				log_index, static_cast<void*>(sTex), static_cast<void*>(native_texture), sTex->GetWidth(), sTex->GetHeight(),
-				static_cast<void*>(dTex), ds.x, ds.y, sRect.x, sRect.y, sRect.z, sRect.w,
-				dRect.x, dRect.y, dRect.z, dRect.w, static_cast<int>(shader), linear ? 1 : 0, static_cast<void*>(pipe));
-		}
-	}
-#endif
 
 	if (dTex)
 	{
@@ -2083,6 +2012,7 @@ void GSDeviceMTL::MRESetSampler(SamplerSelector sel)
 static void textureBarrier(id<MTLRenderCommandEncoder> enc)
 {
 #if TARGET_OS_IPHONE
+	// memoryBarrierWithScope is not supported on Simulator
 #if !TARGET_OS_SIMULATOR
 	[enc memoryBarrierWithScope:MTLBarrierScopeTextures
 	                afterStages:MTLRenderStageFragment
@@ -2291,7 +2221,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 	GSTexture* primid_tex = nullptr;
 	GSTexture* rt = config.rt;
 	GSTexture* colclip_rt = g_gs_device->GetColorClipTexture();
-
+	
 	if (colclip_rt)
 	{
 		if (config.colclip_mode == GSHWDrawConfig::ColClipMode::EarlyResolve)
@@ -2301,28 +2231,28 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 			g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 
 			Recycle(colclip_rt);
-
+			
 			g_gs_device->SetColorClipTexture(nullptr);
-
+			
 			colclip_rt = nullptr;
 		}
 		else
 			config.ps.colclip_hw = 1;
 	}
-
+	
 	if (config.ps.colclip_hw)
 	{
 		if (!colclip_rt)
 		{
 			config.colclip_update_area = config.drawarea;
-
+			
 			GSVector2i size = config.rt->GetSize();
 			rt = colclip_rt = CreateRenderTarget(size.x, size.y, GSTexture::Format::ColorClip, false);
-
+			
 			g_gs_device->SetColorClipTexture(colclip_rt);
-
+			
 			const GSVector4i copy_rect = (config.colclip_mode == GSHWDrawConfig::ColClipMode::ConvertOnly) ? GSVector4i::loadh(size) : config.drawarea;
-
+			
 			switch (config.rt->GetState())
 			{
 				case GSTexture::State::Dirty:
@@ -2347,7 +2277,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 
 		rt = colclip_rt;
 	}
-
+	
 	switch (config.destination_alpha)
 	{
 		case GSHWDrawConfig::DestinationAlphaMode::Off:
@@ -2443,7 +2373,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 			g_perfmon.Put(GSPerfMon::TextureCopies, 1);
 
 			Recycle(colclip_rt);
-
+			
 			g_gs_device->SetColorClipTexture(nullptr);
 		}
 	}
@@ -2454,6 +2384,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 
 void GSDeviceMTL::SendHWDraw(GSHWDrawConfig& config, id<MTLRenderCommandEncoder> enc, id<MTLBuffer> buffer, size_t off, bool one_barrier, bool full_barrier)
 {
+	// [TEMP_DIAG] GS draw profiling — barrier types + GPU timing per 600 vsync
 	{
 		static u32 s_prof_vsync = 0;
 		static u32 s_full_cnt = 0, s_one_cnt = 0, s_no_cnt = 0, s_total_draws = 0;

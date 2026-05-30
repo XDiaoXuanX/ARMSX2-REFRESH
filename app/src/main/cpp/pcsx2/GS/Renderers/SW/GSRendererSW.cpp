@@ -7,6 +7,7 @@
 #include "GS/GSUtil.h"
 
 #include "common/StringUtil.h"
+#include "common/Console.h"
 
 MULTI_ISA_UNSHARED_IMPL;
 
@@ -29,7 +30,9 @@ GSRendererSW::GSRendererSW(int threads)
 	m_tc = std::make_unique<GSTextureCacheSW>();
 	m_rl = GSRasterizerList::Create(threads);
 
-	m_output = (u8*)_aligned_malloc(1024 * 1024 * sizeof(u32), VECTOR_ALIGNMENT);
+	// [iter685] Output buffer must hold up to 2048 rows × pitch(4096) = 8MB,
+	// plus wrapping can double it. Allocate 2048*2048*4 = 16MB for worst case.
+	m_output = (u8*)_aligned_malloc(2048 * 2048 * sizeof(u32), VECTOR_ALIGNMENT);
 
 	std::fill(std::begin(m_fzb_pages), std::end(m_fzb_pages), 0);
 	std::fill(std::begin(m_tex_pages), std::end(m_tex_pages), 0);
@@ -99,6 +102,13 @@ void GSRendererSW::VSync(u32 field, bool registers_written, bool idle_frame)
 
 GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
 {
+	// [iter253] GetOutput 到達verify (Sync前)
+	{
+		static u32 s_sw_entry = 0;
+		if (s_sw_entry < 5)
+			Console.WriteLn("@@SW_GETOUTPUT_ENTRY@@ n=%u i=%d", s_sw_entry++, i);
+	}
+
 	Sync(1);
 
 	int index = i >= 0 ? i : 1;
@@ -107,6 +117,19 @@ GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
 	GSVector4i framebufferRect = PCRTCDisplays.GetFramebufferRect(i);
 
 	// Try to avoid broken/incomplete setups which are probably ingnored on console, but can cause us problems.
+	// [iter253] debug probe → Console.WriteLn (pcsx2_log.txt 出力)
+	{
+		static u32 s_sw_go = 0;
+		if (s_sw_go < 20) {
+			Console.WriteLn("@@SW_GETOUTPUT@@ n=%u i=%d en=%d fbw=%d fbrect=[%d,%d,%d,%d] fbsz=[%d,%d] empty=%d fbp=%u psm=%u",
+				s_sw_go, i, (int)curFramebuffer.enabled, (int)curFramebuffer.FBW,
+				framebufferRect.x, framebufferRect.y, framebufferRect.z, framebufferRect.w,
+				framebufferSize.x, framebufferSize.y,
+				(int)framebufferRect.rempty(),
+				(u32)curFramebuffer.FBP, (u32)curFramebuffer.PSM);
+			s_sw_go++;
+		}
+	}
 	if (framebufferRect.rempty() || curFramebuffer.FBW == 0)
 		return nullptr;
 
@@ -155,6 +178,34 @@ GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
 
 		// Top left rect
 		psm.rtx(m_mem, m_mem.GetOffset(curFramebuffer.Block(), curFramebuffer.FBW, curFramebuffer.PSM), r.ralign<Align_Outside>(psm.bs), m_output, pitch, texa);
+
+		// [iter314] @@FB_PIXELS@@ : フレームbufferピクセルをログ出力
+		// [TEMP_DIAG] Removal condition: BIOS browserafter confirmed
+		{
+			static u32 s_fbpix_n = 0;
+			s_fbpix_n++;
+			// Sample during animation phase (n=100-120) and at center of framebuffer
+			if (s_fbpix_n >= 100 && s_fbpix_n <= 120) {
+				const u32* px = reinterpret_cast<const u32*>(m_output);
+				int center_y = h / 2;
+				int center_x = w / 2;
+				int center_off = center_y * (pitch / 4) + center_x;
+				int total_px = (pitch / 4) * h;
+				// Sample m_output AND raw GS VRAM at same position
+				const u32* vm = reinterpret_cast<const u32*>(m_mem.vm8());
+				// Raw VRAM at FBP block, center position (block*64 words + center_y*FBW + center_x)
+				u32 fbp_block = curFramebuffer.Block();
+				u32 fbw_px = curFramebuffer.FBW * 64;
+				u32 vram_off = fbp_block * 64 + center_y * fbw_px + center_x;
+				u32 vram_max = 1024 * 1024; // 4MB / 4 bytes
+				Console.WriteLn("@@FB_PIXELS@@ n=%u fbp=%u w=%d h=%d out_center=[%08x,%08x] vram_center=[%08x,%08x]",
+					s_fbpix_n, fbp_block, w, h,
+					(center_off < total_px) ? px[center_off] : 0u,
+					(center_off+1 < total_px) ? px[center_off+1] : 0u,
+					(vram_off < vram_max) ? vm[vram_off] : 0u,
+					(vram_off+1 < vram_max) ? vm[vram_off+1] : 0u);
+			}
+		}
 
 		int top = (h_wrap) ? ((r.bottom - r.top) * pitch) : 0;
 		int left = (w_wrap) ? (r.right - r.left) * (GSLocalMemory::m_psm[curFramebuffer.PSM].bpp / 8) : 0;
@@ -305,9 +356,43 @@ void GSVertexSWInitStatic()
 
 MULTI_ISA_UNSHARED_END
 
+// [TEMP_DIAG] per-vsync draw counters — Removal condition: 青い靄のissue解決後
+extern std::atomic<uint32_t> g_sw_draw_count;
+extern std::atomic<uint32_t> g_sw_skip_count;
+
 void GSRendererSW::Draw()
 {
+	g_sw_draw_count.fetch_add(1, std::memory_order_relaxed);
 	const GSDrawingContext* context = m_context;
+
+	// [TEMP_DIAG] @@GS_DRAW_CTX@@ — FRAME/TEX0/vertex context at Draw() entry
+	// Removal condition: BIOS browser描画after confirmed
+	{
+		static u32 s_draw_ctx_n = 0;
+		const auto& tex0 = context->TEX0;
+		// Log first 30 draws AND any TME=1 tri-strip draws (n=60-300) for animation comparison
+		bool log_early = (s_draw_ctx_n < 30);
+		bool log_anim = (s_draw_ctx_n >= 60 && s_draw_ctx_n <= 300 && PRIM->TME && m_vt.m_primclass != 3 /*GS_SPRITE_CLASS*/);
+		if (log_early || log_anim) {
+			const auto& frame = context->FRAME;
+			Console.WriteLn("@@GS_DRAW_CTX@@ n=%u FBP=%u FBW=%u PSM=%u prim=%u TME=%u FST=%u primclass=%d verts=%u",
+				s_draw_ctx_n, (u32)frame.FBP, (u32)frame.FBW, (u32)frame.PSM,
+				PRIM->PRIM, PRIM->TME, PRIM->FST, m_vt.m_primclass, m_vertex.next);
+			Console.WriteLn("@@GS_DRAW_TEX@@ n=%u TBP=%u TBW=%u PSM=%u TW=%u TH=%u TCC=%u TFX=%u CSA=%u CPSM=%u CLD=%u",
+				s_draw_ctx_n, (u32)tex0.TBP0, (u32)tex0.TBW, (u32)tex0.PSM,
+				(u32)tex0.TW, (u32)tex0.TH, (u32)tex0.TCC, (u32)tex0.TFX,
+				(u32)tex0.CSA, (u32)tex0.CPSM, (u32)tex0.CLD);
+			// Dump first vertex RGBAQ for color comparison
+			if (m_vertex.next > 0) {
+				const auto& v0 = m_vertex.buff[0];
+				Console.WriteLn("@@GS_DRAW_V0@@ n=%u RGBA=(%u,%u,%u,%u) STQ=(%.6f,%.6f,%.6f) XY=(%u,%u)",
+					s_draw_ctx_n, v0.RGBAQ.R, v0.RGBAQ.G, v0.RGBAQ.B, v0.RGBAQ.A,
+					v0.ST.S, v0.ST.T, v0.RGBAQ.Q,
+					v0.XYZ.X >> 4, v0.XYZ.Y >> 4);
+			}
+		}
+		s_draw_ctx_n++;
+	}
 
 	if (GSConfig.SaveInfo && GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()))
 	{
@@ -363,6 +448,23 @@ void GSRendererSW::Draw()
 
 	if (!GetScanlineGlobalData(sd))
 	{
+		// [TEMP_DIAG] @@GS_DRAW_SKIP@@ — GetScanlineGlobalData returned false
+		{
+			static u32 s_skip_n = 0, s_skip_total = 0;
+			s_skip_total++;
+			g_sw_skip_count.fetch_add(1, std::memory_order_relaxed);
+			if (s_skip_n < 20) {
+				const auto* ctx = m_context;
+				Console.WriteLn("@@GS_DRAW_SKIP@@ n=%u tot=%u fbmsk=%08x fpsm=%u fblk=%05x zpsm=%u zmsk=%u zte=%u ztst=%u ate=%u atst=%u aref=%u date=%u tme=%u bbox=[%d,%d,%d,%d]",
+					s_skip_n, s_skip_total,
+					ctx->FRAME.FBMSK, ctx->FRAME.PSM, ctx->FRAME.Block(),
+					ctx->ZBUF.PSM, ctx->ZBUF.ZMSK, ctx->TEST.ZTE, ctx->TEST.ZTST,
+					ctx->TEST.ATE, ctx->TEST.ATST, ctx->TEST.AREF, ctx->TEST.DATE,
+					PRIM->TME,
+					bbox.x, bbox.y, bbox.z, bbox.w);
+				s_skip_n++;
+			}
+		}
 		return;
 	}
 

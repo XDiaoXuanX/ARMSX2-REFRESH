@@ -677,6 +677,11 @@ void recBackpropSPECIAL(u32 code, EEINST* prev, EEINST* pinst)
 			recBackpropSetGPRRead(rt);
 			break;
 
+		case 1: // movci (movf/movt)
+			recBackpropSetGPRWrite(rd);
+			recBackpropSetGPRRead(rs);
+			break;
+
 		case 8: // jr
 			recBackpropSetGPRRead(rs);
 			break;

@@ -13,11 +13,149 @@
 
 using namespace R5900;
 
+extern "C" void LogUnified(const char* fmt, ...);
+
+HwRegRingBuffer g_HwRegRing;
+const int HwRegRingBuffer::SIZE;
+
+HwRegRingBuffer::HwRegRingBuffer() : idx(0), write_count(0), read_count(0), push_count(0) {
+    Console.WriteLn("@@HWMON_BUILD@@ file=Hw.cpp line=%d", __LINE__);
+}
+
+void HwRegRingBuffer::Push(u32 pc, u32 vaddr, u32 paddr, u32 width, u64 val, bool is_write) {
+    // Filter: MMIO (0x1000xxxx), BIOS regs (0x1F80xxxx), or typical Handler mapped area (0xB...)
+    if ((paddr < 0x10000000 || paddr > 0x1001FFFF) && 
+        (paddr < 0x1F800000 || paddr > 0x1F80FFFF) &&
+        (vaddr < 0xB0000000 || vaddr > 0xBFFFFFFF)) {
+        return;
+    }
+
+    static bool once = false;
+    if (!once) {
+        Console.WriteLn("@@HWMON_PATH@@ HwRegRingBuffer::Push passed filter! paddr=%x RW=%d", paddr, is_write);
+        once = true;
+    }
+
+    int i = idx;
+    entries[i].caller_pc = pc;
+    entries[i].vaddr = vaddr;
+    entries[i].paddr = paddr;
+    entries[i].width = width;
+    entries[i].val = val;
+    entries[i].is_write = is_write;
+    
+    idx = (i + 1) % SIZE;
+    push_count++;
+    if (is_write) write_count++;
+    else read_count++;
+}
+
+void HwRegRingBuffer::DumpLast(int n) {
+    int total = push_count; // Atomic load
+    int count = std::min(total, std::min(n, SIZE));
+    int start = (idx - count + SIZE) % SIZE;
+    
+    for (int i = 0; i < count; i++) {
+        int curr = (start + i) % SIZE;
+        const HwRegEntry& e = entries[curr];
+        Console.WriteLn("@@HWREG@@ i=%02d caller_pc=%08x paddr=%08x vaddr=%08x w=%u val=%016llx RD=%d",
+            i, e.caller_pc, e.paddr, e.vaddr, e.width, e.val, !e.is_write);
+    }
+}
+
+void HwRegRingBuffer::DumpStats() {
+    struct Stat { u32 paddr; int hits; bool is_write; u64 val; };
+    Stat r_stats[SIZE];
+    Stat w_stats[SIZE];
+    int r_count = 0;
+    int w_count = 0;
+    
+    int total_limit = std::min((int)push_count, (int)SIZE);
+    
+    // Iterate ring buffer
+    for (int i = 0; i < total_limit; i++) {
+        int idx_ring = (idx - 1 - i + SIZE) % SIZE;
+        const HwRegEntry& e = entries[idx_ring];
+        
+        if (e.is_write) {
+            bool found = false;
+            for (int j=0; j<w_count; j++) {
+                if (w_stats[j].paddr == e.paddr) {
+                    w_stats[j].hits++;
+                    w_stats[j].val = e.val; // Update latest value
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                w_stats[w_count] = { e.paddr, 1, true, e.val };
+                w_count++;
+            }
+        } else {
+            bool found = false;
+            for (int j=0; j<r_count; j++) {
+                if (r_stats[j].paddr == e.paddr) {
+                    r_stats[j].hits++;
+                    r_stats[j].val = e.val; // Update latest value
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                r_stats[r_count] = { e.paddr, 1, false, e.val };
+                r_count++;
+            }
+        }
+    }
+    
+    // Sort Reads
+    for (int i = 0; i < r_count - 1; i++) {
+        for (int j = 0; j < r_count - i - 1; j++) {
+            if (r_stats[j].hits < r_stats[j+1].hits) {
+                Stat temp = r_stats[j];
+                r_stats[j] = r_stats[j+1];
+                r_stats[j+1] = temp;
+            }
+        }
+    }
+    // Sort Writes
+    for (int i = 0; i < w_count - 1; i++) {
+        for (int j = 0; j < w_count - i - 1; j++) {
+            if (w_stats[j].hits < w_stats[j+1].hits) {
+                Stat temp = w_stats[j];
+                w_stats[j] = w_stats[j+1];
+                w_stats[j+1] = temp;
+            }
+        }
+    }
+    
+    // Print READ Top 8
+    if (r_count == 0) {
+        Console.WriteLn("@@HWREG_TOP@@ READ <none> total=%d", (int)push_count);
+    } else {
+        for (int i = 0; i < r_count && i < 8; i++) {
+             Console.WriteLn("@@HWREG_TOP@@ READ #%d paddr=%08x hits=%d last_val=%08x", 
+                i+1, r_stats[i].paddr, r_stats[i].hits, (u32)r_stats[i].val);
+        }
+    }
+    
+    // Print WRITE Top 8
+    if (w_count == 0) {
+        Console.WriteLn("@@HWREG_TOP@@ WRITE <none> total=%d", (int)push_count);
+    } else {
+        for (int i = 0; i < w_count && i < 8; i++) {
+             Console.WriteLn("@@HWREG_TOP@@ WRITE #%d paddr=%08x hits=%d last_val=%08x", 
+                i+1, w_stats[i].paddr, w_stats[i].hits, (u32)w_stats[i].val);
+        }
+    }
+}
+
 const int rdram_devices = 2;	// put 8 for TOOL and 2 for PS2 and PSX
 int rdram_sdevid = 0;
 
 void hwReset()
 {
+    Console.WriteLn("@@HWMON_BUILD@@ file=Hw.cpp func=hwReset line=%d", __LINE__);
 	std::memset(eeHw, 0, sizeof(eeHw));
 
 	psHu32(SBUS_F260) = 0x1D000060;
@@ -91,6 +229,24 @@ __fi uint dmacInterrupt()
 void hwIntcIrq(int n)
 {
 	psHu32(INTC_STAT) |= 1<<n;
+	static int sbus_log_count = 0;
+	if (n == INTC_SBUS && sbus_log_count < 8)
+	{
+		LogUnified("@@SBUS_IRQ@@ n=%d stat=%08x mask=%08x\n", n, psHu32(INTC_STAT), psHu32(INTC_MASK));
+		sbus_log_count++;
+	}
+	// [TEMP_DIAG] @@INTC_VBLANK@@
+	if (n == INTC_VBLANK_S) {
+		static int s_vblank_irq_n = 0;
+		if (s_vblank_irq_n < 10 || (s_vblank_irq_n % 100 == 0 && s_vblank_irq_n < 500)) {
+			u32 stat = psHu32(INTC_STAT);
+			u32 mask = psHu32(INTC_MASK);
+			bool will_fire = (mask & (1 << n)) != 0;
+			Console.WriteLn("@@INTC_VBLANK@@ n=%d stat=%08x mask=%08x will_fire=%d ee_pc=%08x",
+				s_vblank_irq_n, stat, mask, will_fire ? 1 : 0, cpuRegs.pc);
+		}
+		s_vblank_irq_n++;
+	}
 	if(psHu32(INTC_MASK) & (1<<n))cpuTestINTCInts();
 }
 
@@ -359,4 +515,3 @@ bool hwDmacSrcChain(DMACh& dma, int id)
 
 	return false;
 }
-

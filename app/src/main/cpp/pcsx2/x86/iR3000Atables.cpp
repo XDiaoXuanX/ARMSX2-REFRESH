@@ -18,6 +18,59 @@ using namespace x86Emitter;
 extern int g_psxWriteOk;
 extern u32 g_psxMaxRecMem;
 
+static void antigravityLogIopBranchCmp(u32 branch_pc, u32 kind, u32 rs, u32 rt)
+{
+	// [iter122] @@ADV_BNE@@ – advance block BNE (psxpc=0xBFC02728) flush-point diagnostic.
+	// Fires AFTER _psxFlushAllDirty() so psxRegs.r[9] reflects the JIT-committed t1 value.
+	// Cap at 5 entries (fires every loop iteration so we only want the first few).
+	if (branch_pc == 0xBFC02728u)
+	{
+		static int s_adv_n = 0;
+		if (s_adv_n < 5)
+		{
+			++s_adv_n;
+			Console.WriteLn(
+				"@@ADV_BNE@@ n=%d t0=%08x t1=%08x t2=%08x v0=%08x",
+				s_adv_n, psxRegs.GPR.r[8], psxRegs.GPR.r[9], psxRegs.GPR.r[10], psxRegs.GPR.r[2]);
+		}
+		return;
+	}
+
+	// [iter114/115] @@IOP_SCAN_BR@@ – trace branches inside the BIOS ROM scan function (bfc02640-bfc02730)
+	// branch_pc = psxpc AFTER delay slot (not the branch instruction itself)
+	// Exclude bfc02674 (BNE bfc0266c RESE mismatch, delay-slot-pc) and bfc02728 (BNE bfc02720 outer loop, delay-slot-pc)
+	if (branch_pc >= 0xBFC02640u && branch_pc <= 0xBFC02730u &&
+		branch_pc != 0xBFC02674u && branch_pc != 0xBFC02728u)
+	{
+		static int s_scan_n = 0;
+		if (s_scan_n < 100)
+		{
+			++s_scan_n;
+			const u32 lhs = (rs == 0) ? 0 : psxRegs.GPR.r[rs];
+			const u32 rhs = (rt == 0) ? 0 : psxRegs.GPR.r[rt];
+			// [iter116] also log t1 (r9) to verify LW v0,-8(t1) addr = t1-8 = t0+4
+			Console.WriteLn(
+				"@@IOP_SCAN_BR@@ n=%d pc=%08x lhs=%08x rhs=%08x eq=%u t0=%08x t1=%08x t2=%08x t3=%08x",
+				s_scan_n, branch_pc, lhs, rhs, (lhs == rhs) ? 1u : 0u,
+				psxRegs.GPR.r[8], psxRegs.GPR.r[9], psxRegs.GPR.r[10], psxRegs.GPR.r[11]);
+		}
+		return;
+	}
+
+	static int s_count = 0;
+	if (s_count >= 80)
+		return;
+	++s_count;
+
+	const u32 lhs = (rs == 0) ? 0 : psxRegs.GPR.r[rs];
+	const u32 rhs = (rt == 0) ? 0 : psxRegs.GPR.r[rt];
+	const u32 eq = (lhs == rhs) ? 1u : 0u;
+	Console.WriteLn(
+		"@@IOP_BR_CMP@@ n=%d pc=%08x kind=%u rs=%u rt=%u lhs=%08x rhs=%08x eq=%u code=%08x curpc=%08x a0=%08x v0=%08x v1=%08x",
+		s_count, branch_pc, kind, rs, rt, lhs, rhs, eq, psxRegs.code, psxRegs.pc, psxRegs.GPR.n.a0, psxRegs.GPR.n.v0,
+		psxRegs.GPR.n.v1);
+}
+
 // R3000A instruction implementation
 #define REC_FUNC(f) \
 	static void rpsx##f() \
@@ -61,13 +114,17 @@ static int rpsxAllocRegIfUsed(int reg, int mode)
 
 static void rpsxMoveStoT(int info)
 {
-	if (EEREC_T == EEREC_S)
+	// [iter125] Reverted iter123 (_Rs_!=_Rt_ guard removed). In-place ops (_Rs_==_Rt_)
+	// reuse the existing JIT slot (from LW WRITE alloc in same block) which already has
+	// the correct value. armLoad of stale psxRegs is WRONG when the slot has live data.
+	// Cross-block t1 case fixed separately via force-noconst at bfc02714 in iR3000A.cpp.
+	if ((info & PROCESS_EE_S) && EEREC_T == EEREC_S)
 		return;
 
-    auto reg32 = a64::WRegister(EEREC_T);
-	if (info & PROCESS_EE_S) {
+    auto reg32 = HostW(EEREC_T);
+	if ((info & PROCESS_EE_S) && EEREC_T != EEREC_S) {
 //        xMOV(xRegister32(EEREC_T), xRegister32(EEREC_S));
-        armAsm->Mov(reg32, a64::WRegister(EEREC_S));
+        armAsm->Mov(reg32, HostW(EEREC_S));
     }
 	else {
 //        xMOV(xRegister32(EEREC_T), ptr32[&psxRegs.GPR.r[_Rs_]]);
@@ -77,13 +134,15 @@ static void rpsxMoveStoT(int info)
 
 static void rpsxMoveStoD(int info)
 {
-	if (EEREC_D == EEREC_S)
+	// [iter125] Reverted iter124 (_Rs_!=_Rd_ guard removed). Same reasoning as rpsxMoveStoT:
+	// in-place ops reuse the existing JIT slot which already holds the correct value.
+	if ((info & PROCESS_EE_S) && EEREC_D == EEREC_S)
 		return;
 
-    auto reg32 = a64::WRegister(EEREC_D);
-	if (info & PROCESS_EE_S) {
+    auto reg32 = HostW(EEREC_D);
+	if ((info & PROCESS_EE_S) && EEREC_D != EEREC_S) {
 //        xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-        armAsm->Mov(reg32, a64::WRegister(EEREC_S));
+        armAsm->Mov(reg32, HostW(EEREC_S));
     }
 	else {
 //        xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
@@ -93,13 +152,14 @@ static void rpsxMoveStoD(int info)
 
 static void rpsxMoveTtoD(int info)
 {
-	if (EEREC_D == EEREC_T)
+	// [iter119] Same fix as rpsxMoveStoD: only skip when PROCESS_EE_T is genuinely set.
+	if ((info & PROCESS_EE_T) && EEREC_D == EEREC_T)
 		return;
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = HostW(EEREC_D);
 	if (info & PROCESS_EE_T) {
 //        xMOV(xRegister32(EEREC_D), xRegister32(EEREC_T));
-        armAsm->Mov(reg32, a64::WRegister(EEREC_T));
+        armAsm->Mov(reg32, HostW(EEREC_T));
     }
 	else {
 //        xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
@@ -111,7 +171,7 @@ static void rpsxMoveSToECX(int info)
 {
 	if (info & PROCESS_EE_S) {
 //        xMOV(ecx, xRegister32(EEREC_S));
-        armAsm->Mov(ECX, a64::WRegister(EEREC_S));
+        armAsm->Mov(ECX, HostW(EEREC_S));
     }
 	else {
 //        xMOV(ecx, ptr32[&psxRegs.GPR.r[_Rs_]]);
@@ -139,7 +199,7 @@ static void rpsxCopyReg(int dest, int src)
 		{
 			if (rdest >= 0) {
 //                xMOV(xRegister32(rdest), g_psxConstRegs[src]);
-                armAsm->Mov(a64::WRegister(rdest), g_psxConstRegs[src]);
+                armAsm->Mov(HostW(rdest), g_psxConstRegs[src]);
             }
 			else {
 //                xMOV(ptr32[&psxRegs.GPR.r[dest]], g_psxConstRegs[src]);
@@ -157,17 +217,17 @@ static void rpsxCopyReg(int dest, int src)
 	if (rsrc >= 0 && rdest >= 0)
 	{
 //		xMOV(xRegister32(rdest), xRegister32(rsrc));
-        armAsm->Mov(a64::WRegister(rdest), a64::WRegister(rsrc));
+        armAsm->Mov(HostW(rdest), HostW(rsrc));
 	}
 	else if (rdest >= 0)
 	{
 //		xMOV(xRegister32(rdest), ptr32[&psxRegs.GPR.r[src]]);
-        armLoad(a64::WRegister(rdest), PTR_CPU(psxRegs.GPR.r[src]));
+        armLoad(HostW(rdest), PTR_CPU(psxRegs.GPR.r[src]));
 	}
 	else if (rsrc >= 0)
 	{
 //		xMOV(ptr32[&psxRegs.GPR.r[dest]], xRegister32(rsrc));
-        armStore(PTR_CPU(psxRegs.GPR.r[dest]), a64::WRegister(rsrc));
+        armStore(PTR_CPU(psxRegs.GPR.r[dest]), HostW(rsrc));
 	}
 	else
 	{
@@ -190,8 +250,13 @@ static void rpsxADDIU_(int info)
 	rpsxMoveStoT(info);
 	if (_Imm_ != 0) {
 //        xADD(xRegister32(EEREC_T), _Imm_);
-        armAsm->Add(a64::WRegister(EEREC_T), a64::WRegister(EEREC_T), _Imm_);
+        armAsm->Add(HostW(EEREC_T), HostW(EEREC_T), _Imm_);
     }
+	// [iter121] allocator 枯渇で PROCESS_EE_T 未configの場合、HostW(EEREC_T)=HostW(0)=scratch
+	// になり _psxFlushAllDirty() でフラッシュされない。明示的に psxRegs へ書き戻す。
+	if (!(info & PROCESS_EE_T) && _Rt_ != 0) {
+		armStore(PTR_CPU(psxRegs.GPR.r[_Rt_]), HostW(EEREC_T));
+	}
 }
 
 PSXRECOMPILE_CONSTCODE1(ADDIU, XMMINFO_WRITET | XMMINFO_READS);
@@ -206,27 +271,17 @@ static void rpsxSLTI_const()
 
 static void rpsxSLTI_(int info)
 {
-	const a64::WRegister dreg((_Rt_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_T);
-//	xXOR(dreg, dreg);
-    armAsm->Eor(dreg, dreg, dreg);
+	// [R98 FIX] Removed EOR before CSET — ARM64 CSET produces 0/1 directly.
+	// EOR destroyed source register when allocator assigned same host register.
+	// Same bug class as R5900 SLTIU fix (R68/P16).
+	if (info & PROCESS_EE_S)
+		armAsm->Cmp(HostW(EEREC_S), _Imm_);
+	else
+		armAsm->Cmp(armLoad(PTR_CPU(psxRegs.GPR.r[_Rs_])), _Imm_);
 
-	if (info & PROCESS_EE_S) {
-//        xCMP(xRegister32(EEREC_S), _Imm_);
-        armAsm->Cmp(a64::WRegister(EEREC_S), _Imm_);
-    }
-	else {
-//        xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], _Imm_);
-        armAsm->Cmp(armLoad(PTR_CPU(psxRegs.GPR.r[_Rs_])), _Imm_);
-    }
-
-//	xSETL(xRegister8(dreg));
-    armAsm->Cset(dreg, a64::Condition::lt);
-
-	if (dreg.GetCode() != EEREC_T)
-	{
-		std::swap(x86regs[dreg.GetCode()], x86regs[EEREC_T]);
-		_freeX86reg(EEREC_T);
-	}
+	armAsm->Cset(HostW(EEREC_T), a64::Condition::lt);
+	// Force-store to psxRegs to survive allocator eviction.
+	armStore(PTR_CPU(psxRegs.GPR.r[_Rt_]), HostW(EEREC_T));
 }
 
 PSXRECOMPILE_CONSTCODE1(SLTI, XMMINFO_WRITET | XMMINFO_READS | XMMINFO_NORENAME);
@@ -239,38 +294,25 @@ static void rpsxSLTIU_const()
 
 static void rpsxSLTIU_(int info)
 {
-	const a64::WRegister dreg((_Rt_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_T);
-//	xXOR(dreg, dreg);
-    armAsm->Eor(dreg, dreg, dreg);
+	// [R98 FIX] Removed EOR before CSET + force-store. Same fix as rpsxSLTI_.
+	if (info & PROCESS_EE_S)
+		armAsm->Cmp(HostW(EEREC_S), _Imm_);
+	else
+		armAsm->Cmp(armLoad(PTR_CPU(psxRegs.GPR.r[_Rs_])), _Imm_);
 
-	if (info & PROCESS_EE_S) {
-//        xCMP(xRegister32(EEREC_S), _Imm_);
-        armAsm->Cmp(a64::WRegister(EEREC_S), _Imm_);
-    }
-	else {
-//        xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], _Imm_);
-        armAsm->Cmp(armLoad(PTR_CPU(psxRegs.GPR.r[_Rs_])), _Imm_);
-    }
-
-//	xSETB(xRegister8(dreg));
-    armAsm->Cset(dreg, a64::Condition::cc);
-
-	if (dreg.GetCode() != EEREC_T)
-	{
-		std::swap(x86regs[dreg.GetCode()], x86regs[EEREC_T]);
-		_freeX86reg(EEREC_T);
-	}
+	armAsm->Cset(HostW(EEREC_T), a64::Condition::cc);
+	armStore(PTR_CPU(psxRegs.GPR.r[_Rt_]), HostW(EEREC_T));
 }
 
 PSXRECOMPILE_CONSTCODE1(SLTIU, XMMINFO_WRITET | XMMINFO_READS | XMMINFO_NORENAME);
 
-static void rpsxLogicalOpI(u64 info, int op)
+static void rpsxLogicalOpI(int info, int op)
 {
 	if (_ImmU_ != 0)
 	{
 		rpsxMoveStoT(info);
 
-        auto reg32 = a64::WRegister(EEREC_T);
+        auto reg32 = HostW(EEREC_T);
 		switch (op)
 		{
 			case 0:
@@ -294,7 +336,7 @@ static void rpsxLogicalOpI(u64 info, int op)
 		if (op == 0)
 		{
 //			xXOR(xRegister32(EEREC_T), xRegister32(EEREC_T));
-            auto reg32 = a64::WRegister(EEREC_T);
+            auto reg32 = HostW(EEREC_T);
             armAsm->Eor(reg32, reg32, reg32);
 		}
 		else if (EEREC_T != EEREC_S)
@@ -363,7 +405,7 @@ static void rpsxADDU_consts(int info)
 	rpsxMoveTtoD(info);
 	if (cval != 0) {
 //        xADD(xRegister32(EEREC_D), cval);
-        armAsm->Add(a64::WRegister(EEREC_D), a64::WRegister(EEREC_D), cval);
+        armAsm->Add(HostW(EEREC_D), HostW(EEREC_D), cval);
     }
 }
 
@@ -373,44 +415,44 @@ static void rpsxADDU_constt(int info)
 	rpsxMoveStoD(info);
 	if (cval != 0) {
 //        xADD(xRegister32(EEREC_D), cval);
-        armAsm->Add(a64::WRegister(EEREC_D), a64::WRegister(EEREC_D), cval);
+        armAsm->Add(HostW(EEREC_D), HostW(EEREC_D), cval);
     }
 }
 
 void rpsxADDU_(int info)
 {
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = HostW(EEREC_D);
 	if ((info & PROCESS_EE_S) && (info & PROCESS_EE_T))
 	{
 		if (EEREC_D == EEREC_S)
 		{
 //			xADD(xRegister32(EEREC_D), xRegister32(EEREC_T));
-            armAsm->Add(reg32, reg32, a64::WRegister(EEREC_T));
+            armAsm->Add(reg32, reg32, HostW(EEREC_T));
 		}
 		else if (EEREC_D == EEREC_T)
 		{
 //			xADD(xRegister32(EEREC_D), xRegister32(EEREC_S));
-            armAsm->Add(reg32, reg32, a64::WRegister(EEREC_S));
+            armAsm->Add(reg32, reg32, HostW(EEREC_S));
 		}
 		else
 		{
 //			xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-            armAsm->Mov(reg32, a64::WRegister(EEREC_S));
+            armAsm->Mov(reg32, HostW(EEREC_S));
 //			xADD(xRegister32(EEREC_D), xRegister32(EEREC_T));
-            armAsm->Add(reg32, reg32, a64::WRegister(EEREC_T));
+            armAsm->Add(reg32, reg32, HostW(EEREC_T));
 		}
 	}
 	else if (info & PROCESS_EE_S)
 	{
 //		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-        armAsm->Mov(reg32, a64::WRegister(EEREC_S));
+        armAsm->Mov(reg32, HostW(EEREC_S));
 //		xADD(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
         armAsm->Add(reg32, reg32, armLoad(PTR_CPU(psxRegs.GPR.r[_Rt_])));
 	}
 	else if (info & PROCESS_EE_T)
 	{
 //		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_T));
-        armAsm->Mov(reg32, a64::WRegister(EEREC_T));
+        armAsm->Mov(reg32, HostW(EEREC_T));
 //		xADD(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
         armAsm->Add(reg32, reg32, armLoad(PTR_CPU(psxRegs.GPR.r[_Rs_])));
 	}
@@ -436,13 +478,13 @@ static void rpsxSUBU_consts(int info)
 {
 	// more complex because Rt can be Rd, and we're reversing the op
 	const s32 sval = g_psxConstRegs[_Rs_];
-	const a64::WRegister dreg((_Rt_ == _Rd_) ? EAX.GetCode() : EEREC_D);
+	const a64::WRegister dreg((_Rt_ == _Rd_) ? EAX : HostW(EEREC_D));
 //	xMOV(dreg, sval);
     armAsm->Mov(dreg, sval);
 
 	if (info & PROCESS_EE_T) {
 //        xSUB(dreg, xRegister32(EEREC_T));
-        armAsm->Sub(dreg, dreg, a64::WRegister(EEREC_T));
+        armAsm->Sub(dreg, dreg, HostW(EEREC_T));
     }
 	else {
 //        xSUB(dreg, ptr32[&psxRegs.GPR.r[_Rt_]]);
@@ -450,7 +492,7 @@ static void rpsxSUBU_consts(int info)
     }
 
 //	xMOV(xRegister32(EEREC_D), dreg);
-    armAsm->Mov(a64::WRegister(EEREC_D), dreg);
+    armAsm->Mov(HostW(EEREC_D), dreg);
 }
 
 static void rpsxSUBU_constt(int info)
@@ -459,13 +501,13 @@ static void rpsxSUBU_constt(int info)
 	rpsxMoveStoD(info);
 	if (tval != 0) {
 //        xSUB(xRegister32(EEREC_D), tval);
-        armAsm->Sub(a64::WRegister(EEREC_D), a64::WRegister(EEREC_D), tval);
+        armAsm->Sub(HostW(EEREC_D), HostW(EEREC_D), tval);
     }
 }
 
 static void rpsxSUBU_(int info)
 {
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = HostW(EEREC_D);
 
 	// Rd = Rs - Rt
 	if (_Rs_ == _Rt_)
@@ -481,42 +523,42 @@ static void rpsxSUBU_(int info)
 		if (EEREC_D == EEREC_S)
 		{
 //			xSUB(xRegister32(EEREC_D), xRegister32(EEREC_T));
-            armAsm->Sub(reg32, reg32, a64::WRegister(EEREC_T));
+            armAsm->Sub(reg32, reg32, HostW(EEREC_T));
 		}
 		else if (EEREC_D == EEREC_T)
 		{
 			// D might equal T
-			const a64::WRegister dreg((_Rt_ == _Rd_) ? EAX.GetCode() : EEREC_D);
+			const a64::WRegister dreg((_Rt_ == _Rd_) ? EAX : HostW(EEREC_D));
 //			xMOV(dreg, xRegister32(EEREC_S));
-            armAsm->Mov(dreg, a64::WRegister(EEREC_S));
+            armAsm->Mov(dreg, HostW(EEREC_S));
 //			xSUB(dreg, xRegister32(EEREC_T));
-            armAsm->Sub(dreg, dreg, a64::WRegister(EEREC_T));
+            armAsm->Sub(dreg, dreg, HostW(EEREC_T));
 //			xMOV(xRegister32(EEREC_D), dreg);
             armAsm->Mov(reg32, dreg);
 		}
 		else
 		{
 //			xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-            armAsm->Mov(reg32, a64::WRegister(EEREC_S));
+            armAsm->Mov(reg32, HostW(EEREC_S));
 //			xSUB(xRegister32(EEREC_D), xRegister32(EEREC_T));
-            armAsm->Sub(reg32, reg32, a64::WRegister(EEREC_T));
+            armAsm->Sub(reg32, reg32, HostW(EEREC_T));
 		}
 	}
 	else if (info & PROCESS_EE_S)
 	{
 //		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-        armAsm->Mov(reg32, a64::WRegister(EEREC_S));
+        armAsm->Mov(reg32, HostW(EEREC_S));
 //		xSUB(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
         armAsm->Sub(reg32, reg32, armLoad(PTR_CPU(psxRegs.GPR.r[_Rt_])));
 	}
 	else if (info & PROCESS_EE_T)
 	{
 		// D might equal T
-		const a64::WRegister dreg((_Rt_ == _Rd_) ? EAX.GetCode() : EEREC_D);
+		const a64::WRegister dreg((_Rt_ == _Rd_) ? EAX : HostW(EEREC_D));
 //		xMOV(dreg, ptr32[&psxRegs.GPR.r[_Rs_]]);
         armLoad(dreg, PTR_CPU(psxRegs.GPR.r[_Rs_]));
 //		xSUB(dreg, xRegister32(EEREC_T));
-        armAsm->Sub(dreg, dreg, a64::WRegister(EEREC_T));
+        armAsm->Sub(dreg, dreg, HostW(EEREC_T));
 //		xMOV(xRegister32(EEREC_D), dreg);
         armAsm->Mov(reg32, dreg);
 	}
@@ -585,7 +627,7 @@ static void rpsxLogicalOp_constv(LogicalOp op, int info, int creg, u32 vreg, int
 
 	const s32 cval = static_cast<s32>(g_psxConstRegs[creg]);
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = HostW(EEREC_D);
 	if (hasFixed && cval == fixedInput)
 	{
 //		xMOV(xRegister32(EEREC_D), fixedOutput);
@@ -595,7 +637,7 @@ static void rpsxLogicalOp_constv(LogicalOp op, int info, int creg, u32 vreg, int
 	{
 		if (regv >= 0) {
 //            xMOV(xRegister32(EEREC_D), xRegister32(regv));
-            armAsm->Mov(reg32, a64::WRegister(regv));
+            armAsm->Mov(reg32, HostW(regv));
         }
 		else {
 //            xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[vreg]]);
@@ -650,7 +692,7 @@ static void rpsxLogicalOp(LogicalOp op, int info)
 		std::swap(regs, regt);
 	}
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = HostW(EEREC_D);
 	if (op == LogicalOp::XOR && rs == rt)
 	{
 //		xXOR(xRegister32(EEREC_D), xRegister32(EEREC_D));
@@ -660,7 +702,7 @@ static void rpsxLogicalOp(LogicalOp op, int info)
 	{
 		if (regs >= 0) {
 //            xMOV(xRegister32(EEREC_D), xRegister32(regs));
-            armAsm->Mov(reg32, a64::WRegister(regs));
+            armAsm->Mov(reg32, HostW(regs));
         }
 		else {
 //            xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[rs]]);
@@ -672,13 +714,13 @@ static void rpsxLogicalOp(LogicalOp op, int info)
             switch (xOP)
             {
                 case LogicalOp::AND:
-                    armAsm->And(reg32, reg32, a64::WRegister(regt));
+                    armAsm->And(reg32, reg32, HostW(regt));
                     break;
                 case LogicalOp::NOR: case LogicalOp::OR:
-                    armAsm->Orr(reg32, reg32, a64::WRegister(regt));
+                    armAsm->Orr(reg32, reg32, HostW(regt));
                     break;
                 case LogicalOp::XOR:
-                    armAsm->Eor(reg32, reg32, a64::WRegister(regt));
+                    armAsm->Eor(reg32, reg32, HostW(regt));
                     break;
                 case LogicalOp::BAD:
                     break;
@@ -807,64 +849,53 @@ static void rpsxSLT_const()
 
 static void rpsxSLTs_const(int info, int sign, int st)
 {
+	// [R98 FIX] Removed EOR before CSET + force-store. Same bug class as R5900 SLT (R96).
 	const s32 cval = g_psxConstRegs[st ? _Rt_ : _Rs_];
+	const a64::Condition& SET = st ? (sign ? a64::Condition::lt : a64::Condition::cc) : (sign ? a64::Condition::gt : a64::Condition::hi);
 
-//	const xImpl_Set& SET = st ? (sign ? xSETL : xSETB) : (sign ? xSETG : xSETA);
-    const a64::Condition& SET = st ? (sign ? a64::Condition::lt : a64::Condition::cc) : (sign ? a64::Condition::gt : a64::Condition::hi);
-
-	const a64::WRegister dreg((_Rd_ == (st ? _Rs_ : _Rt_)) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_D);
 	const int regs = st ? ((info & PROCESS_EE_S) ? EEREC_S : -1) : ((info & PROCESS_EE_T) ? EEREC_T : -1);
-//	xXOR(dreg, dreg);
-    armAsm->Eor(dreg, dreg, dreg);
 
-	if (regs >= 0) {
-//        xCMP(xRegister32(regs), cval);
-        armAsm->Cmp(a64::WRegister(regs), cval);
-    }
-	else {
-//        xCMP(ptr32[&psxRegs.GPR.r[st ? _Rs_ : _Rt_]], cval);
-        armAsm->Cmp(armLoad(PTR_CPU(psxRegs.GPR.r[st ? _Rs_ : _Rt_])), cval);
-    }
-//	SET(xRegister8(dreg));
-    armAsm->Cset(dreg, SET);
+	if (regs >= 0)
+		armAsm->Cmp(HostW(regs), cval);
+	else
+		armAsm->Cmp(armLoad(PTR_CPU(psxRegs.GPR.r[st ? _Rs_ : _Rt_])), cval);
 
-	if (dreg.GetCode() != EEREC_D)
-	{
-		std::swap(x86regs[dreg.GetCode()], x86regs[EEREC_D]);
-		_freeX86reg(EEREC_D);
-	}
+	armAsm->Cset(HostW(EEREC_D), SET);
+	if (_Rd_ != 0)
+		armStore(PTR_CPU(psxRegs.GPR.r[_Rd_]), HostW(EEREC_D));
 }
 
 static void rpsxSLTs_(int info, int sign)
 {
-//	const xImpl_Set& SET = sign ? xSETL : xSETB;
-    const a64::Condition& SET = (sign ? a64::Condition::lt : a64::Condition::cc);
+	// [R98 FIX] Removed EOR before CSET + overlap handling via scratch + force-store.
+	// Same bug class as R5900 SLT (R96).
+	const a64::Condition& SET = (sign ? a64::Condition::lt : a64::Condition::cc);
+	const bool overlap = (_Rd_ == _Rt_ || _Rd_ == _Rs_);
 
-	// need to keep Rs/Rt around.
-	const a64::WRegister dreg((_Rd_ == _Rt_ || _Rd_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_D);
-
-	// force Rs into a register, may as well cache it since we're loading anyway.
 	const int regs = (info & PROCESS_EE_S) ? EEREC_S : _allocX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 
-//	xXOR(dreg, dreg);
-    armAsm->Eor(dreg, dreg, dreg);
-	if (info & PROCESS_EE_T) {
-//        xCMP(xRegister32(regs), xRegister32(EEREC_T));
-        armAsm->Cmp(a64::WRegister(regs), a64::WRegister(EEREC_T));
-    }
-	else {
-//        xCMP(xRegister32(regs), ptr32[&psxRegs.GPR.r[_Rt_]]);
-        armAsm->Cmp(a64::WRegister(regs), armLoad(PTR_CPU(psxRegs.GPR.r[_Rt_])));
-    }
-
-//	SET(xRegister8(dreg));
-    armAsm->Cset(dreg, SET);
-
-	if (dreg.GetCode() != EEREC_D)
+	if (overlap)
 	{
-		std::swap(x86regs[dreg.GetCode()], x86regs[EEREC_D]);
-		_freeX86reg(EEREC_D);
+		// Use scratch register for CMP to avoid destroying source via EEREC_D alias.
+		// R3000A uses 32-bit registers — must use W variants, not X/64-bit.
+		armAsm->Mov(a64::w16, HostW(regs));
+		if (info & PROCESS_EE_T)
+			armAsm->Cmp(a64::w16, HostW(EEREC_T));
+		else
+			armAsm->Cmp(a64::w16, armLoad(PTR_CPU(psxRegs.GPR.r[_Rt_])));
+		armAsm->Cset(HostW(EEREC_D), SET);
 	}
+	else
+	{
+		if (info & PROCESS_EE_T)
+			armAsm->Cmp(HostW(regs), HostW(EEREC_T));
+		else
+			armAsm->Cmp(HostW(regs), armLoad(PTR_CPU(psxRegs.GPR.r[_Rt_])));
+		armAsm->Cset(HostW(EEREC_D), SET);
+	}
+
+	if (_Rd_ != 0)
+		armStore(PTR_CPU(psxRegs.GPR.r[_Rd_]), HostW(EEREC_D));
 }
 
 static void rpsxSLT_consts(int info)
@@ -926,11 +957,12 @@ static void rpsxWritebackHILO(int info)
 	if (EEINST_LIVETEST(PSX_LO))
 	{
 		if (info & PROCESS_EE_LO) {
-//            xMOV(xRegister32(EEREC_LO), eax);
-            armAsm->Mov(a64::WRegister(EEREC_LO), EAX);
+            armAsm->Mov(HostW(EEREC_LO), EAX);
+            // [R98 FIX] Force-store LO to psxRegs to survive allocator eviction.
+            // Same bug class as R5900 MULT Rd writeback (R98).
+            armStore(PTR_CPU(psxRegs.GPR.n.lo), HostW(EEREC_LO));
         }
 		else {
-//            xMOV(ptr32[&psxRegs.GPR.n.lo], eax);
             armStore(PTR_CPU(psxRegs.GPR.n.lo), EAX);
         }
 	}
@@ -938,11 +970,11 @@ static void rpsxWritebackHILO(int info)
 	if (EEINST_LIVETEST(PSX_HI))
 	{
 		if (info & PROCESS_EE_HI) {
-//            xMOV(xRegister32(EEREC_HI), edx);
-            armAsm->Mov(a64::WRegister(EEREC_HI), EDX);
+            armAsm->Mov(HostW(EEREC_HI), EDX);
+            // [R98 FIX] Force-store HI to psxRegs.
+            armStore(PTR_CPU(psxRegs.GPR.n.hi), HostW(EEREC_HI));
         }
 		else {
-//            xMOV(ptr32[&psxRegs.GPR.n.hi], edx);
             armStore(PTR_CPU(psxRegs.GPR.n.hi), EDX);
         }
 	}
@@ -959,7 +991,7 @@ static void rpsxMULTsuperconst(int info, int sreg, int imm, int sign)
 	{
 		if (regs >= 0) {
 //            xMUL(xRegister32(regs));
-            armAsm->Smull(RAX, EAX, a64::WRegister(regs));
+            armAsm->Smull(RAX, EAX, HostW(regs));
         }
 		else {
 //            xMUL(ptr32[&psxRegs.GPR.r[sreg]]);
@@ -970,7 +1002,7 @@ static void rpsxMULTsuperconst(int info, int sreg, int imm, int sign)
 	{
 		if (regs >= 0) {
 //            xUMUL(xRegister32(regs));
-            armAsm->Umull(RAX, EAX, a64::WRegister(regs));
+            armAsm->Umull(RAX, EAX, HostW(regs));
         }
 		else {
 //            xUMUL(ptr32[&psxRegs.GPR.r[sreg]]);
@@ -992,7 +1024,7 @@ static void rpsxMULTsuper(int info, int sign)
 	{
 		if (regt >= 0) {
 //            xMUL(xRegister32(regt));
-            armAsm->Smull(RAX, EAX, a64::WRegister(regt));
+            armAsm->Smull(RAX, EAX, HostW(regt));
         }
 		else {
 //            xMUL(ptr32[&psxRegs.GPR.r[_Rt_]]);
@@ -1003,7 +1035,7 @@ static void rpsxMULTsuper(int info, int sign)
 	{
 		if (regt >= 0) {
 //            xUMUL(xRegister32(regt));
-            armAsm->Umull(RAX, EAX, a64::WRegister(regt));
+            armAsm->Umull(RAX, EAX, HostW(regt));
         }
 		else {
 //            xUMUL(ptr32[&psxRegs.GPR.r[_Rt_]]);
@@ -1122,7 +1154,7 @@ static void rpsxDIVsuper(int info, int sign, int process = 0)
     }
 	else if (info & PROCESS_EE_T) {
 //        xMOV(ecx, xRegister32(EEREC_T));
-        armAsm->Mov(ECX, a64::WRegister(EEREC_T));
+        armAsm->Mov(ECX, HostW(EEREC_T));
     }
 	else {
 //        xMOV(ecx, ptr32[&psxRegs.GPR.r[_Rt_]]);
@@ -1135,7 +1167,7 @@ static void rpsxDIVsuper(int info, int sign, int process = 0)
     }
 	else if (info & PROCESS_EE_S) {
 //        xMOV(eax, xRegister32(EEREC_S));
-        armAsm->Mov(EAX, a64::WRegister(EEREC_S));
+        armAsm->Mov(EAX, HostW(EEREC_S));
     }
 	else {
 //        xMOV(eax, ptr32[&psxRegs.GPR.r[_Rs_]]);
@@ -1314,7 +1346,7 @@ static void rpsxCalcAddressOperand()
 
 	if (rs >= 0) {
 //        xMOV(arg1regd, xRegister32(rs));
-        armAsm->Mov(EAX, a64::WRegister(rs));
+        armAsm->Mov(EAX, HostW(rs));
     }
 	else {
 //        xMOV(arg1regd, ptr32[&psxRegs.GPR.r[_Rs_]]);
@@ -1340,7 +1372,7 @@ static void rpsxCalcStoreOperand()
 
 	if (rt >= 0) {
 //        xMOV(arg2regd, xRegister32(rt));
-        armAsm->Mov(ECX, a64::WRegister(rt));
+        armAsm->Mov(ECX, HostW(rt));
     }
 	else {
 //        xMOV(arg2regd, ptr32[&psxRegs.GPR.r[_Rt_]]);
@@ -1426,7 +1458,7 @@ static void rpsxLoad(int size, bool sign)
     armBind(&done);
 
 	const int rt = rpsxAllocRegIfUsed(_Rt_, MODE_WRITE);
-	const a64::WRegister dreg((rt < 0) ? EAX.GetCode() : rt);
+	const a64::WRegister dreg((rt < 0) ? EAX : HostW(rt));
 
 	// sign/zero extend as needed
 	switch (size)
@@ -1481,6 +1513,34 @@ static void rpsxLHU()
 
 static void rpsxLW()
 {
+	// [iter133] IOP LW at 0xBFC4AB38: LW v0,0(v0) reads from dispatch table.
+	// psxpc = instruction_addr+4 in IOP JIT (confirmed by iter127: JR at bfc4ab40 → psxpc==bfc4ab44).
+	// So this LW (at bfc4ab38) is compiled when psxpc==0xBFC4AB3C (not 0xBFC4AB38 as in iter128).
+	// Fastmem path (Tbz bit28) returns garbage if $v0+$t8 has bit28=0 on 2nd execution.
+	// Force vtlb (iopMemRead32) unconditionally so all executions go through iopMemRead32.
+	if (psxpc == 0xBFC4AB3Cu)
+	{
+		// [iter135] confirm compile-time path fires
+		Console.WriteLn("@@IOP_LW_FORCECOMPILE@@ psxpc=0x%08x _Rt_=%u _Rs_=%u PSX_IS_CONST1_Rs=%d",
+			psxpc, _Rt_, _Rs_, PSX_IS_CONST1(_Rs_) ? 1 : 0);
+		rpsxCalcAddressOperand(); // EAX = runtime address
+		if (_Rt_ != 0)
+		{
+			PSX_DEL_CONST(_Rt_);
+			_deletePSXtoX86reg(_Rt_, DELETE_REG_FREE_NO_WRITEBACK);
+		}
+		_psxFlushCall(FLUSH_FULLVTLB);
+		armEmitCall(reinterpret_cast<const void*>(iopMemRead32)); // result in EAX/w0
+		if (_Rt_ != 0)
+		{
+			const int rt = rpsxAllocRegIfUsed(_Rt_, MODE_WRITE);
+			if (rt >= 0)
+				armAsm->Move(HostW(rt), EAX);
+			else
+				armStore(PTR_CPU(psxRegs.GPR.r[_Rt_]), EAX);
+		}
+		return;
+	}
 	rpsxLoad(32, false);
 }
 
@@ -1509,7 +1569,7 @@ static void rpsxSW()
 	{
 		const int rt = _allocX86reg(X86TYPE_PSX, _Rt_, MODE_READ);
 //		xMOV(ptr32[ptr], xRegister32(rt));
-        armAsm->Str(a64::WRegister(rt), armMemOperandPtr(ptr));
+        armAsm->Str(HostW(rt), armMemOperandPtr(ptr));
 		return;
 	}
 
@@ -1531,7 +1591,7 @@ static void rpsxSLLs_(int info, int sa)
 	rpsxMoveTtoD(info);
 	if (sa != 0) {
 //        xSHL(xRegister32(EEREC_D), sa);
-        armAsm->Lsl(a64::WRegister(EEREC_D), a64::WRegister(EEREC_D), sa);
+        armAsm->Lsl(HostW(EEREC_D), HostW(EEREC_D), sa);
     }
 }
 
@@ -1553,7 +1613,7 @@ static void rpsxSRLs_(int info, int sa)
 	rpsxMoveTtoD(info);
 	if (sa != 0) {
 //        xSHR(xRegister32(EEREC_D), sa);
-        armAsm->Lsr(a64::WRegister(EEREC_D), a64::WRegister(EEREC_D), sa);
+        armAsm->Lsr(HostW(EEREC_D), HostW(EEREC_D), sa);
     }
 }
 
@@ -1575,7 +1635,7 @@ static void rpsxSRAs_(int info, int sa)
 	rpsxMoveTtoD(info);
 	if (sa != 0) {
 //        xSAR(xRegister32(EEREC_D), sa);
-        armAsm->Asr(a64::WRegister(EEREC_D), a64::WRegister(EEREC_D), sa);
+        armAsm->Asr(HostW(EEREC_D), HostW(EEREC_D), sa);
     }
 }
 
@@ -1602,7 +1662,7 @@ static void rpsxShiftV_constt(int info, const SHIFTV shift)
 	pxAssert(_Rs_ != 0);
 	rpsxMoveSToECX(info);
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = HostW(EEREC_D);
 
 //	xMOV(xRegister32(EEREC_D), g_psxConstRegs[_Rt_]);
     armAsm->Mov(reg32, g_psxConstRegs[_Rt_]);
@@ -1628,7 +1688,7 @@ static void rpsxShiftV(int info, const SHIFTV shift)
 	rpsxMoveSToECX(info);
 	rpsxMoveTtoD(info);
 
-    auto reg32 = a64::WRegister(EEREC_D);
+    auto reg32 = HostW(EEREC_D);
 //	shift(xRegister32(EEREC_D), cl);
     switch (shift) {
         case SHIFTV::xSHL:
@@ -1744,6 +1804,7 @@ static void rpsxJ()
 {
 	// j target
 	u32 newpc = _InstrucTarget_ * 4 + (psxpc & 0xf0000000);
+    Console.WriteLn("@@J_COMPILE@@ psxpc=%x newpc=%x", psxpc, newpc);
 	psxRecompileNextInstruction(true, false);
 	psxSetBranchImm(newpc);
 }
@@ -1751,6 +1812,7 @@ static void rpsxJ()
 static void rpsxJAL()
 {
 	u32 newpc = (_InstrucTarget_ << 2) + (psxpc & 0xf0000000);
+    Console.WriteLn("@@JAL_COMPILE@@ psxpc=%x newpc=%x", psxpc, newpc);
 	_psxDeleteReg(31, DELETE_REG_FREE_NO_WRITEBACK);
 	PSX_SET_CONST(31);
 	g_psxConstRegs[31] = psxpc + 4;
@@ -1761,12 +1823,22 @@ static void rpsxJAL()
 
 static void rpsxJR()
 {
+    Console.WriteLn("@@JR_COMPILE@@ psxpc=%x rs=%d is_const=%d val=%x", psxpc, _Rs_, PSX_IS_CONST1(_Rs_), g_psxConstRegs[_Rs_]);
+    // [iter127] probe: JR $v0 at bfc4ab44 loads function ptr from table at bfc4b138.
+    // Hypothesis A: IOP ROM modified at runtime. Hypothesis B: IOP memory mapping error.
+    // Print IOP virtual memory value at JIT compile time to distinguish.
+    if (psxpc == 0xbfc4ab44u) {
+        const u32* ptr = iopVirtMemR<u32>(0xbfc4b138u);
+        Console.WriteLn("@@IOP_ROM_bfc4b138@@ ptr=%s val=0x%08x",
+            ptr ? "OK" : "NULL", ptr ? *ptr : 0xDEADBEEFu);
+    }
 	psxSetBranchReg(_Rs_);
 }
 
 static void rpsxJALR()
 {
 	const u32 newpc = psxpc + 4;
+    Console.WriteLn("@@JALR_COMPILE@@ psxpc=%x rs=%d rd=%d", psxpc, _Rs_, _Rd_);
 	const bool swap = (_Rd_ == _Rs_) ? false : psxTrySwapDelaySlot(_Rs_, 0, _Rd_);
 
 	// jalr Rs
@@ -1774,7 +1846,7 @@ static void rpsxJALR()
 	if (!swap)
 	{
 		wbreg = _allocX86reg(X86TYPE_PCWRITEBACK, 0, MODE_WRITE | MODE_CALLEESAVED);
-		_psxMoveGPRtoR(a64::WRegister(wbreg), _Rs_);
+		_psxMoveGPRtoR(HostW(wbreg), _Rs_);
 	}
 
 	if (_Rd_)
@@ -1791,7 +1863,7 @@ static void rpsxJALR()
 		if (x86regs[wbreg].inuse && x86regs[wbreg].type == X86TYPE_PCWRITEBACK)
 		{
 //			xMOV(ptr32[&psxRegs.pc], xRegister32(wbreg));
-            armStore(PTR_CPU(psxRegs.pc), a64::WRegister(wbreg));
+            armStore(PTR_CPU(psxRegs.pc), HostW(wbreg));
 			x86regs[wbreg].inuse = 0;
 		}
 		else
@@ -1808,7 +1880,7 @@ static void rpsxJALR()
 		{
 			const int x86reg = _allocX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 //			xMOV(ptr32[&psxRegs.pc], xRegister32(x86reg));
-            armStore(PTR_CPU(psxRegs.pc), a64::WRegister(x86reg));
+            armStore(PTR_CPU(psxRegs.pc), HostW(x86reg));
 		}
 		else
 		{
@@ -1829,7 +1901,7 @@ static void rpsxSetBranchEQ(int process, a64::Label* p_pbranchjmp)
 		const int regt = _checkX86reg(X86TYPE_PSX, _Rt_, MODE_READ);
 		if (regt >= 0) {
 //            xCMP(xRegister32(regt), g_psxConstRegs[_Rs_]);
-            armAsm->Cmp(a64::WRegister(regt), g_psxConstRegs[_Rs_]);
+            armAsm->Cmp(HostW(regt), g_psxConstRegs[_Rs_]);
         }
 		else {
 //            xCMP(ptr32[&psxRegs.GPR.r[_Rt_]], g_psxConstRegs[_Rs_]);
@@ -1841,7 +1913,7 @@ static void rpsxSetBranchEQ(int process, a64::Label* p_pbranchjmp)
 		const int regs = _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 		if (regs >= 0) {
 //            xCMP(xRegister32(regs), g_psxConstRegs[_Rt_]);
-            armAsm->Cmp(a64::WRegister(regs), g_psxConstRegs[_Rt_]);
+            armAsm->Cmp(HostW(regs), g_psxConstRegs[_Rt_]);
         }
 		else {
 //            xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], g_psxConstRegs[_Rt_]);
@@ -1856,11 +1928,11 @@ static void rpsxSetBranchEQ(int process, a64::Label* p_pbranchjmp)
 
 		if (regt >= 0) {
 //            xCMP(xRegister32(regs), xRegister32(regt));
-            armAsm->Cmp(a64::WRegister(regs), a64::WRegister(regt));
+            armAsm->Cmp(HostW(regs), HostW(regt));
         }
 		else {
 //            xCMP(xRegister32(regs), ptr32[&psxRegs.GPR.r[_Rt_]]);
-            armAsm->Cmp(a64::WRegister(regs), armLoad(PTR_CPU(psxRegs.GPR.r[_Rt_])));
+            armAsm->Cmp(HostW(regs), armLoad(PTR_CPU(psxRegs.GPR.r[_Rt_])));
         }
 	}
 
@@ -1893,7 +1965,18 @@ static void rpsxBEQ_process(int process)
 	else
 	{
 		const bool swap = psxTrySwapDelaySlot(_Rs_, _Rt_, 0);
+		// [iter117] @@BEQ_CONST_STATE@@ — compile-time log: const state of t0 at bfc02648 BEQ flush point
+		if (psxpc == 0xBFC02650u)
+			Console.WriteLn("@@BEQ_CONST_STATE@@ hasConst=%08x flushed=%08x t0const=%u t0flushed=%u t0val=%08x swap=%u",
+				g_psxHasConstReg, g_psxFlushedConstReg,
+				(g_psxHasConstReg >> 8) & 1u, (g_psxFlushedConstReg >> 8) & 1u,
+				g_psxConstRegs[8], swap ? 1u : 0u);
 		_psxFlushAllDirty();
+		armAsm->Mov(EAX, psxpc);
+		armAsm->Mov(ECX, 0u);
+		armAsm->Mov(EDX, _Rs_);
+		armAsm->Mov(a64::WRegister(3), _Rt_);
+		armEmitCall(reinterpret_cast<void*>(antigravityLogIopBranchCmp));
 
         a64::Label s_pbranchjmp;
 		rpsxSetBranchEQ(process, &s_pbranchjmp);
@@ -1923,6 +2006,15 @@ static void rpsxBEQ_process(int process)
 
 static void rpsxBEQ()
 {
+	// The BIOS poll loop around 0x9FC41094/0x9FC4109C is currently the primary JIT
+	// stall site. Force the runtime branch path here to avoid const-folded branch code
+	// until the underlying JIT compare/const-prop issue is fully identified.
+	if (psxpc == 0x9fc41098u)
+	{
+		rpsxBEQ_process(0);
+		return;
+	}
+
 	// prefer using the host register over an immediate, it'll be smaller code.
 	if (PSX_IS_CONST2(_Rs_, _Rt_))
 		rpsxBEQ_const();
@@ -1961,6 +2053,11 @@ static void rpsxBNE_process(int process)
 
 	const bool swap = psxTrySwapDelaySlot(_Rs_, _Rt_, 0);
 	_psxFlushAllDirty();
+	armAsm->Mov(EAX, psxpc);
+	armAsm->Mov(ECX, 1u);
+	armAsm->Mov(EDX, _Rs_);
+	armAsm->Mov(a64::WRegister(3), _Rt_);
+	armEmitCall(reinterpret_cast<void*>(antigravityLogIopBranchCmp));
 
     a64::Label s_pbranchjmp;
 	rpsxSetBranchEQ(process, &s_pbranchjmp);
@@ -1989,6 +2086,15 @@ static void rpsxBNE_process(int process)
 
 static void rpsxBNE()
 {
+	// Same BIOS poll loop handling as rpsxBEQ() above. psxpc points to the delay-slot+4
+	// location when the branch op is compiled, so 0x9FC410A0 corresponds to the BNE at
+	// 0x9FC4109C.
+	if (psxpc == 0x9fc410a0u)
+	{
+		rpsxBNE_process(0);
+		return;
+	}
+
 	if (PSX_IS_CONST2(_Rs_, _Rt_))
 		rpsxBNE_const();
 	else if (PSX_IS_CONST1(_Rs_) && _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ) < 0)
@@ -2021,7 +2127,7 @@ static void rpsxBLTZ()
 	const int regs = _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0) {
 //        xCMP(xRegister32(regs), 0);
-        armAsm->Cmp(a64::WRegister(regs), 0);
+        armAsm->Cmp(HostW(regs), 0);
     }
 	else {
 //        xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], 0);
@@ -2075,7 +2181,7 @@ static void rpsxBGEZ()
 	const int regs = _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0) {
 //        xCMP(xRegister32(regs), 0);
-        armAsm->Cmp(a64::WRegister(regs), 0);
+        armAsm->Cmp(HostW(regs), 0);
     }
 	else {
 //        xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], 0);
@@ -2135,7 +2241,7 @@ static void rpsxBLTZAL()
 	const int regs = _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0) {
 //        xCMP(xRegister32(regs), 0);
-        armAsm->Cmp(a64::WRegister(regs), 0);
+        armAsm->Cmp(HostW(regs), 0);
     }
 	else {
 //        xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], 0);
@@ -2194,7 +2300,7 @@ static void rpsxBGEZAL()
 	const int regs = _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0) {
 //        xCMP(xRegister32(regs), 0);
-        armAsm->Cmp(a64::WRegister(regs), 0);
+        armAsm->Cmp(HostW(regs), 0);
     }
 	else {
 //        xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], 0);
@@ -2249,7 +2355,7 @@ static void rpsxBLEZ()
 	const int regs = _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0) {
 //        xCMP(xRegister32(regs), 0);
-        armAsm->Cmp(a64::WRegister(regs), 0);
+        armAsm->Cmp(HostW(regs), 0);
     }
 	else {
 //        xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], 0);
@@ -2305,7 +2411,7 @@ static void rpsxBGTZ()
 	const int regs = _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0) {
 //        xCMP(xRegister32(regs), 0);
-        armAsm->Cmp(a64::WRegister(regs), 0);
+        armAsm->Cmp(HostW(regs), 0);
     }
 	else {
 //        xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], 0);
@@ -2345,7 +2451,7 @@ static void rpsxMFC0()
 
 	const int rt = _allocX86reg(X86TYPE_PSX, _Rt_, MODE_WRITE);
 //	xMOV(xRegister32(rt), ptr32[&psxRegs.CP0.r[_Rd_]]);
-    armLoad(a64::WRegister(rt), PTR_CPU(psxRegs.CP0.r[_Rd_]));
+    armLoad(HostW(rt), PTR_CPU(psxRegs.CP0.r[_Rd_]));
 }
 
 static void rpsxCFC0()
@@ -2356,7 +2462,32 @@ static void rpsxCFC0()
 
 	const int rt = _allocX86reg(X86TYPE_PSX, _Rt_, MODE_WRITE);
 //	xMOV(xRegister32(rt), ptr32[&psxRegs.CP0.r[_Rd_]]);
-    armLoad(a64::WRegister(rt), PTR_CPU(psxRegs.CP0.r[_Rd_]));
+    armLoad(HostW(rt), PTR_CPU(psxRegs.CP0.r[_Rd_]));
+}
+
+// [P12 Fix A] Helper: after MTC0 writes to Status (Rd=12), immediately check for pending interrupts.
+// Interpreter checks pending IRQs at every branch (iopEventTest in doBranch). JIT only checks at
+// block boundaries when cycle >= iopNextEventCycle. If MTC0 sets IEc=1 but a subsequent SYSCALL
+// sets IEc=0 before the next branch test, the interrupt is permanently missed. Calling iopTestIntc()
+// here ensures the pending interrupt is dispatched immediately when IEc becomes 1.
+static void iopMTC0_Status_helper()
+{
+	static int s_mtc0_late = 0;
+	if (psxRegs.cycle > 34000000u && psxRegs.cycle < 38000000u && s_mtc0_late < 30)
+	{
+		++s_mtc0_late;
+		Console.WriteLn("@@IOP_MTC0_STATUS@@ n=%d new_sr=0x%08x IEc=%d pc=0x%08x cyc=%u",
+			s_mtc0_late, psxRegs.CP0.n.Status, psxRegs.CP0.n.Status & 1u, psxRegs.pc, psxRegs.cycle);
+	}
+	// [P12 Fix A] If IEc=1 (interrupts enabled), force immediate event check at next
+	// IOP branch boundary. Interpreter calls iopEventTest() after every branch unconditionally;
+	// JIT only calls it when cycle >= iopNextEventCycle. Setting iopNextEventCycle = cycle
+	// ensures iopEventTest() runs at the very next branch, matching interpreter behavior.
+	if (psxRegs.CP0.n.Status & 1u)
+	{
+		psxRegs.iopNextEventCycle = psxRegs.cycle;
+		iopTestIntc();
+	}
 }
 
 static void rpsxMTC0()
@@ -2371,7 +2502,13 @@ static void rpsxMTC0()
 	{
 		const int rt = _allocX86reg(X86TYPE_PSX, _Rt_, MODE_READ);
 //		xMOV(ptr32[&psxRegs.CP0.r[_Rd_]], xRegister32(rt));
-        armStore(PTR_CPU(psxRegs.CP0.r[_Rd_]), a64::WRegister(rt));
+        armStore(PTR_CPU(psxRegs.CP0.r[_Rd_]), HostW(rt));
+	}
+	// [P12] If writing to Status register (Rd=12), log the new value
+	if (_Rd_ == 12)
+	{
+		_psxFlushCall(0);
+		armEmitCall(reinterpret_cast<void*>((uptr)&iopMTC0_Status_helper));
 	}
 }
 
@@ -2381,28 +2518,36 @@ static void rpsxCTC0()
 	rpsxMTC0();
 }
 
+// [TEMP_DIAG] @@IOP_RFE@@ — helper to perform RFE and log
+static void iopRFE_helper()
+{
+	static int s_rfe_cnt = 0;
+	static int s_rfe_late = 0;
+	const u32 old_sr = psxRegs.CP0.n.Status;
+	psxRegs.CP0.n.Status = (old_sr & 0xFFFFFFF0u) | ((old_sr & 0x3Cu) >> 2);
+	const u32 new_sr = psxRegs.CP0.n.Status;
+	if (++s_rfe_cnt <= 20 || (s_rfe_cnt % 5000 == 0 && s_rfe_cnt <= 100000))
+	{
+		Console.WriteLn("@@IOP_RFE@@ n=%d old_sr=0x%08x new_sr=0x%08x pc=0x%08x",
+			s_rfe_cnt, old_sr, new_sr, psxRegs.pc);
+	}
+	// [P12] @@IOP_RFE_LATE@@ — cyc=34M-38M の RFE を捕捉
+	if (psxRegs.cycle > 34000000u && psxRegs.cycle < 38000000u && s_rfe_late < 30)
+	{
+		++s_rfe_late;
+		Console.WriteLn("@@IOP_RFE_LATE@@ n=%d old_sr=0x%08x new_sr=0x%08x pc=0x%08x cyc=%u epc=0x%08x",
+			s_rfe_late, old_sr, new_sr, psxRegs.pc, psxRegs.cycle, psxRegs.CP0.n.EPC);
+	}
+	// [P12 Fix B] If RFE restored IEc=1, force immediate event check (same as MTC0 fix).
+	if (new_sr & 1u)
+		psxRegs.iopNextEventCycle = psxRegs.cycle;
+	iopTestIntc();
+}
+
 static void rpsxRFE()
 {
-//	xMOV(eax, ptr32[&psxRegs.CP0.n.Status]);
-    armLoad(EAX, PTR_CPU(psxRegs.CP0.n.Status));
-//	xMOV(ecx, eax);
-    armAsm->Mov(ECX, EAX);
-//	xAND(eax, 0xfffffff0);
-    armAsm->And(EAX, EAX, 0xfffffff0);
-//	xAND(ecx, 0x3c);
-    armAsm->And(ECX, ECX, 0x3c);
-//	xSHR(ecx, 2);
-    armAsm->Lsr(ECX, ECX, 2);
-//	xOR(eax, ecx);
-    armAsm->Orr(EAX, EAX, ECX);
-//	xMOV(ptr32[&psxRegs.CP0.n.Status], eax);
-    armStore(PTR_CPU(psxRegs.CP0.n.Status), EAX);
-
-	// Test the IOP's INTC status, so that any pending ints get raised.
-
 	_psxFlushCall(0);
-//	xFastCall((void*)(uptr)&iopTestIntc);
-    armEmitCall(reinterpret_cast<void*>((uptr)&iopTestIntc));
+	armEmitCall(reinterpret_cast<void*>((uptr)&iopRFE_helper));
 }
 
 //// COP2

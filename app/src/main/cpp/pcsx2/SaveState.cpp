@@ -41,13 +41,7 @@
 #include "fmt/format.h"
 
 #include <csetjmp>
-#ifdef __APPLE__
-#include <TargetConditionals.h>
-#endif
-#ifndef TARGET_OS_IPHONE
-#define TARGET_OS_IPHONE 0
-#endif
-#if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 #include <png.h>
 #endif
 
@@ -784,9 +778,7 @@ std::unique_ptr<SaveStateScreenshotData> SaveState_SaveScreenshot()
 
 static bool SaveState_CompressScreenshot(SaveStateScreenshotData* data, zip_t* zf)
 {
-#if TARGET_OS_IPHONE
-	return false;
-#else
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 	zip_error_t ze = {};
 	zip_source_t* const zs = zip_source_buffer_create(nullptr, 0, 0, &ze);
 	if (!zs)
@@ -840,7 +832,7 @@ static bool SaveState_CompressScreenshot(SaveStateScreenshotData* data, zip_t* z
 	if (zip_source_commit_write(zs) != 0)
 		return false;
 
-	const s64 file_index = zip_file_add(zf, EntryFilename_Screenshot, zs, 0);
+	const s64 file_index = zip_file_add(zf, EntryFilename_Screenshot, zs, ZIP_FL_OVERWRITE);
 	if (file_index < 0)
 		return false;
 
@@ -850,14 +842,14 @@ static bool SaveState_CompressScreenshot(SaveStateScreenshotData* data, zip_t* z
 	// source is now owned by the zip file for later compression
 	zs_free.Cancel();
 	return true;
+#else
+	return false;
 #endif
 }
 
 static bool SaveState_ReadScreenshot(zip_t* zf, u32* out_width, u32* out_height, std::vector<u32>* out_pixels)
 {
-#if TARGET_OS_IPHONE
-	return false;
-#else
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 	auto zff = zip_fopen_managed(zf, EntryFilename_Screenshot, 0);
 	if (!zff)
 		return false;
@@ -882,7 +874,7 @@ static bool SaveState_ReadScreenshot(zip_t* zf, u32* out_width, u32* out_height,
 
 	png_set_read_fn(png_ptr, zff.get(), [](png_structp png_ptr, png_bytep data_ptr, png_size_t size) {
 		zip_fread(static_cast<zip_file_t*>(png_get_io_ptr(png_ptr)), data_ptr, size);
-	});
+	}, nullptr);
 
 	png_read_info(png_ptr, info_ptr);
 
@@ -905,7 +897,7 @@ static bool SaveState_ReadScreenshot(zip_t* zf, u32* out_width, u32* out_height,
 
 	for (u32 y = 0; y < height; y++)
 	{
-		png_read_row(png_ptr, static_cast<png_bytep>(rowData.data()), nullptr);
+		png_read_row(png_ptr, static_cast<png_bytep>(rowData.data()));
 
 		const u8* row_ptr = rowData.data();
 		u32* out_ptr = &out_pixels->at(y * width);
@@ -916,7 +908,6 @@ static bool SaveState_ReadScreenshot(zip_t* zf, u32* out_width, u32* out_height,
 				u32 pixel = static_cast<u32>(*(row_ptr)++);
 				pixel |= static_cast<u32>(*(row_ptr)++) << 8;
 				pixel |= static_cast<u32>(*(row_ptr)++) << 16;
-				pixel |= static_cast<u32>(*(row_ptr)++) << 24;
 				*(out_ptr++) = pixel | 0xFF000000u; // make opaque
 			}
 		}
@@ -933,6 +924,8 @@ static bool SaveState_ReadScreenshot(zip_t* zf, u32* out_width, u32* out_height,
 	}
 
 	return true;
+#else
+	return false;
 #endif
 }
 
@@ -1163,7 +1156,7 @@ static bool LoadInternalStructuresState(zip_t* zf, s64 index, Error* error)
 	memLoadingState state(buffer);
 	if (!state.FreezeBios())
 		return false;
-
+	
 	if (!state.FreezeInternals(error))
 		return false;
 

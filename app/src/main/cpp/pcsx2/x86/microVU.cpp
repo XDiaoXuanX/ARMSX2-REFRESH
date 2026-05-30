@@ -7,6 +7,7 @@
 #include "common/Perf.h"
 #include "common/StringUtil.h"
 
+// [iPSX2] iOS: 128-byte alignment for ARM64 SIMD/cache line safety
 alignas(128) vuRegistersPack g_vuRegistersPack;
 VU_Thread& vu1Thread = g_vuRegistersPack.vu1Thread;
 
@@ -45,17 +46,14 @@ void mVUreset(microVU& mVU, bool resetReserve)
 		VU0.VI[REG_VPU_STAT].UL &= ~0x100;
 	}
 
-//	xSetPtr(mVU.cache);
-    armSetAsmPtr(mVU.cache, mVU.index ? HostMemoryMap::mVU1recSize : HostMemoryMap::mVU0recSize, nullptr);
-    armStartBlock();
-    ////
+	armSetAsmPtr(mVU.cache, mVU.index ? HostMemoryMap::mVU1recSize : HostMemoryMap::mVU0recSize, nullptr);
+	armStartBlock();
 	mVUdispatcherAB(mVU);
 	mVUdispatcherCD(mVU);
 	mVUGenerateWaitMTVU(mVU);
 	mVUGenerateCopyPipelineState(mVU);
 	mVUGenerateCompareState(mVU);
-    ////
-    mVU.prog.x86start = armEndBlock();
+	mVU.prog.x86start = armEndBlock();
 
 	mVU.regs().nextBlockCycles = 0;
 	memset(&mVU.prog.lpState, 0, sizeof(mVU.prog.lpState));
@@ -69,10 +67,9 @@ void mVUreset(microVU& mVU, bool resetReserve)
 	mVU.prog.curFrame =  0;
 
 	// Setup Dynarec Cache Limits for Each Program
-//	mVU.prog.x86start = xGetAlignedCallTarget();
 	mVU.prog.x86ptr   = mVU.prog.x86start;
 
-    u32 i, e = (mVU.progSize >> 1); // mVU.progSize / 2
+	u32 i, e = (mVU.progSize >> 1);
 	for ( i = 0; i < e; ++i)
 	{
 		if (!mVU.prog.prog[i])
@@ -86,8 +83,8 @@ void mVUreset(microVU& mVU, bool resetReserve)
 			mVUdeleteProg(mVU, it[0]);
 		}
 		mVU.prog.prog[i]->clear();
-        mVU.prog.quick[i].block = NULL;
-        mVU.prog.quick[i].prog = NULL;
+		mVU.prog.quick[i].block = NULL;
+		mVU.prog.quick[i].prog = NULL;
 	}
 }
 
@@ -95,7 +92,7 @@ void mVUreset(microVU& mVU, bool resetReserve)
 void mVUclose(microVU& mVU)
 {
 	// Delete Programs and Block Managers
-    u32 i, e = (mVU.progSize >> 1); // mVU.progSize / 2
+	u32 i, e = (mVU.progSize >> 1);
 	for (i = 0; i < e; ++i)
 	{
 		if (!mVU.prog.prog[i])
@@ -112,12 +109,12 @@ void mVUclose(microVU& mVU)
 // Clears Block Data in specified range
 __fi void mVUclear(mV, u32 addr, u32 size)
 {
-    if (!mVU.prog.cleared)
-    {
-        mVU.prog.cleared = 1; // Next execution searches/creates a new microprogram
-        std::memset(&mVU.prog.lpState, 0, sizeof(mVU.prog.lpState)); // Clear pipeline state
-        std::memset(mVU.prog.quick, 0, (mVU.progSize >> 1) * sizeof(microProgramQuick)); // mVU.progSize / 2
-    }
+	if (!mVU.prog.cleared)
+	{
+		mVU.prog.cleared = 1; // Next execution searches/creates a new microprogram
+		std::memset(&mVU.prog.lpState, 0, sizeof(mVU.prog.lpState)); // Clear pipeline state
+		std::memset(mVU.prog.quick, 0, (mVU.progSize >> 1) * sizeof(microProgramQuick));
+	}
 }
 
 //------------------------------------------------------------------
@@ -127,7 +124,7 @@ __fi void mVUclear(mV, u32 addr, u32 size)
 // Deletes a program
 __ri void mVUdeleteProg(microVU& mVU, microProgram*& prog)
 {
-    u32 i, e = (mVU.progSize >> 1); // mVU.progSize / 2
+	u32 i, e = (mVU.progSize >> 1);
 	for (i = 0; i < e; ++i)
 	{
 		safe_delete(prog->block[i]);
@@ -183,15 +180,15 @@ u64 mVUrangesHash(microVU& mVU, microProgram& prog)
 	} hash = {0};
 
 	std::deque<microRange>::const_iterator it(prog.ranges->begin());
-    int i, s, e;
+	int i, s, e;
 	for (; it != prog.ranges->end(); ++it)
 	{
 		if ((it[0].start < 0) || (it[0].end < 0))
 		{
 			DevCon.Error("microVU%d: Negative Range![%d][%d]", mVU.index, it[0].start, it[0].end);
 		}
-        s = it[0].start >> 2; // it[0].start / 4
-        e = it[0].end >> 2;   // it[0].end / 4
+		s = it[0].start >> 2;
+		e = it[0].end >> 2;
 		for (i = s; i < e; ++i)
 		{
 			hash.v32[0] -= prog.data[i];
@@ -205,7 +202,7 @@ u64 mVUrangesHash(microVU& mVU, microProgram& prog)
 void mVUprintUniqueRatio(microVU& mVU)
 {
 	std::vector<u64> v;
-    u32 pc, e = mProgSize >> 1; // mProgSize / 2
+	u32 pc, e = mProgSize >> 1;
 	for (pc = 0; pc < e; ++pc)
 	{
 		microProgramList* list = mVU.prog.prog[pc];
@@ -258,8 +255,8 @@ _mVUt __fi void* mVUsearchProg(u32 startPC, uptr pState)
 {
 	microVU& mVU = mVUx;
 
-    u32 start_pc_8 = startPC >> 3; // startPC / 8
-    u32 regs_start_pc_8 = mVU.regs().start_pc >> 3; // mVU.regs().start_pc / 8
+	u32 start_pc_8 = startPC >> 3;
+	u32 regs_start_pc_8 = mVU.regs().start_pc >> 3;
 
 	microProgramQuick& quick = mVU.prog.quick[regs_start_pc_8];
 	microProgramList*  list  = mVU.prog.prog [regs_start_pc_8];
@@ -296,7 +293,6 @@ _mVUt __fi void* mVUsearchProg(u32 startPC, uptr pState)
 		quick.block      = mVU.prog.cur->block[start_pc_8];
 		quick.prog       = mVU.prog.cur;
 		list->push_front(mVU.prog.cur);
-		//mVUprintUniqueRatio(mVU);
 		return entryPoint;
 	}
 
@@ -436,68 +432,3 @@ bool SaveStateBase::vuJITFreeze()
 	Freeze(microVU1.prog.lpState);
 	return IsOkay();
 }
-
-#if 0
-
-#include <zlib.h>
-
-void DumpVUState(u32 n, u32 pc)
-{
-	const VURegs& r = g_cpuRegistersPack.vuRegs[n];
-	const microVU& mVU = (n == 0) ? microVU0 : microVU1;
-	static FILE* fp = nullptr;
-	static bool fp_opened = false;
-	static u32 counter = 0;
-
-	u32 first = pc >> 31;
-	pc &= 0x7FFFFFFFu;
-	if (first)
-		counter++;
-
-#if 0
-	if (counter == 184639 && pc == 0x0D70)
-		__debugbreak();
-#endif
-
-	if (counter < 0)
-		return;
-
-	if (!fp_opened)
-	{
-		fp = std::fopen("C:\\Dumps\\comp\\vulog.txt", "wb");
-		fp_opened = true;
-	}
-	if (fp)
-	{
-		const microVU& m = (n == 0) ? microVU0 : microVU1;
-		fprintf(fp, "%08d VU%u SPC:%04X xPC:%04X BRANCH:%04X VIBACKUP:%04X", counter, n, r.start_pc, pc, mVU.branch, mVU.VIbackup);
-#if 1
-		//fprintf(fp, " MEM:%08X", crc32(0, (Bytef*)r.Mem, (n == 0) ? VU0_MEMSIZE : VU1_MEMSIZE));
-		fprintf(fp, " MAC %08X %08X %08X %08X [%08X %08X %08X %08X]", r.micro_macflags[3], r.micro_macflags[2], r.micro_macflags[1], r.micro_macflags[0], m.macFlag[3], m.macFlag[2], m.macFlag[1], m.macFlag[0]);
-		fprintf(fp, " CLIP %08X %08X %08X %08X [%08X %08X %08X %08X]", r.micro_clipflags[3], r.micro_clipflags[2], r.micro_clipflags[1], r.micro_clipflags[0], m.clipFlag[3], m.clipFlag[2], m.clipFlag[1], m.clipFlag[0]);
-		fprintf(fp, " STATUS %08X %08X %08X %08X [%08X %08X %08X %08X]", r.micro_statusflags[3], r.micro_statusflags[2], r.micro_statusflags[1], r.micro_statusflags[0], m.statFlag[3], m.statFlag[2], m.statFlag[1], m.statFlag[0]);
-
-		for (u32 i = 0; i < 32; i++)
-		{
-			const VECTOR& v = r.VF[i];
-			fprintf(fp, " VF%u: %08X%08X%08X%08X (%f,%f,%f,%f)", i, v.UL[3], v.UL[2], v.UL[1], v.UL[0], v.F[3], v.F[2], v.F[1], v.F[0]);
-		}
-
-		for (u32 i = 0; i < 32; i++)
-		{
-			const REG_VI& v = r.VI[i];
-			fprintf(fp, " VI%u: %08X", i, v.UL);
-		}
-
-		fprintf(fp, " ACC: %08X%08X%08X%08X (%f,%f,%f,%f)", r.ACC.UL[3], r.ACC.UL[2], r.ACC.UL[1], r.ACC.UL[0],
-			r.ACC.F[3], r.ACC.F[2], r.ACC.F[1], r.ACC.F[0]);
-		fprintf(fp, " Q: %08X (%f)", r.q.UL, r.q.F);
-		fprintf(fp, " P: %08X (%f)\n", r.p.UL, r.p.F);
-#else
-		fprintf(fp, " REG:%08X\n", crc32(0, (Bytef*)&r, offsetof(VURegs, idx)));
-#endif
-		//fflush(fp);
-	}
-}
-
-#endif

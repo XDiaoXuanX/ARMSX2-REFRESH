@@ -419,13 +419,8 @@ static __fi void mVU_sumXYZ(mV, const xmm& PQ, const xmm& Fs)
 //	xMOVSS(PQ, Fs);
 
     armAsm->Fmul(PQ.V4S(), Fs.V4S(), Fs.V4S());
-    armAsm->Ins(PQ.V4S(), 3, a64::wzr);
-
     armAsm->Faddp(PQ.V4S(), PQ.V4S(), PQ.V4S());
     armAsm->Faddp(PQ.S(), PQ.V2S());
-
-    armAsm->Fmov(EAX, PQ.S());
-    armAsm->Fmov(PQ.S(), EAX);
 }
 
 mVUop(mVU_ELENG)
@@ -2076,7 +2071,10 @@ mVUop(mVU_XTOP)
         if (mVU.index && THREAD_VU1) {
             armAsm->Ldrh(regT, PTR_MVU(vu1Thread.vifRegs.top));
         } else {
-            armAsm->Ldrh(regT, PTR_CPU(vifRegs[mVU.index].top));
+            // Load from actual eeHw-mapped vifRegs, not cpuRegistersPack copy
+            VIFregisters& vifr = mVU.index ? vif1Regs : vif0Regs;
+            armMoveAddressToReg(gprT1q, &vifr.top);
+            armAsm->Ldrh(regT, a64::MemOperand(gprT1q));
         }
 		mVU.regAlloc->clearNeeded(regT);
 		mVU.profiler.EmitOp(opXTOP);
@@ -2100,7 +2098,10 @@ mVUop(mVU_XITOP)
         if (mVU.index && THREAD_VU1) {
             armAsm->Ldrh(regT, PTR_MVU(vu1Thread.vifRegs.itop));
         } else {
-            armAsm->Ldrh(regT, PTR_CPU(vifRegs[mVU.index].itop));
+            // Load from actual eeHw-mapped vifRegs, not cpuRegistersPack copy
+            VIFregisters& vifr = mVU.index ? vif1Regs : vif0Regs;
+            armMoveAddressToReg(gprT1q, &vifr.itop);
+            armAsm->Ldrh(regT, a64::MemOperand(gprT1q));
         }
 //		xAND(regT, isVU1 ? 0x3ff : 0xff);
         armAsm->And(regT, regT, isVU1 ? 0x3ff : 0xff);

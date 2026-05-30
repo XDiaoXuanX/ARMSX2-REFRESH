@@ -79,6 +79,10 @@ namespace MTGS
 		u32* width, u32* height, std::vector<u32>* pixels);
 	void SetRunIdle(bool enabled);
 
+	// [P23] Lightweight MTGS kick: wakes MTGS thread without blocking.
+	// Used by mtgsReadWait yield loop to avoid heavy WaitForEmpty.
+	void SetEvent();
+
 	// Size of the ringbuffer as a power of 2 -- size is a multiple of simd128s.
 	// (actual size is 1<<m_RingBufferSizeFactor simd vectors [128-bit values])
 	// A value of 19 is a 8meg ring buffer.  18 would be 4 megs, and 20 would be 16 megs.

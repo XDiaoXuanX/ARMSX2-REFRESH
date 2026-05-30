@@ -18,5 +18,12 @@ void GSRendererNull::Draw()
 
 GSTexture* GSRendererNull::GetOutput(int i, float& scale, int& y_offset)
 {
+	// [iter253] Null renderer 使用verifyprobe
+	{
+		static u32 s_null_go = 0;
+		if (s_null_go < 5) {
+			fprintf(stderr, "@@NULL_GETOUTPUT@@ n=%u i=%d *** NULL RENDERER ACTIVE ***\n", s_null_go++, i);
+		}
+	}
 	return nullptr;
 }

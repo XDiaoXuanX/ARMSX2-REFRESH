@@ -18,6 +18,11 @@
 #include <iomanip>
 #include <bit>
 
+// [iPSX2]
+extern "C" void LogUnified(const char* fmt, ...);
+
+// [TEMP_DIAG] per-path GS transfer counter — defined in GS.cpp
+
 int GSState::s_n = 0;
 int GSState::s_last_transfer_draw_n = 0;
 int GSState::s_transfer_n = 0;
@@ -353,24 +358,54 @@ GSVideoMode GSState::GetVideoMode()
 	const u8 Colorburst = m_regs->SMODE1.CMOD; // Subcarrier frequency
 	const u8 PLL_Divider = m_regs->SMODE1.LC;  // Phased lock loop divider
 
+	GSVideoMode mode = GSVideoMode::Unknown;
+	const char* mode_str = "Unknown";
+
 	switch (Colorburst)
 	{
 		case 0:
-			if (isinterlaced() && PLL_Divider == 22)
-				return GSVideoMode::HDTV_1080I;
-			else if (!isinterlaced() && PLL_Divider == 22)
-				return GSVideoMode::HDTV_720P;
-			else if (!isinterlaced() && PLL_Divider == 32)
-				return GSVideoMode::SDTV_480P; // TODO: 576P will also be reported as 480P, find some way to differeniate.
-			else
-				return GSVideoMode::VESA;
+			if (isinterlaced() && PLL_Divider == 22) {
+				mode = GSVideoMode::HDTV_1080I; mode_str = "HDTV_1080I";
+			} else if (!isinterlaced() && PLL_Divider == 22) {
+				mode = GSVideoMode::HDTV_720P; mode_str = "HDTV_720P";
+			} else if (!isinterlaced() && PLL_Divider == 32) {
+				mode = GSVideoMode::SDTV_480P; mode_str = "SDTV_480P";
+			} else {
+				mode = GSVideoMode::VESA; mode_str = "VESA";
+			}
+			break;
 		case 2:
-			return GSVideoMode::NTSC;
+			mode = GSVideoMode::NTSC; mode_str = "NTSC";
+			break;
 		case 3:
-			return GSVideoMode::PAL;
+			mode = GSVideoMode::PAL; mode_str = "PAL";
+			break;
 		default:
-			return GSVideoMode::Unknown;
+			mode = GSVideoMode::Unknown; mode_str = "Unknown";
+			break;
 	}
+
+	// [iPSX2] VMODE Logging
+	static int log_cnt = 0;
+	static GSVideoMode last_mode = GSVideoMode::Unknown;
+	static bool s_phase_vmode = false;
+	
+	if (mode != GSVideoMode::Unknown && !s_phase_vmode) {
+		LogUnified("@@PHASE@@ FIRST_VMODE_RESOLVE\n");
+		s_phase_vmode = true;
+	}
+
+	if (log_cnt < 10 || mode != last_mode) {
+		const char* tag = (mode != GSVideoMode::Unknown) ? "@@VMODE_OK@@" : "@@VMODE@@";
+		// Check isReallyInterlaced logic: (m_regs->SYNCV.VFP & 0x1) && m_regs->SMODE1.CMOD
+		bool real_int = (m_regs->SYNCV.VFP & 0x1) && m_regs->SMODE1.CMOD;
+		LogUnified("%s mode=%s CMOD=%d LC=%d INT=%d RealINT=%d VFP=%d\n", 
+			tag, mode_str, Colorburst, PLL_Divider, m_regs->SMODE2.INT, real_int, m_regs->SYNCV.VFP);
+		log_cnt++;
+		last_mode = mode;
+	}
+
+	return mode;
 
 	ASSUME(0); // unreachable
 }
@@ -1455,6 +1490,21 @@ void GSState::GIFRegHandlerTRXDIR(const GIFReg* RESTRICT r)
 
 	m_env.TRXDIR = r->TRXDIR;
 
+	// [TEMP_DIAG] @@GS_TRXDIR@@
+	{
+		static int s_trxdir_n = 0;
+		if (s_trxdir_n < 30) {
+			Console.WriteLn("@@GS_TRXDIR@@ n=%d xdir=%d DBP=0x%x DBW=%d DPSM=%d SBP=0x%x dst(%d,%d)-(%d,%d) total=%dx%d",
+				s_trxdir_n, m_env.TRXDIR.XDIR,
+				m_env.BITBLTBUF.DBP, m_env.BITBLTBUF.DBW, m_env.BITBLTBUF.DPSM,
+				m_env.BITBLTBUF.SBP,
+				m_env.TRXPOS.DSAX, m_env.TRXPOS.DSAY,
+				m_env.TRXPOS.DSAX + m_env.TRXREG.RRW, m_env.TRXPOS.DSAY + m_env.TRXREG.RRH,
+				m_env.TRXREG.RRW, m_env.TRXREG.RRH);
+			s_trxdir_n++;
+		}
+	}
+
 	switch (m_env.TRXDIR.XDIR)
 	{
 		case 0: // host -> local
@@ -1769,6 +1819,8 @@ void GSState::FlushPrim()
 		// Skip draw if Z test is enabled, but set to fail all pixels.
 		const bool skip_draw = (m_context->TEST.ZTE && m_context->TEST.ZTST == ZTST_NEVER);
 		m_quad_check_valid = false;
+		m_drawlist.clear();
+		m_drawlist_bbox.clear();
 
 		if (!skip_draw)
 			Draw();
@@ -1941,6 +1993,18 @@ void GSState::Write(const u8* mem, int len)
 	if (m_env.TRXDIR.XDIR == 3)
 		return;
 
+	// [TEMP_DIAG] @@GS_WRITE@@
+	{
+		static int s_gswrite_n = 0;
+		if (s_gswrite_n < 30) {
+			Console.WriteLn("@@GS_WRITE@@ n=%d len=%d DBP=0x%x DBW=%d DPSM=%d total=%d end=%d trW=%d trH=%d",
+				s_gswrite_n, len,
+				m_tr.m_blit.DBP, m_tr.m_blit.DBW, m_tr.m_blit.DPSM,
+				m_tr.total, m_tr.end, m_tr.w, m_tr.h);
+			s_gswrite_n++;
+		}
+	}
+
 	CheckWriteOverlap(true, false);
 
 	if (!m_tr.Update(m_tr.w, m_tr.h, GSLocalMemory::m_psm[m_tr.m_blit.DPSM].trbpp, len))
@@ -1987,6 +2051,27 @@ void GSState::Write(const u8* mem, int len)
 			InvalidateVideoMem(blit, r);
 
 			psm.wi(m_mem, m_tr.x, m_tr.y, mem, m_tr.total, blit, m_tr.m_pos, m_tr.m_reg);
+
+			// [TEMP_DIAG] @@GS_WRITE_VERIFY@@
+			{
+				static int s_wv_n = 0;
+				if (s_wv_n < 20) {
+					// Check VRAM at destination block address
+					const u32 dbp = blit.DBP;
+					const u32 byte_off = dbp * 256u;
+					const u8* vm = m_mem.vm8();
+					u32 nonzero = 0;
+					u32 total_check = std::min<u32>(m_tr.total, 256u);
+					for (u32 i = 0; i < total_check; i++) {
+						if (vm[byte_off + i] != 0) nonzero++;
+					}
+					const u32* v32 = reinterpret_cast<const u32*>(vm + byte_off);
+					Console.WriteLn("@@GS_WRITE_VERIFY@@ n=%d DBP=0x%x byteOff=0x%x nonzero=%u/%u first=[%08x %08x %08x %08x]",
+						s_wv_n, dbp, byte_off, nonzero, total_check,
+						v32[0], v32[1], v32[2], v32[3]);
+					s_wv_n++;
+				}
+			}
 
 			m_tr.start = m_tr.end = m_tr.total;
 
@@ -2382,6 +2467,27 @@ template void GSState::Transfer<3>(const u8* mem, u32 size);
 template <int index>
 void GSState::Transfer(const u8* mem, u32 size)
 {
+	// [TEMP_DIAG] @@GS_TRANSFER@@ — counter moved to GS.cpp wrappers
+	{
+		static int s_xfer_total[4] = {};
+		static int s_draw_n[4] = {};
+		const GIFTag* tag = reinterpret_cast<const GIFTag*>(mem);
+		s_xfer_total[index]++;
+		// Log drawing commands (PRE=1 or NREG>1 or FLG=1 reglist) and total counts
+		bool is_draw = (tag->PRE && tag->FLG == 0) || tag->FLG == 1 || tag->NREG > 1;
+		if (is_draw && s_draw_n[index] < 30) {
+			Console.WriteLn("@@GS_DRAW@@ path=%d n=%d total_xfer=%d size=%u nloop=%u flg=%u pre=%u prim=0x%x nreg=%u regs=0x%llx",
+				index, s_draw_n[index], s_xfer_total[index], size,
+				(u32)(tag->NLOOP), (u32)(tag->FLG), (u32)(tag->PRE), (u32)(tag->PRIM),
+				(u32)(tag->NREG), (unsigned long long)(tag->REGS));
+			s_draw_n[index]++;
+		}
+		// Also log total transfer count periodically
+		if (s_xfer_total[index] == 50 || s_xfer_total[index] == 100 || s_xfer_total[index] == 500) {
+			Console.WriteLn("@@GS_XFER_COUNT@@ path=%d total=%d draws=%d", index, s_xfer_total[index], s_draw_n[index]);
+		}
+	}
+
 	const u8* start = mem;
 
 	GIFPath& path = m_path[index];
@@ -3129,6 +3235,77 @@ GSState::PRIM_OVERLAP GSState::PrimitiveOverlap()
 #endif
 
 	// fprintf(stderr, "%d: Yes, code can be optimized (draw of %d vertices)\n", s_n, count);
+	return overlap;
+}
+
+GSState::PRIM_OVERLAP GSState::GetPrimitiveOverlapDrawlist(bool save_drawlist, bool save_bbox, float bbox_scale)
+{
+	// For sprites, use the existing PrimitiveOverlap() which populates m_drawlist.
+	if (m_vt.m_primclass == GS_SPRITE_CLASS)
+	{
+		if (m_drawlist.empty())
+			return PrimitiveOverlap();
+		return m_prim_overlap;
+	}
+
+	// For non-sprite primclasses (TRIANGLE, LINE, POINT), perform basic overlap detection.
+	const int n = GSUtil::GetClassVertexCount(m_vt.m_primclass);
+	const GSVertex* RESTRICT v = m_vertex.buff;
+	const u16* RESTRICT index = m_index.buff;
+	const u32 count = m_index.tail;
+
+	if (count < static_cast<u32>(n * 2))
+	{
+		if (save_drawlist)
+			m_drawlist.push_back(count / n);
+		return PRIM_OVERLAP_NO;
+	}
+
+	PRIM_OVERLAP overlap = PRIM_OVERLAP_NO;
+
+	u32 i = 0;
+	while (i < count)
+	{
+		GSVector4i pt = GSVector4i(v[index[i]].m[1]).upl16();
+		GSVector4i all = pt.xyxy();
+		for (int k = 1; k < n; k++)
+		{
+			pt = GSVector4i(v[index[i + k]].m[1]).upl16();
+			all = all.min_i32(pt.xyxy()).blend32<0xc>(all.max_i32(pt.xyxy()));
+		}
+
+		u32 j = i + n;
+		while (j < count)
+		{
+			GSVector4i prim_min, prim_max;
+			pt = GSVector4i(v[index[j]].m[1]).upl16();
+			prim_min = prim_max = pt;
+			for (int k = 1; k < n; k++)
+			{
+				pt = GSVector4i(v[index[j + k]].m[1]).upl16();
+				prim_min = prim_min.min_i32(pt);
+				prim_max = prim_max.max_i32(pt);
+			}
+			GSVector4i bbox = prim_min.xyxy().blend32<0xc>(prim_max.xyxy());
+
+			if (all.rintersect(bbox).rempty())
+			{
+				all = all.runion(bbox);
+			}
+			else
+			{
+				overlap = PRIM_OVERLAP_YES;
+				break;
+			}
+			j += n;
+		}
+
+		if (save_drawlist)
+			m_drawlist.push_back((j - i) / n);
+
+		i = j;
+	}
+
 	return overlap;
 }
 

@@ -5,6 +5,7 @@
 #include "CrashHandler.h"
 #include "HostSys.h"
 #include "Threading.h"
+#include "Console.h"
 
 #include <mutex>
 
@@ -113,6 +114,9 @@ void pxOnAssertFail(const char* file, int line, const char* func, const char* ms
 	fputs(full_msg, stderr);
 	fputs("\nAborting application.\n", stderr);
 	fflush(stderr);
+	// [iter36] Mirror assert message to pcsx2_log.txt so it's visible without stderr access.
+	// Removal condition: assert root causeが特定・fixされた後。
+	Console.Error("@@ASSERT_FAIL@@ %s", full_msg);
 	AbortWithMessage(full_msg);
 #endif
 

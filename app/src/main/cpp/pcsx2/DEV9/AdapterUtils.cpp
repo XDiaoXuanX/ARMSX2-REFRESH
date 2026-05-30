@@ -293,12 +293,12 @@ std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter) {
             macAddr.bytes[i] = static_cast<uint8_t>(values[i]);
     }
 
-	return macAddr;
+    return macAddr;
 }
 #elif defined(__APPLE__) && TARGET_OS_IPHONE
 std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter)
 {
-	return std::nullopt;
+    return std::nullopt;
 }
 #else
 std::optional<MAC_Address> AdapterUtils::GetAdapterMAC(const Adapter* adapter)

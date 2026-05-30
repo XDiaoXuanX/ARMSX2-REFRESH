@@ -1265,7 +1265,7 @@ void Achievements::HandleLeaderboardSubmittedEvent(const rc_client_event_t* even
 				event->leaderboard->tracker_value ? event->leaderboard->tracker_value : "Unknown",
 				EmuConfig.Achievements.SpectatorMode ? std::string_view() : TRANSLATE_SV("Achievements", " (Submitting)"));
 
-		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = s_game_icon, id = event->leaderboard->id]() {
+		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = Achievements::s_game_icon, id = event->leaderboard->id]() {
 			if (ImGuiManager::InitializeFullscreenUI())
 			{
 				ImGuiFullscreen::AddNotification(fmt::format("leaderboard_{}", id), EmuConfig.Achievements.LeaderboardsDuration,
@@ -1300,7 +1300,7 @@ void Achievements::HandleLeaderboardScoreboardEvent(const rc_client_event_t* eve
 				event->leaderboard_scoreboard->submitted_score, event->leaderboard_scoreboard->best_score),
 			event->leaderboard_scoreboard->new_rank, event->leaderboard_scoreboard->num_entries);
 
-		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = s_game_icon, id = event->leaderboard->id]() {
+		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = Achievements::s_game_icon, id = event->leaderboard->id]() {
 			if (ImGuiManager::InitializeFullscreenUI())
 			{
 				ImGuiFullscreen::AddNotification(fmt::format("leaderboard_{}", id), EmuConfig.Achievements.LeaderboardsDuration,

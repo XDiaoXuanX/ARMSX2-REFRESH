@@ -18,6 +18,9 @@
 #include "common/Path.h"
 
 #include <cctype>
+#include "CDVD/IsoReader.h"
+#include "IopDma.h"
+#include "common/Error.h"
 #include <cstring>
 #include <fmt/format.h>
 #include <sys/stat.h>
@@ -81,6 +84,7 @@ typedef struct
 
 static std::string hostRoot;
 
+
 void Hle_SetHostRoot(const char* bootFilename)
 {
 	hostRoot = Path::ToNativePath(Path::GetDirectory(bootFilename));
@@ -91,6 +95,9 @@ void Hle_ClearHostRoot()
 {
 	hostRoot = {};
 }
+
+// [TEMP_DIAG] IOP reboot counter — defined in R3000AInterpreter.cpp
+extern u32 g_iop_reboot_count;
 
 namespace R3000A
 {
@@ -346,6 +353,77 @@ namespace R3000A
 		}
 	};
 
+	// [FIX] CdromFile: cdrom0: ファイルを PCSX2 の IsoReader で直接読み取り。
+	// IOP native CDVD がreset後にbehaviorしないissueの回避策。
+	// UDNL が cdrom0:\MODULES\IOPRP213.IMG;1 を読む際に使用される。
+	// Removal condition: IOP native CDVD が正常behaviorするようになった後
+	class CdromFile : public IOManFile
+	{
+	public:
+		std::vector<u8> data;
+		size_t pos;
+
+		CdromFile(std::vector<u8> filedata) : data(std::move(filedata)), pos(0) {}
+		virtual ~CdromFile() = default;
+		virtual void close() override { delete this; }
+
+		virtual int lseek(s32 offset, s32 whence) override {
+			switch (whence) {
+				case IOP_SEEK_SET: pos = offset; break;
+				case IOP_SEEK_CUR: pos += offset; break;
+				case IOP_SEEK_END: pos = data.size() + offset; break;
+				default: return -IOP_EIO;
+			}
+			if (pos > data.size()) pos = data.size();
+			return (int)pos;
+		}
+
+		virtual int read(void* buf, u32 count) override {
+			if (pos >= data.size()) return 0;
+			u32 avail = (u32)(data.size() - pos);
+			u32 to_read = std::min(count, avail);
+			std::memcpy(buf, data.data() + pos, to_read);
+			pos += to_read;
+			return (int)to_read;
+		}
+
+		static int open(IOManFile** file, const std::string& full_path, s32 flags, u16 mode) {
+			// cdrom0: パスから ISO パスを取得
+			std::string iso_path = full_path;
+			// "cdrom0:" or "cdrom0:\" prefix をdelete
+			size_t colon = iso_path.find(':');
+			if (colon != std::string::npos)
+				iso_path = iso_path.substr(colon + 1);
+			// 先頭の \ や / をdelete
+			while (!iso_path.empty() && (iso_path[0] == '\\' || iso_path[0] == '/'))
+				iso_path.erase(0, 1);
+			// \ を / に変換
+			for (char& c : iso_path) if (c == '\\') c = '/';
+			// ";1" をdelete (ISO 9660 version suffix)
+			size_t semi = iso_path.find(';');
+			if (semi != std::string::npos)
+				iso_path = iso_path.substr(0, semi);
+
+			// IsoReader で読み取り
+			IsoReader isor;
+			Error err;
+			if (!isor.Open(&err)) {
+				Console.WriteLn("@@CDROM_HLE@@ IsoReader::Open failed: %s", err.GetDescription().c_str());
+				return -IOP_ENOENT;
+			}
+			std::vector<u8> filedata;
+			if (!isor.ReadFile(iso_path, &filedata, &err)) {
+				Console.WriteLn("@@CDROM_HLE@@ IsoReader::ReadFile('%s') failed: %s",
+					iso_path.c_str(), err.GetDescription().c_str());
+				return -IOP_ENOENT;
+			}
+
+			Console.WriteLn("@@CDROM_HLE@@ Opened '%s' via IsoReader (%zu bytes)", iso_path.c_str(), filedata.size());
+			*file = new CdromFile(std::move(filedata));
+			return 0;
+		}
+	};
+
 	class HostDir : public IOManDir
 	{
 	public:
@@ -595,6 +673,14 @@ namespace R3000A
 			s32 flags = a1;
 			u16 mode = a2;
 
+			// [TEMP_DIAG] Log all ioman.open calls for debugging
+			{
+				static int s_open_log = 0;
+				if (s_open_log < 100) {
+					Console.WriteLn("@@IOP_OPEN@@ n=%d path='%s' flags=%d ioppc=%08x", s_open_log++, path.c_str(), flags, pc);
+				}
+			}
+
 			if (is_host(path))
 			{
 				if (!freefdcount())
@@ -630,6 +716,29 @@ namespace R3000A
 					}
 				}
 
+				pc = ra;
+				return 1;
+			}
+
+			// [FIX] cdrom0: パスを CdromFile でhandling (IOP native CDVD バイパス)
+			// disabled化: CdromFile HLE があるとゲームの init パスが変わり IOPRP reboot をskipする。
+			// IOPRP_ARG_INJECT + IOPRP 版 cdvdman/cdvdfsv で自然な cdrom0: アクセスに任せる。
+			if (false && (path.find("cdrom0:") == 0 || path.find("cdrom0\\") == 0)) {
+				if (!freefdcount()) {
+					v0 = -IOP_EMFILE;
+					pc = ra;
+					return 1;
+				}
+				IOManFile* cdfile = NULL;
+				int err = CdromFile::open(&cdfile, path, flags, mode);
+				if (err != 0 || !cdfile) {
+					v0 = (err != 0) ? err : -IOP_EIO;
+					if (cdfile) cdfile->close();
+				} else {
+					v0 = allocfd(cdfile);
+					if ((s32)v0 < 0)
+						cdfile->close();
+				}
 				pc = ra;
 				return 1;
 			}
@@ -1128,6 +1237,16 @@ namespace R3000A
 			s32 version_major = iopMemRead8(a0reg + 9);
 			s32 version_minor = iopMemRead8(a0reg + 8);
 			DevCon.WriteLn(Color_Gray, "RegisterLibraryEntries: %8.8s version %x.%02x", modname.data(), version_major, version_minor);
+			// [TEMP_DIAG] sifcmd ロード時の IOP DMA/INTC/SBUS stateダンプ
+			if (modname == "sifcmd" || modname == "sifman_disabled_for_trace") {
+				u32 d9chcr = psxHu32(0x1528);
+				u32 f240  = psHu32(0xF240);
+				u32 v179b8 = (iopMem && iopMem->Main) ? *(u32*)(iopMem->Main + 0x179B8) : 0xDEADu;
+				u32 v179bc = (iopMem && iopMem->Main) ? *(u32*)(iopMem->Main + 0x179BC) : 0xDEADu;
+				u32 iop_ra = psxRegs.GPR.r[31];
+				Console.WriteLn("@@SIFCMD_LOAD@@ mod=%s a0=%08x ra=%08x D9_CHCR=%08x [179B8]=%08x [179BC]=%08x F240=%08x cyc=%u",
+					modname.c_str(), a0reg, iop_ra, d9chcr, v179b8, v179bc, f240, psxRegs.cycle);
+				}
 
 			R3000SymbolGuardian.ReadWrite([&](ccc::SymbolDatabase& database) {
 				ccc::Result<ccc::SymbolSourceHandle> source = database.get_symbol_source("IRX Export Table");
@@ -1226,6 +1345,20 @@ namespace R3000A
 			LoadFuncs(a0);
 
 			const std::string modname = iopMemReadString(a0 + 12);
+			// [TEMP_DIAG] IOP モジュールロード追跡 (reboot 毎にreset)
+			{
+				static u32 s_rle_n = 0;
+				static u32 s_iop_boot = 0;
+				// R3000AInterpreter.cpp の 0x890 handlerから呼ばれる
+				// g_iop_reboot_count declared at file scope above namespace
+				if (g_iop_reboot_count != s_iop_boot) {
+					s_iop_boot = g_iop_reboot_count;
+					s_rle_n = 0;
+				}
+				if (s_rle_n++ < 50)
+					Console.WriteLn("@@REG_LIB_ENT@@ boot=%u n=%u mod=%s a0=%08x iop_pc=%08x",
+						s_iop_boot, s_rle_n, modname.c_str(), a0, (u32)pc);
+			}
 			if (modname == "thbase")
 			{
 				const u32 version = iopMemRead32(a0 + 8);
@@ -1284,7 +1417,14 @@ namespace R3000A
 	{
 		void sceSifRegisterRpc_DEBUG()
 		{
-			DevCon.WriteLn(Color_Gray, "sifcmd sceSifRegisterRpc: rpc_id %x", a1);
+			// [iter671] @@IOP_SIF_REGISTER@@ IOP側SIFサーバー登録detect
+			// a0=server_data, a1=rpc_id, a2=func, a3=buff
+			// Removal condition: SIF bind server_ptr=0 issue解決後
+			static int s_reg_n = 0;
+			if (s_reg_n < 50) {
+				Console.WriteLn("@@IOP_SIF_REGISTER@@ n=%d rpc_id=%08x func=%08x server_data=%08x buff=%08x ioppc=%08x",
+					s_reg_n++, (u32)a1, (u32)a2, (u32)a0, (u32)a3, (u32)pc);
+			}
 		}
 	} // namespace sifcmd
 
@@ -1445,13 +1585,60 @@ namespace R3000A
 
 		irxImportLog(libname, index, funcname);
 
+		// [iter229] TEMP_DIAG: IOP module call trace
+		// [iter671] cap 50→200, sifcmd/sifman/loadfile フィルタadd
+		{
+			static u32 s_irx_n = 0;
+			bool is_critical = (libname == "sifcmd" || libname == "sifman" || libname == "loadfile" ||
+								libname == "sifinitrp" || index == 17);
+			// [iter683] IRX_CALL log removed — was spamming 880K+ lines
+		if (s_irx_n++ < 50) {
+				const char* fn = funcname ? funcname : "unknown";
+				unsigned idx_val = index;
+				Console.WriteLn("@@IRX_CALL@@ n=%u lib=%s idx=%u fn=%s ioppc=%08x",
+					s_irx_n, libname.c_str(), idx_val, fn, (u32)pc);
+			}
+			// [TEMP_DIAG] Log import calls from game modules (IOP 0x100000+)
+			static u32 s_game_irx_n = 0;
+			if (pc >= 0x100000u && s_game_irx_n < 500) {
+				const char* fn = funcname ? funcname : "unknown";
+				Console.WriteLn("@@GAME_IRX_CALL@@ n=%u lib=%s idx=%u fn=%s ioppc=%08x a0=%08x a1=%08x",
+					s_game_irx_n++, libname.c_str(), (unsigned)index, fn, (u32)pc,
+					(u32)a0, (u32)a1);
+				// [TEMP_DIAG] Dump printf format string for the game module's stuck printf
+				if (libname == "stdio" && index == 4 && (s_game_irx_n <= 105 || a0 == 0x00114210u)) {
+					char buf[64] = {};
+					for (int i = 0; i < 63; i++) {
+						buf[i] = (char)iopMemRead8(a0 + i);
+						if (!buf[i]) break;
+					}
+					// Also read %s argument if present
+					char arg_str[128] = {};
+					if (a1 && a1 < 0x200000u) {
+						for (int i = 0; i < 127; i++) {
+							arg_str[i] = (char)iopMemRead8(a1 + i);
+							if (!arg_str[i]) break;
+						}
+					}
+					Console.WriteLn("@@IOP_PRINTF@@ fmt='%s' arg='%s' a1=%08x", buf, arg_str, (u32)a1);
+				}
+			}
+		}
+
 		if (debug)
 			debug();
 
+		int result = 0;
 		if (hle)
-			return hle();
-		else
-			return 0;
+			result = hle();
+
+		// [iPSX2] Trace Probe
+		if (libname.find("loadfile") != std::string::npos) {
+				Console.WriteLn("@@TRACE_LOADFILE@@ func=%s result=%d", funcname, result);
+		}
+
+		if (hle) return result;
+		else return 0;
 	}
 
 } // end namespace R3000A

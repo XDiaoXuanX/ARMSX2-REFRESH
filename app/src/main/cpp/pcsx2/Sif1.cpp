@@ -38,6 +38,20 @@ static __fi bool WriteEEtoFifo()
 		return false;
 	}
 
+	// [TEMP_DIAG] @@SIF1_EE2FIFO@@ — data read from EE RAM for SIF1 (EE→IOP)
+	// Removal condition: deviceBIOSdisplayafter success
+	{
+		static int s_e2f = 0;
+		if (s_e2f < 20) {
+			u32* d = (u32*)ptag;
+			Console.WriteLn("@@SIF1_EE2FIFO@@ n=%d madr=%08x qwc=%d data=%08x %08x %08x %08x",
+				s_e2f++, sif1ch.madr, writeSize,
+				(writeSize << 2) >= 1 ? d[0] : 0xDEAD,
+				(writeSize << 2) >= 2 ? d[1] : 0xDEAD,
+				(writeSize << 2) >= 3 ? d[2] : 0xDEAD,
+				(writeSize << 2) >= 4 ? d[3] : 0xDEAD);
+		}
+	}
 	sif1.fifo.write((u32*)ptag, writeSize << 2);
 
 	sif1ch.madr += writeSize << 4;
@@ -59,6 +73,20 @@ static __fi bool WriteFifoToIOP()
 	SIF_LOG("Sif 1 IOP doing transfer %04X to %08X", readSize, HW_DMA10_MADR);
 
 	sif1.fifo.read((u32*)iopPhysMem(hw_dma10.madr), readSize);
+	// [TEMP_DIAG] @@SIF1_FIFO2IOP@@ — data actually written to IOP RAM
+	// Removal condition: deviceBIOSdisplayafter success
+	{
+		static int s_f2i = 0;
+		if (s_f2i < 20) {
+			u32* dst = (u32*)iopPhysMem(hw_dma10.madr);
+			Console.WriteLn("@@SIF1_FIFO2IOP@@ n=%d madr=%08x sz=%d data=%08x %08x %08x %08x",
+				s_f2i++, hw_dma10.madr, readSize,
+				readSize >= 1 ? dst[0] : 0xDEAD,
+				readSize >= 2 ? dst[1] : 0xDEAD,
+				readSize >= 3 ? dst[2] : 0xDEAD,
+				readSize >= 4 ? dst[3] : 0xDEAD);
+		}
+	}
 	psxCpu->Clear(hw_dma10.madr, readSize);
 	hw_dma10.madr += readSize << 2;
 	sif1.iop.cycles += readSize >> 2;		// fixme: should be >> 4
@@ -127,6 +155,13 @@ static __fi bool SIFIOPReadTag()
 // Stop processing EE, and signal an interrupt.
 static __fi void EndEE()
 {
+	// [TEMP_DIAG] @@SIF1_ENDEE@@
+	{
+		static int s_s1ee = 0;
+		if (s_s1ee < 20)
+			Console.WriteLn("@@SIF1_ENDEE@@ n=%d cycles=%d ee_cyc=%u",
+				s_s1ee++, sif1.ee.cycles, cpuRegs.cycle);
+	}
 	sif1.ee.end = false;
 	sif1.ee.busy = false;
 	SIF_LOG("Sif 1: End EE");
@@ -162,7 +197,7 @@ static __fi void EndIOP()
 		sif1.iop.cycles = 1;
 	}
 	// iop is 1/8th the clock rate of the EE and psxcycles is in words (not quadwords)
-	PSX_INT(IopEvt_SIF1, /*std::min((*/sif1.iop.cycles/* * 26*//*), 1024)*/);
+	PSX_INT(IopEvt_SIF1, sif1.iop.cycles);
 }
 
 // Handle the EE transfer.
@@ -304,12 +339,27 @@ __fi void SIF1Dma()
 
 __fi void  sif1Interrupt()
 {
+	// [TEMP_DIAG] @@SIF1_IOPINT@@
+	{
+		static int s_s1iop = 0;
+		if (s_s1iop < 20)
+			Console.WriteLn("@@SIF1_IOPINT@@ n=%d iop_cyc=%u D10_CHCR=%08x",
+				s_s1iop++, psxRegs.cycle, HW_DMA10_CHCR);
+	}
 	HW_DMA10_CHCR &= ~0x01000000; //reset TR flag
 	psxDmaInterrupt2(3);
+
 }
 
 __fi void  EEsif1Interrupt()
 {
+	// [TEMP_DIAG] @@SIF1_EEINT@@
+	{
+		static int s_s1eeint = 0;
+		if (s_s1eeint < 20)
+			Console.WriteLn("@@SIF1_EEINT@@ n=%d ee_cyc=%u",
+				s_s1eeint++, cpuRegs.cycle);
+	}
 	hwDmacIrq(DMAC_SIF1);
 	sif1ch.chcr.STR = false;
 }
@@ -318,6 +368,15 @@ __fi void  EEsif1Interrupt()
 // Main difference is this checks for iop, where psxDma10 checks for ee.
 __fi void dmaSIF1()
 {
+	// [TEMP_DIAG] @@DMASIF1_EE@@ — EE-side SIF1 (D6 EE→IOP) DMA start
+	// Removal condition: deviceBIOSdisplayafter success
+	{
+		static int s_d1_n = 0;
+		if (s_d1_n < 30)
+			Console.WriteLn("@@DMASIF1_EE@@ n=%d chcr=%08x madr=%08x qwc=%04x tadr=%08x ee_cyc=%u fifo_sz=%d iop_busy=%d",
+				s_d1_n++, sif1ch.chcr._u32, sif1ch.madr, sif1ch.qwc, sif1ch.tadr, cpuRegs.cycle,
+				sif1.fifo.size, (int)sif1.iop.busy);
+	}
 	SIF_LOG("dmaSIF1 %s", sif1ch.cmqt_to_str().c_str());
 
 	if (sif1.fifo.readPos != sif1.fifo.writePos)

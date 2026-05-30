@@ -117,3 +117,5 @@ extern bool IsBIOSAvailable(const std::string& full_path);
 
 extern bool LoadBIOS();
 extern void CopyBIOSToMemory();
+extern bool BiosRetriggerEeloadCopy(); // [iter230] late EELOAD re-copy after kernel init clears RAM
+extern void BiosResetEeloadCopyFlag(); // [R57] warm reboot 後の再コピーを許可する

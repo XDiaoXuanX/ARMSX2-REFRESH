@@ -8,6 +8,9 @@
 #include "common/StringUtil.h"
 
 #include <array>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 #ifdef ENABLE_VULKAN
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
@@ -205,7 +208,7 @@ GSRendererType GSUtil::GetPreferredRenderer()
 	if (preferred_renderer == GSRendererType::Auto)
 	{
 #if defined(__APPLE__)
-		// Mac: Prefer Metal hardware.
+		// Mac/iOS: Prefer Metal hardware (device).
 		preferred_renderer = GSRendererType::Metal;
 #elif defined(_WIN32) && defined(_M_ARM64)
 		// Default to DX12 on Windows-on-ARM.
@@ -214,23 +217,21 @@ GSRendererType GSUtil::GetPreferredRenderer()
 		// Use D3D device info to select renderer.
 		preferred_renderer = D3D::GetPreferredRenderer();
 #else
-		// Linux/Android: Prefer OpenGL over Vulkan for better compatibility and stability.
-#if defined(ENABLE_OPENGL)
-		preferred_renderer = GSRendererType::OGL;
-#elif defined(ENABLE_VULKAN)
+		// Linux: Prefer Vulkan if the driver isn't buggy.
+#if defined(ENABLE_VULKAN)
 		if (GSDeviceVK::IsSuitableDefaultRenderer())
 			preferred_renderer = GSRendererType::VK;
 #endif
-		if (preferred_renderer == GSRendererType::Auto)
-		{
-#if defined(ENABLE_VULKAN)
-			preferred_renderer = GSRendererType::VK;
-#elif defined(ENABLE_OPENGL)
-			preferred_renderer = GSRendererType::OGL;
+
+			// Otherwise, whatever is available.
+	if (preferred_renderer == GSRendererType::Auto) // If it's still auto, VK wasn't selected.
+#if defined(ENABLE_OPENGL)
+		preferred_renderer = GSRendererType::OGL;
+#elif defined(ENABLE_VULKAN)
+		preferred_renderer = GSRendererType::VK;
 #else
-			preferred_renderer = GSRendererType::SW;
+		preferred_renderer = GSRendererType::SW;
 #endif
-		}
 #endif
 	}
 
