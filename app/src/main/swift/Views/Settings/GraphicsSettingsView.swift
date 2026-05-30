@@ -121,6 +121,50 @@ struct GraphicsSettingsView: View {
                 }
             }
 
+            Section("Texture Replacement") {
+                Toggle("Load Replacement Textures", isOn: $settings.loadTextureReplacements)
+                Text("Loads PNG or DDS texture packs from Documents/textures/[Game Serial]/replacements/. Requires restart.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Async Loading", isOn: $settings.loadTextureReplacementsAsync)
+                    .disabled(!settings.loadTextureReplacements)
+                Text("Loads replacement textures in the background to reduce boot stalls.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Precache Textures", isOn: $settings.precacheTextureReplacements)
+                    .disabled(!settings.loadTextureReplacements)
+                Text("Loads all replacements when the game starts. Faster in-game, but uses more RAM.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker("Texture Preloading", selection: $settings.texturePreloading) {
+                    Text("Off").tag(0)
+                    Text("Partial").tag(1)
+                    Text("Full").tag(2)
+                }
+                Text("Core texture preloading mode. Full can improve replacement behavior but may increase memory use.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Texture Dumping") {
+                Toggle("Dump Replaceable Textures", isOn: $settings.dumpReplaceableTextures)
+                Text("Writes discovered textures to Documents/textures/[Game Serial]/dumps/. This can heavily reduce performance.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Dump Mipmaps", isOn: $settings.dumpReplaceableMipmaps)
+                    .disabled(!settings.dumpReplaceableTextures)
+                Toggle("Dump During FMV", isOn: $settings.dumpTexturesWithFMVActive)
+                    .disabled(!settings.dumpReplaceableTextures)
+                Toggle("Dump Direct Textures", isOn: $settings.dumpDirectTextures)
+                    .disabled(!settings.dumpReplaceableTextures)
+                Toggle("Dump Palette Textures", isOn: $settings.dumpPaletteTextures)
+                    .disabled(!settings.dumpReplaceableTextures)
+            }
+
             Section("VSync") {
                 Stepper("Queue Size: \(settings.vsyncQueueSize)", value: $settings.vsyncQueueSize, in: 2...16)
                 Text("Higher values reduce frame drops but increase latency.")

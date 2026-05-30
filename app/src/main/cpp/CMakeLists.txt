@@ -270,6 +270,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		"-framework QuartzCore"
 		"-framework CoreText"
 		"-framework CoreGraphics"
+		"-framework ImageIO"
 	)
 	if(NOT ARMSX2_MAC_CATALYST)
 		list(APPEND ARMSX2_APPLE_FRAMEWORKS "-framework OpenGLES")

@@ -11,8 +11,13 @@
 #include "GS/Renderers/HW/GSTextureReplacements.h"
 
 #include <csetjmp>
+#include <limits>
 #if !TARGET_OS_IPHONE
 #include <png.h>
+#else
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
 #endif
 
 struct LoaderDefinition
@@ -25,9 +30,7 @@ static bool PNGLoader(const std::string& filename, GSTextureReplacements::Replac
 static bool DDSLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image);
 
 static constexpr LoaderDefinition s_loaders[] = {
-#if !TARGET_OS_IPHONE
 	{"png", PNGLoader},
-#endif
 	{"dds", DDSLoader},
 };
 
@@ -156,7 +159,59 @@ bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTe
     // ... (existing code)
 }
 #else
-bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image) { return false; }
+bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image)
+{
+	if (filename.empty())
+		return false;
+
+	CFURLRef url = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
+		reinterpret_cast<const UInt8*>(filename.c_str()), filename.length(), false);
+	if (!url)
+		return false;
+
+	CGImageSourceRef source = CGImageSourceCreateWithURL(url, nullptr);
+	CFRelease(url);
+	if (!source)
+		return false;
+
+	CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+	CFRelease(source);
+	if (!image)
+		return false;
+
+	const size_t width = CGImageGetWidth(image);
+	const size_t height = CGImageGetHeight(image);
+	if (width == 0 || height == 0 || width > std::numeric_limits<u32>::max() || height > std::numeric_limits<u32>::max())
+	{
+		CGImageRelease(image);
+		return false;
+	}
+
+	const size_t bytes_per_row = width * sizeof(u32);
+	std::vector<u8> data(bytes_per_row * height);
+	CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
+	const CGBitmapInfo bitmap_info = static_cast<CGBitmapInfo>(kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast);
+	CGContextRef context = CGBitmapContextCreate(data.data(), width, height, 8, bytes_per_row, color_space, bitmap_info);
+	if (color_space)
+		CGColorSpaceRelease(color_space);
+	if (!context)
+	{
+		CGImageRelease(image);
+		return false;
+	}
+
+	CGContextDrawImage(context, CGRectMake(0, 0, static_cast<CGFloat>(width), static_cast<CGFloat>(height)), image);
+	CGContextRelease(context);
+	CGImageRelease(image);
+
+	tex->width = static_cast<u32>(width);
+	tex->height = static_cast<u32>(height);
+	tex->format = GSTexture::Format::Color;
+	tex->pitch = static_cast<u32>(bytes_per_row);
+	tex->data = std::move(data);
+	tex->mips.clear();
+	return true;
+}
 #endif
 
 #if !TARGET_OS_IPHONE
@@ -165,7 +220,73 @@ bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width,
     // ... (existing code)
 }
 #else
-bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width, u32 height, const u8* buffer, u32 pitch) { return false; }
+bool GSTextureReplacements::SavePNGImage(const std::string& filename, u32 width, u32 height, const u8* buffer, u32 pitch)
+{
+	if (filename.empty() || width == 0 || height == 0 || !buffer)
+		return false;
+
+	const size_t bytes_per_row = static_cast<size_t>(width) * sizeof(u32);
+	const size_t total_bytes = bytes_per_row * height;
+	const u8* data_ptr = buffer;
+	std::vector<u8> compact_data;
+
+	if (pitch != bytes_per_row)
+	{
+		compact_data.resize(total_bytes);
+		for (u32 y = 0; y < height; y++)
+			std::memcpy(compact_data.data() + (static_cast<size_t>(y) * bytes_per_row), buffer + (static_cast<size_t>(y) * pitch), bytes_per_row);
+		data_ptr = compact_data.data();
+	}
+
+	CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
+	if (!color_space)
+		return false;
+
+	CFDataRef data = CFDataCreate(kCFAllocatorDefault, data_ptr, total_bytes);
+	if (!data)
+	{
+		CGColorSpaceRelease(color_space);
+		return false;
+	}
+
+	CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
+	CFRelease(data);
+	if (!provider)
+	{
+		CGColorSpaceRelease(color_space);
+		return false;
+	}
+
+	const CGBitmapInfo bitmap_info = static_cast<CGBitmapInfo>(kCGBitmapByteOrder32Big | kCGImageAlphaLast);
+	CGImageRef image = CGImageCreate(width, height, 8, 32, bytes_per_row, color_space, bitmap_info,
+		provider, nullptr, false, kCGRenderingIntentDefault);
+	CGDataProviderRelease(provider);
+	CGColorSpaceRelease(color_space);
+	if (!image)
+		return false;
+
+	CFURLRef url = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
+		reinterpret_cast<const UInt8*>(filename.c_str()), filename.length(), false);
+	if (!url)
+	{
+		CGImageRelease(image);
+		return false;
+	}
+
+	CGImageDestinationRef destination = CGImageDestinationCreateWithURL(url, CFSTR("public.png"), 1, nullptr);
+	CFRelease(url);
+	if (!destination)
+	{
+		CGImageRelease(image);
+		return false;
+	}
+
+	CGImageDestinationAddImage(destination, image, nullptr);
+	const bool success = CGImageDestinationFinalize(destination);
+	CFRelease(destination);
+	CGImageRelease(image);
+	return success;
+}
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -120,6 +120,12 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 // Compatibility Lab
 + (BOOL)getJITBisectFlag:(nonnull NSString *)key defaultValue:(BOOL)def;
 + (void)setJITBisectFlag:(nonnull NSString *)key value:(BOOL)value;
++ (nonnull NSString *)compatibilityPresetForCurrentGame;
++ (nonnull NSString *)compatibilityIdentityForCurrentGame;
++ (BOOL)isCompatibilityAutoGamePresetsEnabled;
++ (void)setCompatibilityAutoGamePresetsEnabled:(BOOL)enabled;
++ (void)setCompatibilityPreset:(nonnull NSString *)preset rememberForCurrentGame:(BOOL)rememberForCurrentGame;
++ (void)forgetCompatibilityPresetForCurrentGame;
 
 // [P44] VM lifecycle for menu flow
 + (BOOL)isVMRunning;

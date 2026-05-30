@@ -6,6 +6,25 @@ import UIKit
 
 private let runtimeMenuStateChangedNotification = Notification.Name("ARMSX2iOSRuntimeMenuStateChanged")
 
+private struct CompatibilityPreset: Identifiable {
+    let id: String
+    let title: String
+    let systemImage: String
+}
+
+private let compatibilityPresets: [CompatibilityPreset] = [
+    CompatibilityPreset(id: "off", title: "Off / Default", systemImage: "power"),
+    CompatibilityPreset(id: "cop1", title: "COP1 Everything Only", systemImage: "function"),
+    CompatibilityPreset(id: "loadstore", title: "COP1 + EE Load/Store", systemImage: "arrow.left.arrow.right"),
+    CompatibilityPreset(id: "mmi", title: "COP1 + EE MMI", systemImage: "rectangle.3.group"),
+    CompatibilityPreset(id: "cop2vu", title: "COP1 + EE COP2/VU Macro", systemImage: "cube.transparent"),
+    CompatibilityPreset(id: "multdiv", title: "COP1 + EE Mult/Div", systemImage: "multiply"),
+    CompatibilityPreset(id: "shifts", title: "COP1 + EE Shifts", systemImage: "arrow.left.and.right"),
+    CompatibilityPreset(id: "moves", title: "COP1 + EE Moves/HI-LO", systemImage: "arrow.triangle.swap"),
+    CompatibilityPreset(id: "integeralu", title: "COP1 + EE Integer ALU", systemImage: "plus.forwardslash.minus"),
+    CompatibilityPreset(id: "branches", title: "COP1 + EE Branches/Jumps", systemImage: "arrow.triangle.branch"),
+]
+
 struct GameScreenView: View {
     @State private var appState = AppState.shared
     @State private var settings = SettingsStore.shared
@@ -16,6 +35,9 @@ struct GameScreenView: View {
     @State private var gameMenuAvailable = false
     @State private var showSaveStates = false
     @State private var showPNACHImporter = false
+    @State private var compatibilityPresetKey = "off"
+    @State private var compatibilityIdentity = ""
+    @State private var compatibilityAutoPresets = true
     @State private var saveStateStatus: String? = nil
 
     var body: some View {
@@ -205,10 +227,55 @@ struct GameScreenView: View {
         if gameMenuAvailable != gameReady {
             gameMenuAvailable = gameReady
         }
+        refreshCompatibilityState()
     }
 
     private var compatibilityLabSection: some View {
         Section("Compatibility Lab") {
+            Toggle(isOn: Binding(
+                get: { compatibilityAutoPresets },
+                set: { newValue in
+                    compatibilityAutoPresets = newValue
+                    ARMSX2Bridge.setCompatibilityAutoGamePresetsEnabled(newValue)
+                    refreshCompatibilityState()
+                }
+            )) {
+                Label("Auto Game Presets", systemImage: "sparkles")
+            }
+
+            let currentPreset = compatibilityPreset(for: compatibilityPresetKey)
+            Menu {
+                ForEach(compatibilityPresets) { preset in
+                    Button {
+                        applyCompatibilityPreset(preset)
+                    } label: {
+                        Label(
+                            preset.title,
+                            systemImage: preset.id == compatibilityPresetKey ? "checkmark" : preset.systemImage
+                        )
+                    }
+                }
+            } label: {
+                Label("Preset: \(currentPreset.title)", systemImage: "wand.and.stars")
+            }
+
+            if !compatibilityIdentity.isEmpty {
+                Text("Current game: \(compatibilityIdentity)")
+                Text("Preset changes are remembered for this game.")
+
+                Button {
+                    ARMSX2Bridge.forgetCompatibilityPresetForCurrentGame()
+                    refreshCompatibilityState()
+                    presentSaveStateStatus("Compatibility preset reset for \(compatibilityIdentity)")
+                } label: {
+                    Label("Forget Current Game Preset", systemImage: "trash")
+                }
+            } else {
+                Text("Start a game to remember presets per title.")
+            }
+
+            Divider()
+
             compatibilityLabToggle(
                 "COP1EverythingOnly",
                 title: "COP1 Everything Only",
@@ -260,9 +327,48 @@ struct GameScreenView: View {
     private func compatibilityLabToggle(_ key: String, title: String, systemImage: String) -> some View {
         Toggle(isOn: Binding(
             get: { ARMSX2Bridge.getJITBisectFlag(key, defaultValue: false) },
-            set: { ARMSX2Bridge.setJITBisectFlag(key, value: $0) }
+            set: {
+                ARMSX2Bridge.setJITBisectFlag(key, value: $0)
+                refreshCompatibilityState()
+            }
         )) {
             Label(title, systemImage: systemImage)
+        }
+    }
+
+    private func refreshCompatibilityState() {
+        let preset = ARMSX2Bridge.compatibilityPresetForCurrentGame()
+        let identity = ARMSX2Bridge.compatibilityIdentityForCurrentGame()
+        let autoPresets = ARMSX2Bridge.isCompatibilityAutoGamePresetsEnabled()
+
+        if compatibilityPresetKey != preset {
+            compatibilityPresetKey = preset
+        }
+        if compatibilityIdentity != identity {
+            compatibilityIdentity = identity
+        }
+        if compatibilityAutoPresets != autoPresets {
+            compatibilityAutoPresets = autoPresets
+        }
+    }
+
+    private func compatibilityPreset(for id: String) -> CompatibilityPreset {
+        if let preset = compatibilityPresets.first(where: { $0.id == id }) {
+            return preset
+        }
+
+        return CompatibilityPreset(id: "custom", title: "Custom Advanced Flags", systemImage: "slider.horizontal.3")
+    }
+
+    private func applyCompatibilityPreset(_ preset: CompatibilityPreset) {
+        let rememberForCurrentGame = !compatibilityIdentity.isEmpty
+        ARMSX2Bridge.setCompatibilityPreset(preset.id, rememberForCurrentGame: rememberForCurrentGame)
+        refreshCompatibilityState()
+
+        if rememberForCurrentGame {
+            presentSaveStateStatus("\(preset.title) saved for \(compatibilityIdentity)")
+        } else {
+            presentSaveStateStatus("Compatibility preset set to \(preset.title)")
         }
     }
 

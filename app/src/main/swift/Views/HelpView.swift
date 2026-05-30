@@ -53,12 +53,20 @@ private let helpData: [HelpSection] = [
             answer: "0.25x, 0.5x, and 0.75x are performance modes for heavy games. 1x is native PS2 resolution. 2x and higher look sharper but significantly increase GPU load."
         ),
         HelpItem(
+            question: "Texture packs",
+            answer: "Graphics settings can load PNG/DDS replacement textures from Documents/textures/[Game Serial]/replacements/ and dump discovered textures to Documents/textures/[Game Serial]/dumps/. Dumping is for creators and can slow games down, so leave it off unless you are building a pack."
+        ),
+        HelpItem(
             question: "Frame Limiter",
             answer: "Keeps gameplay near the selected FPS target. Turning it off uses the same unlimited-speed style setting as ARMSX2 Android, which is useful for testing but can make games run too fast."
         ),
         HelpItem(
             question: "Patches and cheats",
             answer: "Enable GameDB patches for built-in compatibility fixes. PNACH cheats can be imported from the in-game quick menu; ARMSX2 iOS renames them to the current game's Serial_CRC.pnach and keeps // comments compatible with the core parser."
+        ),
+        HelpItem(
+            question: "Compatibility presets",
+            answer: "The in-game quick menu can remember a Compatibility Lab preset per game, so titles like God of War, Budokai, or Naruto do not require manually switching patch modes every launch. Auto Game Presets is enabled by default; use Forget Current Game Preset to reset one title back to the built-in/default behavior."
         ),
         HelpItem(
             question: "Memory cards",

@@ -3,6 +3,17 @@
 
 import SwiftUI
 
+private struct PadOpacityKey: EnvironmentKey {
+    static let defaultValue: Double = 1.0
+}
+
+extension EnvironmentValues {
+    var padOpacity: Double {
+        get { self[PadOpacityKey.self] }
+        set { self[PadOpacityKey.self] = newValue }
+    }
+}
+
 // U005: Singleton haptic generator — prepared once, reused for all button presses
 @MainActor
 enum HapticManager {
@@ -34,9 +45,10 @@ struct VirtualControllerView: View {
         GeometryReader { geo in
             if isLandscape {
                 landscapeLayout(w: geo.size.width, h: geo.size.height)
-                    .opacity(Double(settings.padOpacity))
+                    .environment(\.padOpacity, Double(settings.padOpacity))
             } else {
                 portraitLayout(w: geo.size.width, h: geo.size.height)
+                    .environment(\.padOpacity, Double(settings.padOpacity))
             }
         }
     }
@@ -123,7 +135,6 @@ struct VirtualControllerView: View {
                     .scaleEffect(pos("rstick", landscape: false).scale)
                     .position(x: pos("rstick", landscape: false).x * cW, y: pos("rstick", landscape: false).y * cH)
             }
-            .opacity(Double(settings.padOpacity))
         }
     }
 }
@@ -131,6 +142,8 @@ struct VirtualControllerView: View {
 // MARK: - D-Pad
 struct DPadView: View {
     let size: CGFloat
+    @Environment(\.padOpacity) private var padOpacity
+
     var body: some View {
         let a = size * 0.30
         ZStack {
@@ -139,12 +152,15 @@ struct DPadView: View {
             PadBtn(label: "◀", w: a, h: a, btn: .left).offset(x: -a)
             PadBtn(label: "▶", w: a, h: a, btn: .right).offset(x: a)
         }
+        .environment(\.padOpacity, padOpacity)
     }
 }
 
 // MARK: - Action Buttons
 struct ActionButtonsView: View {
     let size: CGFloat
+    @Environment(\.padOpacity) private var padOpacity
+
     var body: some View {
         let sp = size * 1.1
         ZStack {
@@ -153,19 +169,22 @@ struct ActionButtonsView: View {
             PSBtn(sym: "□", clr: .pink, sz: size, btn: .square).offset(x: -sp)
             PSBtn(sym: "○", clr: .red, sz: size, btn: .circle).offset(x: sp)
         }
+        .environment(\.padOpacity, padOpacity)
     }
 }
 
 struct PSBtn: View {
     let sym: String; let clr: Color; let sz: CGFloat; let btn: ARMSX2PadButton
     @State private var on = false
+    @Environment(\.padOpacity) private var padOpacity
+
     var body: some View {
         Text(sym)
             .font(.system(size: sz * 0.42, weight: .bold))
-            .foregroundStyle(on ? .white : clr)
+            .foregroundStyle(on ? .white.opacity(padOpacity) : clr.opacity(padOpacity))
             .frame(width: sz, height: sz)
-            .background(Circle().fill(on ? clr.opacity(0.6) : .black.opacity(0.25))
-                .stroke(clr.opacity(on ? 1.0 : 0.5), lineWidth: on ? 2.5 : 1.5))
+            .background(Circle().fill(on ? clr.opacity(0.6 * padOpacity) : .black.opacity(0.25 * padOpacity))
+                .stroke(clr.opacity((on ? 1.0 : 0.5) * padOpacity), lineWidth: on ? 2.5 : 1.5))
             .scaleEffect(on ? 0.88 : 1.0)
             .animation(.easeOut(duration: 0.06), value: on)
             .contentShape(Circle())
@@ -183,14 +202,16 @@ struct PSBtn: View {
 struct PadBtn: View {
     let label: String; let w: CGFloat; let h: CGFloat; let btn: ARMSX2PadButton
     @State private var on = false
+    @Environment(\.padOpacity) private var padOpacity
+
     var body: some View {
         Text(label)
             .font(.system(size: min(w, h) * 0.38, weight: .semibold))
-            .foregroundStyle(on ? .black : .white)
+            .foregroundStyle(on ? .black.opacity(padOpacity) : .white.opacity(padOpacity))
             .frame(width: w, height: h)
             .background(RoundedRectangle(cornerRadius: 7)
-                .fill(on ? .white.opacity(0.7) : .black.opacity(0.22))
-                .stroke(.white.opacity(on ? 0.8 : 0.25), lineWidth: 1))
+                .fill(on ? .white.opacity(0.7 * padOpacity) : .black.opacity(0.22 * padOpacity))
+                .stroke(.white.opacity((on ? 0.8 : 0.25) * padOpacity), lineWidth: 1))
             .scaleEffect(on ? 0.9 : 1.0)
             .animation(.easeOut(duration: 0.06), value: on)
             .contentShape(Rectangle())
@@ -211,15 +232,16 @@ struct StickView: View {
     let sz: CGFloat = 68; let knob: CGFloat = 30
     @State private var off: CGSize = .zero
     @State private var isDragging = false
+    @Environment(\.padOpacity) private var padOpacity
 
     var body: some View {
         ZStack {
-            Circle().fill(.black.opacity(0.18)).stroke(.white.opacity(0.18), lineWidth: 1).frame(width: sz)
-            Circle().fill(.white.opacity(0.35)).frame(width: knob).offset(off)
+            Circle().fill(.black.opacity(0.18 * padOpacity)).stroke(.white.opacity(0.18 * padOpacity), lineWidth: 1).frame(width: sz)
+            Circle().fill(.white.opacity(0.35 * padOpacity)).frame(width: knob).offset(off)
             // L3/R3 label
             Text(isLeft ? "L3" : "R3")
                 .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.white.opacity(0.3))
+                .foregroundStyle(.white.opacity(0.3 * padOpacity))
                 .offset(y: sz / 2 + 8)
         }
         .contentShape(Circle())
