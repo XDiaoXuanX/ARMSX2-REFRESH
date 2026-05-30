@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 import SwiftUI
+import UIKit
 
 private struct PadOpacityKey: EnvironmentKey {
     static let defaultValue: Double = 1.0
@@ -27,6 +28,67 @@ enum HapticManager {
         g.prepare()
         return g
     }()
+}
+
+private enum ControllerAsset {
+    static func fileName(for button: ARMSX2PadButton) -> String {
+        switch button {
+        case .up:       return "ic_controller_up_button.png"
+        case .down:     return "ic_controller_down_button.png"
+        case .left:     return "ic_controller_left_button.png"
+        case .right:    return "ic_controller_right_button.png"
+        case .cross:    return "ic_controller_cross_button.png"
+        case .circle:   return "ic_controller_circle_button.png"
+        case .square:   return "ic_controller_square_button.png"
+        case .triangle: return "ic_controller_triangle_button.png"
+        case .L1:       return "ic_controller_l1_button.png"
+        case .R1:       return "ic_controller_r1_button.png"
+        case .L2:       return "ic_controller_l2_button.png"
+        case .R2:       return "ic_controller_r2_button.png"
+        case .start:    return "ic_controller_start_button.png"
+        case .select:   return "ic_controller_select_button.png"
+        case .L3:       return "ic_controller_l3_button.png"
+        case .R3:       return "ic_controller_r3_button.png"
+        @unknown default:
+            return ""
+        }
+    }
+
+    static func image(named fileName: String) -> UIImage? {
+        guard !fileName.isEmpty else { return nil }
+
+        let baseName = (fileName as NSString).deletingPathExtension
+        if let image = UIImage(named: baseName) ?? UIImage(named: fileName) {
+            return image
+        }
+
+        guard let path = Bundle.main.path(forResource: baseName, ofType: "png") else {
+            return nil
+        }
+
+        return UIImage(contentsOfFile: path)
+    }
+}
+
+private struct ControllerAssetImage: View {
+    let fileName: String
+    let fallback: String
+    let fallbackColor: Color
+    let fallbackFontSize: CGFloat
+
+    var body: some View {
+        if let image = ControllerAsset.image(named: fileName) {
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+        } else {
+            Text(fallback)
+                .font(.system(size: fallbackFontSize, weight: .semibold))
+                .foregroundStyle(fallbackColor)
+                .minimumScaleFactor(0.5)
+        }
+    }
 }
 
 struct VirtualControllerView: View {
@@ -145,12 +207,13 @@ struct DPadView: View {
     @Environment(\.padOpacity) private var padOpacity
 
     var body: some View {
-        let a = size * 0.30
+        let a = size * 0.42
+        let sp = size * 0.29
         ZStack {
-            PadBtn(label: "▲", w: a, h: a, btn: .up).offset(y: -a)
-            PadBtn(label: "▼", w: a, h: a, btn: .down).offset(y: a)
-            PadBtn(label: "◀", w: a, h: a, btn: .left).offset(x: -a)
-            PadBtn(label: "▶", w: a, h: a, btn: .right).offset(x: a)
+            PadBtn(label: "▲", w: a, h: a, btn: .up).offset(y: -sp)
+            PadBtn(label: "▼", w: a, h: a, btn: .down).offset(y: sp)
+            PadBtn(label: "◀", w: a, h: a, btn: .left).offset(x: -sp)
+            PadBtn(label: "▶", w: a, h: a, btn: .right).offset(x: sp)
         }
         .environment(\.padOpacity, padOpacity)
     }
@@ -179,12 +242,16 @@ struct PSBtn: View {
     @Environment(\.padOpacity) private var padOpacity
 
     var body: some View {
-        Text(sym)
-            .font(.system(size: sz * 0.42, weight: .bold))
-            .foregroundStyle(on ? .white.opacity(padOpacity) : clr.opacity(padOpacity))
+        ControllerAssetImage(
+            fileName: ControllerAsset.fileName(for: btn),
+            fallback: sym,
+            fallbackColor: on ? .white : clr,
+            fallbackFontSize: sz * 0.42
+        )
             .frame(width: sz, height: sz)
-            .background(Circle().fill(on ? clr.opacity(0.6 * padOpacity) : .black.opacity(0.25 * padOpacity))
-                .stroke(clr.opacity((on ? 1.0 : 0.5) * padOpacity), lineWidth: on ? 2.5 : 1.5))
+            .opacity(padOpacity)
+            .brightness(on ? 0.16 : 0)
+            .shadow(color: clr.opacity((on ? 0.55 : 0.18) * padOpacity), radius: on ? 8 : 3)
             .scaleEffect(on ? 0.88 : 1.0)
             .animation(.easeOut(duration: 0.06), value: on)
             .contentShape(Circle())
@@ -205,13 +272,16 @@ struct PadBtn: View {
     @Environment(\.padOpacity) private var padOpacity
 
     var body: some View {
-        Text(label)
-            .font(.system(size: min(w, h) * 0.38, weight: .semibold))
-            .foregroundStyle(on ? .black.opacity(padOpacity) : .white.opacity(padOpacity))
+        ControllerAssetImage(
+            fileName: ControllerAsset.fileName(for: btn),
+            fallback: label,
+            fallbackColor: on ? .black : .white,
+            fallbackFontSize: min(w, h) * 0.38
+        )
             .frame(width: w, height: h)
-            .background(RoundedRectangle(cornerRadius: 7)
-                .fill(on ? .white.opacity(0.7 * padOpacity) : .black.opacity(0.22 * padOpacity))
-                .stroke(.white.opacity((on ? 0.8 : 0.25) * padOpacity), lineWidth: 1))
+            .opacity(padOpacity)
+            .brightness(on ? 0.18 : 0)
+            .shadow(color: .white.opacity((on ? 0.45 : 0.10) * padOpacity), radius: on ? 6 : 2)
             .scaleEffect(on ? 0.9 : 1.0)
             .animation(.easeOut(duration: 0.06), value: on)
             .contentShape(Rectangle())
@@ -236,13 +306,36 @@ struct StickView: View {
 
     var body: some View {
         ZStack {
-            Circle().fill(.black.opacity(0.18 * padOpacity)).stroke(.white.opacity(0.18 * padOpacity), lineWidth: 1).frame(width: sz)
-            Circle().fill(.white.opacity(0.35 * padOpacity)).frame(width: knob).offset(off)
-            // L3/R3 label
-            Text(isLeft ? "L3" : "R3")
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.white.opacity(0.3 * padOpacity))
-                .offset(y: sz / 2 + 8)
+            Circle()
+                .fill(.black.opacity(0.18 * padOpacity))
+                .stroke(.white.opacity(0.18 * padOpacity), lineWidth: 1)
+                .frame(width: sz, height: sz)
+            ControllerAssetImage(
+                fileName: "ic_controller_analog_base.png",
+                fallback: "",
+                fallbackColor: .white,
+                fallbackFontSize: 1
+            )
+                .frame(width: sz, height: sz)
+                .opacity(padOpacity)
+            ControllerAssetImage(
+                fileName: "ic_controller_analog_stick.png",
+                fallback: "",
+                fallbackColor: .white,
+                fallbackFontSize: 1
+            )
+                .frame(width: knob, height: knob)
+                .opacity(padOpacity)
+                .offset(off)
+            ControllerAssetImage(
+                fileName: isLeft ? "ic_controller_l3_button.png" : "ic_controller_r3_button.png",
+                fallback: isLeft ? "L3" : "R3",
+                fallbackColor: .white.opacity(0.35),
+                fallbackFontSize: 9
+            )
+                .frame(width: 18, height: 18)
+                .opacity(0.45 * padOpacity)
+                .offset(y: sz / 2 + 9)
         }
         .contentShape(Circle())
         .simultaneousGesture(DragGesture(minimumDistance: 0)

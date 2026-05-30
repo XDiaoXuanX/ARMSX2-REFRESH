@@ -262,6 +262,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 			set_source_files_properties("${BOOT_SPLASH_VIDEO}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 		endif()
 
+		file(GLOB IOS_CONTROLLER_ICON_FILES "${CMAKE_SOURCE_DIR}/../assets/app_icons/controller_icons_nether/*.png")
+		if(IOS_CONTROLLER_ICON_FILES)
+			target_sources(ARMSX2iOS PRIVATE ${IOS_CONTROLLER_ICON_FILES})
+			set_source_files_properties(${IOS_CONTROLLER_ICON_FILES} PROPERTIES
+				MACOSX_PACKAGE_LOCATION Resources)
+		endif()
+
 	set(ARMSX2_APPLE_FRAMEWORKS
 		"-framework UIKit"
 		"-framework AVFoundation"
