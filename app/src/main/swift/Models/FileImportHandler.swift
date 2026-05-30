@@ -20,13 +20,13 @@ final class FileImportHandler: @unchecked Sendable {
     var showImportAlert = false
 
     private static let biosExtensions: Set<String> = ["bin", "rom"]
-    private static let gameExtensions: Set<String> = ["iso", "chd", "img", "bin", "cso", "zso", "gz", "elf"]
+    private static let gameExtensions: Set<String> = ["iso", "chd", "img", "bin", "cue", "mdf", "cso", "zso", "gz", "elf"]
     private static let pnachExtensions: Set<String> = ["pnach"]
     // .bin files > 50MB are treated as game images, not BIOS
     private static let biosSizeThreshold: UInt64 = 50 * 1024 * 1024
 
     static let biosContentTypes: [UTType] = contentTypes(for: ["bin", "rom"])
-    static let gameContentTypes: [UTType] = contentTypes(for: ["iso", "chd", "img", "bin", "cso", "zso", "gz", "elf"])
+    static let gameContentTypes: [UTType] = broaderContentTypes(for: ["iso", "chd", "img", "bin", "cue", "mdf", "cso", "zso", "gz", "elf"])
     static let pnachContentTypes: [UTType] = contentTypes(for: ["pnach"])
 
     private init() {}
@@ -152,7 +152,7 @@ final class FileImportHandler: @unchecked Sendable {
             if FileManager.default.fileExists(atPath: destPath) {
                 try FileManager.default.removeItem(atPath: destPath)
             }
-            try FileManager.default.copyItem(at: url, to: URL(fileURLWithPath: destPath))
+            try copyImportedFile(from: url, to: URL(fileURLWithPath: destPath))
             NSLog("[ARMSX2 iOS Import] %@ imported: %@ -> %@", category, fileName, destPath)
             return .success("\(category) imported: \(fileName)")
         } catch {
@@ -205,6 +205,21 @@ final class FileImportHandler: @unchecked Sendable {
     private static func contentTypes(for extensions: [String]) -> [UTType] {
         extensions.map { ext in
             UTType(filenameExtension: ext) ?? UTType(importedAs: "com.armsx2.\(ext)", conformingTo: .data)
+        }
+    }
+
+    private static func broaderContentTypes(for extensions: [String]) -> [UTType] {
+        Array(Set([.item, .data, .content] + contentTypes(for: extensions)))
+    }
+
+    private func copyImportedFile(from sourceURL: URL, to destinationURL: URL) throws {
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        } catch {
+            NSLog("[ARMSX2 iOS Import] copyItem failed for %@, retrying with Data: %@",
+                  sourceURL.lastPathComponent, error.localizedDescription)
+            let data = try Data(contentsOf: sourceURL)
+            try data.write(to: destinationURL, options: .atomic)
         }
     }
 

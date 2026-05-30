@@ -132,6 +132,7 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 + (BOOL)hasBIOS;
 + (void)requestVMBoot;
 + (void)requestVMShutdown;
++ (void)resetVM;
 
 // Save states
 + (BOOL)hasValidSaveStateGame;

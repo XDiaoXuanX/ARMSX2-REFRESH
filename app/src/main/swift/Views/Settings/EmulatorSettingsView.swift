@@ -91,7 +91,7 @@ struct EmulatorSettingsView: View {
                         )
                     }
                 } else {
-                    Text("Limiter disabled uses the Android/ARMSX2 unlimited-speed setting.")
+                    Text("Limiter disabled uses the Android/ARMSX2 unlimited-speed setting and can increase heat and battery drain.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -132,7 +132,7 @@ struct EmulatorSettingsView: View {
                     )
                 }
 
-                Text("Matches Android's frame limiter and framerate controls. Custom FPS is stored as PCSX2's nominal speed scalar.")
+                Text("Matches Android's frame limiter and framerate controls. Changes are applied on the emulator CPU thread; use Reset ROM from the quick menu if a game needs a clean timing restart.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

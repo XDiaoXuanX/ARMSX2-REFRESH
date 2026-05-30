@@ -6,6 +6,7 @@ import SwiftUI
 private enum SettingsPane: String, CaseIterable, Identifiable {
     case emulator
     case graphics
+    case network
     case memoryCards
     case retroAchievements
     case overlay
@@ -22,6 +23,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "Emulator"
         case .graphics:
             return "Graphics"
+        case .network:
+            return "Network"
         case .memoryCards:
             return "Memory Cards"
         case .retroAchievements:
@@ -45,6 +48,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "cpu"
         case .graphics:
             return "paintbrush"
+        case .network:
+            return "network"
         case .memoryCards:
             return "memorychip"
         case .retroAchievements:
@@ -94,6 +99,11 @@ struct SettingsRootView: View {
                     GraphicsSettingsView()
                 } label: {
                     Label("Graphics", systemImage: "paintbrush")
+                }
+                NavigationLink {
+                    NetworkSettingsView()
+                } label: {
+                    Label("Network", systemImage: "network")
                 }
                 NavigationLink {
                     MemoryCardSettingsView()
@@ -152,6 +162,8 @@ struct SettingsRootView: View {
             EmulatorSettingsView()
         case .graphics:
             GraphicsSettingsView()
+        case .network:
+            NetworkSettingsView()
         case .memoryCards:
             MemoryCardSettingsView()
         case .retroAchievements:
@@ -195,5 +207,62 @@ private struct SettingsAboutView: View {
             }
         }
         .navigationTitle("About")
+    }
+}
+
+private struct NetworkSettingsView: View {
+    @State private var settings = SettingsStore.shared
+
+    var body: some View {
+        Form {
+            Section("PS2 HDD") {
+                Toggle("Enable DEV9 Virtual HDD", isOn: $settings.dev9HddEnabled)
+
+                HStack {
+                    Text("Image")
+                    Spacer()
+                    Text(settings.dev9HddFile.isEmpty ? "DEV9hdd.raw" : settings.dev9HddFile)
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+
+                Button("Use Default HDD Image") {
+                    settings.dev9HddFile = "DEV9hdd.raw"
+                }
+
+                Text("Matches ARMSX2 Android's DEV9 HDD option. Requires a VM restart.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Online / Ethernet") {
+                Toggle("Enable DEV9 Ethernet", isOn: $settings.dev9EthernetEnabled)
+
+                HStack {
+                    Text("Mode")
+                    Spacer()
+                    Text("Sockets")
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Text("Adapter")
+                    Spacer()
+                    Text("Auto")
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("Socket mode is the only iOS-safe DEV9 Ethernet mode currently exposed. PCAP bridged/switched networking is disabled in this iOS build and needs a separate native entitlement/surface investigation before it can be safely enabled.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Tester Notes") {
+                Text("Games still need their in-game PS2 network setup. After changing DEV9 settings, use Reset ROM or restart the VM before testing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Network")
     }
 }

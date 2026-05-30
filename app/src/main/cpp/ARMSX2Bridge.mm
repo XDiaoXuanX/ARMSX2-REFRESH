@@ -28,6 +28,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <optional>
 #include <string_view>
@@ -189,6 +190,66 @@ static void ARMSX2ApplyCompatibilityProfile(NSString* profile, BOOL persistSetti
     }
 
     NSLog(@"[ARMSX2Bridge] Compatibility preset=%@ reason=%@", normalized, reason ?: @"manual");
+}
+
+static NSString* ARMSX2CompatibilityCustomFlagSection(NSString* identity)
+{
+    return [NSString stringWithFormat:@"ARMSX2/JITBisectGamePresetFlags/%@", identity ?: @""];
+}
+
+static void ARMSX2SaveCompatibilityCustomFlagsForIdentity(NSString* identity)
+{
+    if (!g_p44_settings_interface || identity.length == 0)
+        return;
+
+    NSString* section = ARMSX2CompatibilityCustomFlagSection(identity);
+    g_p44_settings_interface->SetStringValue("ARMSX2/JITBisectGamePresets", identity.UTF8String, ARMSX2CompatibilityProfileCustom.UTF8String);
+    for (NSString* key in ARMSX2JITBisectFlagKeys()) {
+        BOOL enabled = NO;
+        if (int* flag = ARMSX2JITBisectFlagPtr(key))
+            enabled = (*flag != 0) ? YES : NO;
+        else
+            enabled = g_p44_settings_interface->GetBoolValue("ARMSX2/JITBisect", key.UTF8String, false) ? YES : NO;
+
+        g_p44_settings_interface->SetBoolValue(section.UTF8String, key.UTF8String, enabled ? true : false);
+    }
+    g_p44_settings_interface->Save();
+    NSLog(@"[ARMSX2Bridge] Compatibility custom flags saved identity=%@", identity);
+}
+
+static BOOL ARMSX2LoadCompatibilityCustomFlagsForIdentity(NSString* identity)
+{
+    if (!g_p44_settings_interface || identity.length == 0)
+        return NO;
+
+    NSString* section = ARMSX2CompatibilityCustomFlagSection(identity);
+    bool foundAny = false;
+
+    for (NSString* key in ARMSX2JITBisectFlagKeys()) {
+        bool enabled = false;
+        if (g_p44_settings_interface->GetBoolValue(section.UTF8String, key.UTF8String, &enabled))
+            foundAny = true;
+
+        ARMSX2ApplyJITBisectFlag(key, enabled ? YES : NO);
+        g_p44_settings_interface->SetBoolValue("ARMSX2/JITBisect", key.UTF8String, enabled);
+    }
+
+    if (!foundAny)
+        return NO;
+
+    g_p44_settings_interface->SetStringValue("ARMSX2/JITBisect", "Profile", ARMSX2CompatibilityProfileCustom.UTF8String);
+    g_p44_settings_interface->Save();
+    NSLog(@"[ARMSX2Bridge] Compatibility custom flags loaded identity=%@", identity);
+    return YES;
+}
+
+static void ARMSX2ClearCompatibilityCustomFlagsForIdentity(NSString* identity)
+{
+    if (!g_p44_settings_interface || identity.length == 0)
+        return;
+
+    NSString* section = ARMSX2CompatibilityCustomFlagSection(identity);
+    g_p44_settings_interface->ClearSection(section.UTF8String);
 }
 
 static NSString* ARMSX2NSStringFromStdString(const std::string& value)
@@ -370,6 +431,10 @@ static void ARMSX2ApplyCompatibilityPresetForISOName(NSString* isoName)
     }
 
     NSString* profile = ARMSX2ResolvedCompatibilityPreset(identity, title);
+    if ([profile isEqualToString:ARMSX2CompatibilityProfileCustom] && ARMSX2LoadCompatibilityCustomFlagsForIdentity(identity)) {
+        NSLog(@"[ARMSX2Bridge] Compatibility preset=custom identity=%@ reason=boot %@", identity ?: @"", title ?: @"");
+        return;
+    }
     ARMSX2ApplyCompatibilityProfile(profile, YES, [NSString stringWithFormat:@"boot %@ %@", identity ?: @"", title ?: @""]);
 }
 
@@ -489,21 +554,38 @@ static void ARMSX2ApplyLiveGSIntSetting(const char* section, const char* key, in
     }
 }
 
+static void ARMSX2ApplyLiveTargetSpeedSetting(std::function<void()> update, const char* section, const char* key, float value)
+{
+    const std::string sectionName(section ? section : "");
+    const std::string keyName(key ? key : "");
+
+    if (!VMManager::HasValidVM()) {
+        update();
+        NSLog(@"[ARMSX2Bridge] target speed setting stored for next boot %s/%s=%0.3f",
+              sectionName.c_str(), keyName.c_str(), value);
+        return;
+    }
+
+    Host::RunOnCPUThread([update = std::move(update), sectionName, keyName, value]() mutable {
+        update();
+        VMManager::UpdateTargetSpeed();
+        NSLog(@"[ARMSX2Bridge] target speed updated on CPU thread %s/%s=%0.3f",
+              sectionName.c_str(), keyName.c_str(), value);
+    }, false);
+}
+
 static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, float value)
 {
     if (std::strcmp(section, "Framerate") == 0) {
         const float clamped = std::clamp(value, 0.05f, 10.0f);
         if (std::strcmp(key, "NominalScalar") == 0)
-            EmuConfig.EmulationSpeed.NominalScalar = clamped;
+            ARMSX2ApplyLiveTargetSpeedSetting([clamped]() { EmuConfig.EmulationSpeed.NominalScalar = clamped; }, section, key, clamped);
         else if (std::strcmp(key, "TurboScalar") == 0)
-            EmuConfig.EmulationSpeed.TurboScalar = clamped;
+            ARMSX2ApplyLiveTargetSpeedSetting([clamped]() { EmuConfig.EmulationSpeed.TurboScalar = clamped; }, section, key, clamped);
         else if (std::strcmp(key, "SlomoScalar") == 0)
-            EmuConfig.EmulationSpeed.SlomoScalar = clamped;
+            ARMSX2ApplyLiveTargetSpeedSetting([clamped]() { EmuConfig.EmulationSpeed.SlomoScalar = clamped; }, section, key, clamped);
         else
             return;
-
-        VMManager::UpdateTargetSpeed();
-        NSLog(@"[ARMSX2Bridge] live framerate %s/%s=%0.3f", section, key, clamped);
         return;
     }
 
@@ -511,13 +593,11 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         return;
 
     if (std::strcmp(key, "FramerateNTSC") == 0) {
-        EmuConfig.GS.FramerateNTSC = value;
-        VMManager::UpdateTargetSpeed();
+        ARMSX2ApplyLiveTargetSpeedSetting([value]() { EmuConfig.GS.FramerateNTSC = value; }, section, key, value);
         return;
     }
     if (std::strcmp(key, "FrameratePAL") == 0) {
-        EmuConfig.GS.FrameratePAL = value;
-        VMManager::UpdateTargetSpeed();
+        ARMSX2ApplyLiveTargetSpeedSetting([value]() { EmuConfig.GS.FrameratePAL = value; }, section, key, value);
         return;
     }
     if (std::strcmp(key, "upscale_multiplier") == 0) {
@@ -1063,6 +1143,9 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         g_p44_settings_interface->SetStringValue("ARMSX2/JITBisect", "Profile", ARMSX2CompatibilityProfileCustom.UTF8String);
         g_p44_settings_interface->Save();
     }
+    NSString* identity = ARMSX2CurrentCompatibilityIdentityKey();
+    if (identity.length > 0)
+        ARMSX2SaveCompatibilityCustomFlagsForIdentity(identity);
     NSLog(@"[ARMSX2Bridge] Compatibility Lab %@ %@", key, value ? @"ON" : @"OFF");
 }
 
@@ -1117,6 +1200,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         return;
 
     g_p44_settings_interface->DeleteValue("ARMSX2/JITBisectGamePresets", identity.UTF8String);
+    ARMSX2ClearCompatibilityCustomFlagsForIdentity(identity);
     g_p44_settings_interface->Save();
     NSString* profile = ARMSX2ResolvedCompatibilityPreset(identity, identity);
     ARMSX2ApplyCompatibilityProfile(profile, YES, [NSString stringWithFormat:@"forget %@", identity]);
@@ -1142,6 +1226,21 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 
 + (void)requestVMShutdown {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSRequestVMShutdown" object:nil];
+}
+
++ (void)resetVM {
+    if (!VMManager::HasValidVM()) {
+        NSLog(@"[ARMSX2Bridge] Reset VM rejected: no valid VM");
+        return;
+    }
+
+    Host::RunOnCPUThread([]() {
+        if (!VMManager::HasValidVM())
+            return;
+
+        NSLog(@"[ARMSX2Bridge] Reset VM requested");
+        VMManager::Reset();
+    }, false);
 }
 
 #pragma mark - Save states

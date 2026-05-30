@@ -144,6 +144,12 @@ struct GameScreenView: View {
             Divider()
             compatibilityLabSection
             if vmMenuAvailable {
+                Button {
+                    resetCurrentROM()
+                } label: {
+                    Label("Reset ROM", systemImage: "arrow.counterclockwise.circle")
+                }
+
                 Menu {
                     Button {
                         ejectDisc()
@@ -243,6 +249,10 @@ struct GameScreenView: View {
                 Label("Auto Game Presets", systemImage: "sparkles")
             }
 
+            Text("Use Custom Advanced Flags for games that need multiple compatibility fallbacks at once. Custom flags are saved per running game.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             let currentPreset = compatibilityPreset(for: compatibilityPresetKey)
             Menu {
                 ForEach(compatibilityPresets) { preset in
@@ -329,7 +339,10 @@ struct GameScreenView: View {
             get: { ARMSX2Bridge.getJITBisectFlag(key, defaultValue: false) },
             set: {
                 ARMSX2Bridge.setJITBisectFlag(key, value: $0)
-                refreshCompatibilityState()
+                compatibilityPresetKey = "custom"
+                if !compatibilityIdentity.isEmpty {
+                    presentSaveStateStatus("Custom compatibility flags saved for \(compatibilityIdentity)")
+                }
             }
         )) {
             Label(title, systemImage: systemImage)
@@ -370,6 +383,11 @@ struct GameScreenView: View {
         } else {
             presentSaveStateStatus("Compatibility preset set to \(preset.title)")
         }
+    }
+
+    private func resetCurrentROM() {
+        appState.resetCurrentVM()
+        presentSaveStateStatus("Reset ROM requested")
     }
 
     @ViewBuilder

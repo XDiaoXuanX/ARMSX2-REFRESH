@@ -94,4 +94,8 @@ final class AppState: @unchecked Sendable {
         }
         ARMSX2Bridge.requestVMShutdown()
     }
+
+    func resetCurrentVM() {
+        ARMSX2Bridge.resetVM()
+    }
 }

@@ -24,6 +24,8 @@ enum OsdPreset: Int, CaseIterable {
 final class SettingsStore: @unchecked Sendable {
     static let shared = SettingsStore()
 
+    @ObservationIgnored private var suppressINIWrites = false
+
     // ── Emulator / CPU ──
     var eeCoreType: Int {
         didSet {
@@ -57,12 +59,16 @@ final class SettingsStore: @unchecked Sendable {
     }
     var ntscFramerate: Float {
         didSet {
+            guard !suppressINIWrites else { return }
             ARMSX2Bridge.setINIFloat("EmuCore/GS", key: "FramerateNTSC", value: ntscFramerate)
             applyFrameLimiterSettings()
         }
     }
     var palFramerate: Float {
-        didSet { ARMSX2Bridge.setINIFloat("EmuCore/GS", key: "FrameratePAL", value: palFramerate) }
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIFloat("EmuCore/GS", key: "FrameratePAL", value: palFramerate)
+        }
     }
 
     // ── Boot ──
@@ -219,6 +225,31 @@ final class SettingsStore: @unchecked Sendable {
         didSet { ARMSX2Bridge.setINIBool("ARMSX2iOS/UI", key: "HapticFeedback", value: hapticFeedback) }
     }
 
+    // DEV9 / Network
+    var dev9HddEnabled: Bool {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIBool("DEV9/Hdd", key: "HddEnable", value: dev9HddEnabled)
+            ARMSX2Bridge.setINIString("DEV9/Hdd", key: "HddFile", value: dev9HddFile)
+        }
+    }
+    var dev9HddFile: String {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIString("DEV9/Hdd", key: "HddFile", value: dev9HddFile)
+        }
+    }
+    var dev9EthernetEnabled: Bool {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIBool("DEV9/Eth", key: "EthEnable", value: dev9EthernetEnabled)
+            if dev9EthernetEnabled {
+                ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthApi", value: "Sockets")
+                ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthDevice", value: "Auto")
+            }
+        }
+    }
+
     private static func aspectRatioName(for value: Int) -> String {
         switch value {
         case 0: return "Stretch"
@@ -273,7 +304,9 @@ final class SettingsStore: @unchecked Sendable {
         renderer = 17
         ARMSX2Bridge.setINIInt("EmuCore/GS", key: "Renderer", value: Int32(17))
 #else
-        renderer = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "Renderer", defaultValue: 17))
+        let initialRenderer = Self.supportedIOSRenderer(Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "Renderer", defaultValue: 17)))
+        renderer = initialRenderer
+        ARMSX2Bridge.setINIInt("EmuCore/GS", key: "Renderer", value: Int32(initialRenderer))
 #endif
         upscaleMultiplier = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "upscale_multiplier", defaultValue: 1.0)
         vsyncQueueSize = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "VsyncQueueSize", defaultValue: 8))
@@ -313,6 +346,9 @@ final class SettingsStore: @unchecked Sendable {
         // UI
         padOpacity = ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "PadOpacity", defaultValue: 0.6)
         hapticFeedback = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HapticFeedback", defaultValue: true)
+        dev9HddEnabled = ARMSX2Bridge.getINIBool("DEV9/Hdd", key: "HddEnable", defaultValue: false)
+        dev9HddFile = ARMSX2Bridge.getINIString("DEV9/Hdd", key: "HddFile", defaultValue: "DEV9hdd.raw")
+        dev9EthernetEnabled = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthEnable", defaultValue: false)
         ARMSX2Bridge.setINIString("EmuCore/GS", key: "AspectRatio", value: Self.aspectRatioName(for: aspectRatio))
         // Apply OSD preset
         ARMSX2Bridge.applyOsdPreset(Int32(osdPreset.rawValue))
@@ -320,6 +356,9 @@ final class SettingsStore: @unchecked Sendable {
 
     /// Reload ALL settings from INI (call on VM start/stop)
     func reload() {
+        suppressINIWrites = true
+        defer { suppressINIWrites = false }
+
         eeCoreType = Int(ARMSX2Bridge.getINIInt("EmuCore/CPU", key: "CoreType", defaultValue: 2))
         iopRecompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableIOP", defaultValue: true)
         vu0Recompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableVU0", defaultValue: true)
@@ -345,7 +384,8 @@ final class SettingsStore: @unchecked Sendable {
         renderer = 17
         ARMSX2Bridge.setINIInt("EmuCore/GS", key: "Renderer", value: Int32(17))
 #else
-        renderer = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "Renderer", defaultValue: 17))
+        renderer = Self.supportedIOSRenderer(Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "Renderer", defaultValue: 17)))
+        ARMSX2Bridge.setINIInt("EmuCore/GS", key: "Renderer", value: Int32(renderer))
 #endif
         upscaleMultiplier = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "upscale_multiplier", defaultValue: 1.0)
         vsyncQueueSize = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "VsyncQueueSize", defaultValue: 8))
@@ -383,6 +423,9 @@ final class SettingsStore: @unchecked Sendable {
         osdShowHardwareInfo = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowHardwareInfo", defaultValue: false)
         padOpacity = ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "PadOpacity", defaultValue: 0.6)
         hapticFeedback = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HapticFeedback", defaultValue: true)
+        dev9HddEnabled = ARMSX2Bridge.getINIBool("DEV9/Hdd", key: "HddEnable", defaultValue: false)
+        dev9HddFile = ARMSX2Bridge.getINIString("DEV9/Hdd", key: "HddFile", defaultValue: "DEV9hdd.raw")
+        dev9EthernetEnabled = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthEnable", defaultValue: false)
     }
 
     private static func fpsLimit(fromScalar scalar: Float, baseFramerate: Float) -> Int {
@@ -391,8 +434,18 @@ final class SettingsStore: @unchecked Sendable {
     }
 
     private func applyFrameLimiterSettings() {
+        guard !suppressINIWrites else { return }
         let scalar = frameLimiterEnabled ? Float(customFPSLimit) / max(ntscFramerate, 1.0) : 10.0
         ARMSX2Bridge.setINIFloat("Framerate", key: "NominalScalar", value: scalar)
+    }
+
+    private static func supportedIOSRenderer(_ value: Int) -> Int {
+        switch value {
+        case 17, 13, 11:
+            return value
+        default:
+            return 17
+        }
     }
 
     /// Apply OSD preset — writes ALL OSD flags to INI + GSConfig
