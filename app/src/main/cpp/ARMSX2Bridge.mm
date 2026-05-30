@@ -304,7 +304,9 @@ static void ARMSX2ApplyLiveGSIntSetting(const char* section, const char* key, in
         for (NSString *file in files) {
             if ([seen containsObject:file]) continue;
             NSString *ext = file.pathExtension.lowercaseString;
-            if ([ext isEqualToString:@"iso"] || [ext isEqualToString:@"img"] || [ext isEqualToString:@"chd"] || [ext isEqualToString:@"elf"]) {
+            if ([ext isEqualToString:@"iso"] || [ext isEqualToString:@"img"] || [ext isEqualToString:@"chd"] ||
+                [ext isEqualToString:@"cso"] || [ext isEqualToString:@"zso"] || [ext isEqualToString:@"gz"] ||
+                [ext isEqualToString:@"elf"]) {
                 [isos addObject:file];
                 [seen addObject:file];
             } else if ([ext isEqualToString:@"bin"]) {

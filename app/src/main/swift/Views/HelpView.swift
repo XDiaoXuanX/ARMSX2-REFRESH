@@ -68,8 +68,12 @@ private let helpData: [HelpSection] = [
         ),
     ]),
     HelpSection(title: "Supported Formats", icon: "doc.circle", items: [
-        HelpItem(question: "Game formats", answer: "ISO, CHD, IMG, BIN, ELF"),
+        HelpItem(question: "Game formats", answer: "ISO, CHD, IMG, BIN, CSO, ZSO, GZ, ELF"),
         HelpItem(question: "BIOS formats", answer: "BIN, ROM (dumped from your own PS2)"),
+        HelpItem(
+            question: "Game covers",
+            answer: "Import covers from the Games toolbar or long-press a game and choose a cover. ARMSX2 iOS also scans Documents/armsx2_covers, Documents/covers, the game folder, and Documents for JPG, PNG, WebP, HEIC, or HEIF images named after the game file, file stem, or serial-like names such as SLUS-20312. This also works for CHD games."
+        ),
     ]),
 ]
 

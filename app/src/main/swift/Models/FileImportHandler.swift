@@ -19,12 +19,12 @@ final class FileImportHandler: @unchecked Sendable {
     var showImportAlert = false
 
     private static let biosExtensions: Set<String> = ["bin", "rom"]
-    private static let gameExtensions: Set<String> = ["iso", "chd", "img", "bin", "elf"]
+    private static let gameExtensions: Set<String> = ["iso", "chd", "img", "bin", "cso", "zso", "gz", "elf"]
     // .bin files > 50MB are treated as game images, not BIOS
     private static let biosSizeThreshold: UInt64 = 50 * 1024 * 1024
 
     static let biosContentTypes: [UTType] = contentTypes(for: ["bin", "rom"])
-    static let gameContentTypes: [UTType] = contentTypes(for: ["iso", "chd", "img", "bin", "elf"])
+    static let gameContentTypes: [UTType] = contentTypes(for: ["iso", "chd", "img", "bin", "cso", "zso", "gz", "elf"])
 
     private init() {}
 

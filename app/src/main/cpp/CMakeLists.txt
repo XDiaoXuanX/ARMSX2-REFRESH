@@ -158,6 +158,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		${CMAKE_SOURCE_DIR}/../swift/Models/AppState.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/SettingsStore.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/FileImportHandler.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/CoverStore.swift
 	)
 
 	configure_file("${CMAKE_SOURCE_DIR}/Info.plist.in" "${CMAKE_BINARY_DIR}/Info.plist" @ONLY)

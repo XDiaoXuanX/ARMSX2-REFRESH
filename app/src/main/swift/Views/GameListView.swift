@@ -3,10 +3,13 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 struct ISOEntry: Identifiable {
-    let id = UUID()
+    var id: String { name }
     let name: String
+    let fileURL: URL?
+    let coverURL: URL?
     let size: UInt64
     var isFavorite: Bool
 }
@@ -15,10 +18,13 @@ struct GameListView: View {
     @State private var games: [ISOEntry] = []
     @State private var appState = AppState.shared
     @State private var fileImporter = FileImportHandler.shared
+    @State private var coverStore = CoverStore.shared
     @State private var showGameImporter = false
+    @State private var showCoverImporter = false
     @State private var showRestartAlert = false
     @State private var showStopAlert = false
     @State private var pendingGameName: String = ""
+    @State private var pendingCoverGameName: String?
 
     var sortedGames: [ISOEntry] {
         games.sorted { a, b in
@@ -56,6 +62,15 @@ struct GameListView: View {
                     .accessibilityLabel("Import Games")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        pendingCoverGameName = nil
+                        showCoverImporter = true
+                    } label: {
+                        Image(systemName: "photo.badge.plus")
+                    }
+                    .accessibilityLabel("Import Covers")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button { loadGames() } label: {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -75,6 +90,16 @@ struct GameListView: View {
                         .font(.caption)
                     }
                 }
+            }
+            .alert("Import Result", isPresented: $fileImporter.showImportAlert) {
+                Button("OK") {}
+            } message: {
+                Text(fileImporter.lastImportMessage ?? "")
+            }
+            .alert("Cover Result", isPresented: $coverStore.showCoverAlert) {
+                Button("OK") {}
+            } message: {
+                Text(coverStore.lastCoverMessage ?? "")
             }
             .alert("Restart VM?", isPresented: $showRestartAlert) {
                 Button("Cancel", role: .cancel) {}
@@ -101,6 +126,22 @@ struct GameListView: View {
                 case .failure(let error):
                     fileImporter.lastImportMessage = "Import failed: \(error.localizedDescription)"
                     fileImporter.showImportAlert = true
+                }
+            }
+            .fileImporter(
+                isPresented: $showCoverImporter,
+                allowedContentTypes: CoverStore.coverContentTypes,
+                allowsMultipleSelection: pendingCoverGameName == nil
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    coverStore.importCoverURLs(urls, forGameNamed: pendingCoverGameName)
+                    pendingCoverGameName = nil
+                    loadGames()
+                case .failure(let error):
+                    coverStore.lastCoverMessage = "Cover import failed: \(error.localizedDescription)"
+                    coverStore.showCoverAlert = true
+                    pendingCoverGameName = nil
                 }
             }
         }
@@ -171,11 +212,14 @@ struct GameListView: View {
                 appState.bootGame(isoName: game.name)
             }
         } label: {
-            HStack {
+            HStack(spacing: 12) {
+                coverThumbnail(for: game)
+
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text(game.name)
+                        Text(coverStore.displayName(forGameName: game.name))
                             .font(.body)
+                            .fontWeight(.medium)
                             .foregroundStyle(.primary)
                         if game.name == appState.runningGameName {
                             Image(systemName: "circle.fill")
@@ -183,9 +227,12 @@ struct GameListView: View {
                                 .foregroundStyle(.green)
                         }
                     }
-                    Text(formatSize(game.size))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text(formatSize(game.size))
+                        Text(game.name.pathExtensionLabel)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button {
@@ -202,6 +249,52 @@ struct GameListView: View {
             }
         }
         .foregroundStyle(.primary)
+        .contextMenu {
+            Button {
+                pendingCoverGameName = game.name
+                showCoverImporter = true
+            } label: {
+                Label("Choose Cover", systemImage: "photo")
+            }
+
+            if game.coverURL != nil {
+                Button(role: .destructive) {
+                    coverStore.removeManagedCovers(forGameNamed: game.name)
+                    loadGames()
+                } label: {
+                    Label("Remove Cover", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    private func coverThumbnail(for game: ISOEntry) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.thinMaterial)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+
+            if let coverURL = game.coverURL, let image = UIImage(contentsOfFile: coverURL.path) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 58, height: 87)
+                    .clipped()
+            } else {
+                VStack(spacing: 6) {
+                    Image(systemName: game.name.lowercased().hasSuffix(".chd") ? "archivebox" : "opticaldisc")
+                        .font(.system(size: 24, weight: .medium))
+                    Text(game.name.lowercased().hasSuffix(".chd") ? "CHD" : "PS2")
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 58, height: 87)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)
     }
 
     private var emptyState: some View {
@@ -240,7 +333,9 @@ struct GameListView: View {
             let attrs = try? fm.attributesOfItem(atPath: path)
             let size = attrs?[.size] as? UInt64 ?? 0
             let fav = ARMSX2Bridge.isFavorite(name)
-            return ISOEntry(name: name, size: size, isFavorite: fav)
+            let fileURL = fm.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
+            let coverURL = coverStore.coverURL(forGameName: name, gamePath: fileURL)
+            return ISOEntry(name: name, fileURL: fileURL, coverURL: coverURL, size: size, isFavorite: fav)
         }
     }
 
@@ -257,5 +352,12 @@ struct GameListView: View {
         }
         let mb = Double(bytes) / 1_048_576
         return String(format: "%.0f MB", mb)
+    }
+}
+
+private extension String {
+    var pathExtensionLabel: String {
+        let ext = (self as NSString).pathExtension.uppercased()
+        return ext.isEmpty ? "FILE" : ext
     }
 }
