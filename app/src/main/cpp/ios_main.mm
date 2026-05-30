@@ -425,8 +425,11 @@ int main(int argc, char* argv[]) {
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_metal.h>
 
-// SwiftUI integration — import auto-generated Swift header
-#if __has_include("ARMSX2-Swift.h")
+// SwiftUI integration — Xcode names the generated header after the Swift module.
+#if __has_include("ARMSX2iOS-Swift.h")
+#import "ARMSX2iOS-Swift.h"
+#define ARMSX2_HAS_SWIFTUI 1
+#elif __has_include("ARMSX2-Swift.h")
 #import "ARMSX2-Swift.h"
 #define ARMSX2_HAS_SWIFTUI 1
 #else
