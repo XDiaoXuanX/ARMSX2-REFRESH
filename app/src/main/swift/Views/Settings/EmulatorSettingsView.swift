@@ -69,6 +69,74 @@ struct EmulatorSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Performance") {
+                Toggle("Frame Limiter", isOn: $settings.frameLimiterEnabled)
+
+                if settings.frameLimiterEnabled {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Custom FPS Limit")
+                            Spacer()
+                            Text("\(settings.customFPSLimit) FPS")
+                                .foregroundStyle(.secondary)
+                                .font(.callout.monospacedDigit())
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { Double(settings.customFPSLimit) },
+                                set: { settings.customFPSLimit = Int($0.rounded()) }
+                            ),
+                            in: 30...180,
+                            step: 1
+                        )
+                    }
+                } else {
+                    Text("Limiter disabled uses the Android/ARMSX2 unlimited-speed setting.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("NTSC Base Rate")
+                        Spacer()
+                        Text(Self.formatFPS(settings.ntscFramerate))
+                            .foregroundStyle(.secondary)
+                            .font(.callout.monospacedDigit())
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.ntscFramerate) },
+                            set: { settings.ntscFramerate = Float($0) }
+                        ),
+                        in: 50...120,
+                        step: 0.01
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("PAL Base Rate")
+                        Spacer()
+                        Text(Self.formatFPS(settings.palFramerate))
+                            .foregroundStyle(.secondary)
+                            .font(.callout.monospacedDigit())
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.palFramerate) },
+                            set: { settings.palFramerate = Float($0) }
+                        ),
+                        in: 40...100,
+                        step: 0.01
+                    )
+                }
+
+                Text("Matches Android's frame limiter and framerate controls. Custom FPS is stored as PCSX2's nominal speed scalar.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Button("Use VU1 Interpreter Preset") {
                     settings.applyVU1CompatibilityPreset()
@@ -114,5 +182,9 @@ struct EmulatorSettingsView: View {
         }
         .navigationTitle("Emulator")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private static func formatFPS(_ value: Float) -> String {
+        String(format: "%.2f FPS", value)
     }
 }

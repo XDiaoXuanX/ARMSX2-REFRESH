@@ -135,6 +135,45 @@ static void ARMSX2ApplyLiveGSIntSetting(const char* section, const char* key, in
     GSConfig.OsdPerformancePos = static_cast<OsdOverlayPos>(clamped);
 }
 
+static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, float value)
+{
+    if (std::strcmp(section, "Framerate") == 0) {
+        const float clamped = std::clamp(value, 0.05f, 10.0f);
+        if (std::strcmp(key, "NominalScalar") == 0)
+            EmuConfig.EmulationSpeed.NominalScalar = clamped;
+        else if (std::strcmp(key, "TurboScalar") == 0)
+            EmuConfig.EmulationSpeed.TurboScalar = clamped;
+        else if (std::strcmp(key, "SlomoScalar") == 0)
+            EmuConfig.EmulationSpeed.SlomoScalar = clamped;
+        else
+            return;
+
+        VMManager::UpdateTargetSpeed();
+        NSLog(@"[ARMSX2Bridge] live framerate %s/%s=%0.3f", section, key, clamped);
+        return;
+    }
+
+    if (std::strcmp(section, "EmuCore/GS") != 0)
+        return;
+
+    if (std::strcmp(key, "FramerateNTSC") == 0) {
+        EmuConfig.GS.FramerateNTSC = value;
+        VMManager::UpdateTargetSpeed();
+        return;
+    }
+    if (std::strcmp(key, "FrameratePAL") == 0) {
+        EmuConfig.GS.FrameratePAL = value;
+        VMManager::UpdateTargetSpeed();
+        return;
+    }
+    if (std::strcmp(key, "upscale_multiplier") == 0) {
+        const float clamped = std::clamp(value, 0.25f, 8.0f);
+        EmuConfig.GS.UpscaleMultiplier = clamped;
+        GSConfig.UpscaleMultiplier = clamped;
+        return;
+    }
+}
+
 @implementation ARMSX2Bridge
 
 + (UIView *)gameRenderView {
@@ -573,6 +612,7 @@ static void ARMSX2ApplyLiveGSIntSetting(const char* section, const char* key, in
     if (!g_p44_settings_interface) return;
     g_p44_settings_interface->SetFloatValue(section.UTF8String, key.UTF8String, value);
     g_p44_settings_interface->Save();
+    ARMSX2ApplyLiveFloatSetting(section.UTF8String, key.UTF8String, value);
 }
 
 + (void)setINIString:(nonnull NSString *)section key:(nonnull NSString *)key value:(nonnull NSString *)value {

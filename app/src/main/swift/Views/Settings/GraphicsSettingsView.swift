@@ -30,6 +30,9 @@ struct GraphicsSettingsView: View {
 
             Section("Upscaling") {
                 Picker("Internal Resolution", selection: $settings.upscaleMultiplier) {
+                    Text("0.25x (Fastest)").tag(Float(0.25))
+                    Text("0.5x").tag(Float(0.5))
+                    Text("0.75x").tag(Float(0.75))
                     Text("1x Native (512x448)").tag(Float(1.0))
                     Text("2x (1024x896)").tag(Float(2.0))
                     Text("3x (1536x1344)").tag(Float(3.0))
@@ -38,7 +41,7 @@ struct GraphicsSettingsView: View {
                     Text("6x (3072x2688)").tag(Float(6.0))
                     Text("8x (4096x3584)").tag(Float(8.0))
                 }
-                Text("Higher values improve visual quality but reduce performance significantly. 4x+ recommended for A17 Pro / M-series. Requires restart.")
+                Text("Lower values can help performance on heavy games. Higher values improve visual quality but reduce performance significantly. Requires restart.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

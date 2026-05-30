@@ -46,6 +46,21 @@ final class SettingsStore: @unchecked Sendable {
     var fastmem: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/CPU/Recompiler", key: "EnableFastmem", value: fastmem) }
     }
+    var frameLimiterEnabled: Bool {
+        didSet { applyFrameLimiterSettings() }
+    }
+    var customFPSLimit: Int {
+        didSet { applyFrameLimiterSettings() }
+    }
+    var ntscFramerate: Float {
+        didSet {
+            ARMSX2Bridge.setINIFloat("EmuCore/GS", key: "FramerateNTSC", value: ntscFramerate)
+            applyFrameLimiterSettings()
+        }
+    }
+    var palFramerate: Float {
+        didSet { ARMSX2Bridge.setINIFloat("EmuCore/GS", key: "FrameratePAL", value: palFramerate) }
+    }
 
     // ── Boot ──
     var fastCDVD: Bool {
@@ -190,6 +205,12 @@ final class SettingsStore: @unchecked Sendable {
         vu1Recompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableVU1", defaultValue: true)
         fastBoot = ARMSX2Bridge.getINIBool("GameISO", key: "FastBoot", defaultValue: false)
         fastmem = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableFastmem", defaultValue: true)
+        let loadedNTSCFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FramerateNTSC", defaultValue: 59.94)
+        ntscFramerate = loadedNTSCFramerate
+        palFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FrameratePAL", defaultValue: 50.0)
+        let nominalScalar = ARMSX2Bridge.getINIFloat("Framerate", key: "NominalScalar", defaultValue: 1.0)
+        frameLimiterEnabled = nominalScalar < 5.0
+        customFPSLimit = Self.fpsLimit(fromScalar: nominalScalar, baseFramerate: loadedNTSCFramerate)
         // Boot
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
         // Advanced Speedhacks
@@ -248,6 +269,11 @@ final class SettingsStore: @unchecked Sendable {
         vu1Recompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableVU1", defaultValue: true)
         fastBoot = ARMSX2Bridge.getINIBool("GameISO", key: "FastBoot", defaultValue: false)
         fastmem = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableFastmem", defaultValue: true)
+        ntscFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FramerateNTSC", defaultValue: 59.94)
+        palFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FrameratePAL", defaultValue: 50.0)
+        let nominalScalar = ARMSX2Bridge.getINIFloat("Framerate", key: "NominalScalar", defaultValue: 1.0)
+        frameLimiterEnabled = nominalScalar < 5.0
+        customFPSLimit = Self.fpsLimit(fromScalar: nominalScalar, baseFramerate: ntscFramerate)
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
         eeCycleRate = Int(ARMSX2Bridge.getINIInt("EmuCore/Speedhacks", key: "EECycleRate", defaultValue: 0))
         vu1Instant = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "vu1Instant", defaultValue: true)
@@ -288,6 +314,16 @@ final class SettingsStore: @unchecked Sendable {
         hapticFeedback = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HapticFeedback", defaultValue: true)
     }
 
+    private static func fpsLimit(fromScalar scalar: Float, baseFramerate: Float) -> Int {
+        let fps = Int((scalar * max(baseFramerate, 1.0)).rounded())
+        return min(180, max(30, fps))
+    }
+
+    private func applyFrameLimiterSettings() {
+        let scalar = frameLimiterEnabled ? Float(customFPSLimit) / max(ntscFramerate, 1.0) : 10.0
+        ARMSX2Bridge.setINIFloat("Framerate", key: "NominalScalar", value: scalar)
+    }
+
     /// Apply OSD preset — writes ALL OSD flags to INI + GSConfig
     private func applyOsdPreset(_ preset: OsdPreset) {
         ARMSX2Bridge.applyOsdPreset(Int32(preset.rawValue))
@@ -322,6 +358,10 @@ final class SettingsStore: @unchecked Sendable {
         vu1Recompiler = true
         fastBoot = false
         fastmem = true
+        frameLimiterEnabled = true
+        customFPSLimit = 60
+        ntscFramerate = 59.94
+        palFramerate = 50.0
         fastCDVD = false
         eeCycleRate = 0
         vu1Instant = true

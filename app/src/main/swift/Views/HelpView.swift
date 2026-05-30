@@ -50,7 +50,11 @@ private let helpData: [HelpSection] = [
         ),
         HelpItem(
             question: "Internal Resolution",
-            answer: "1x = native PS2 resolution (recommended). 2x/3x provide higher resolution output but significantly increase GPU load."
+            answer: "0.25x, 0.5x, and 0.75x are performance modes for heavy games. 1x is native PS2 resolution. 2x and higher look sharper but significantly increase GPU load."
+        ),
+        HelpItem(
+            question: "Frame Limiter",
+            answer: "Keeps gameplay near the selected FPS target. Turning it off uses the same unlimited-speed style setting as ARMSX2 Android, which is useful for testing but can make games run too fast."
         ),
         HelpItem(
             question: "VSync Queue Size",
@@ -72,7 +76,7 @@ private let helpData: [HelpSection] = [
         HelpItem(question: "BIOS formats", answer: "BIN, ROM (dumped from your own PS2)"),
         HelpItem(
             question: "Game covers",
-            answer: "Open the Covers menu in Games to import local images, download missing covers, or edit the online Cover Source template. Templates support ${serial}, ${title}, and ${filetitle}; the default example is https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/${serial}.jpg. ARMSX2 iOS scans Documents/armsx2_covers, Documents/covers, the game folder, and Documents for JPG, PNG, WebP, HEIC, or HEIF images named after the game file, file stem, game title, or serial-like names such as SLUS-20312. This also works for CHD games when metadata can be resolved."
+            answer: "Games default to a cover grid, with a toolbar button to switch back to list view. Open the Covers menu in Games to import local images, download missing covers, or edit the online Cover Source template. Templates support ${serial}, ${title}, and ${filetitle}; the default example is https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/${serial}.jpg. ARMSX2 iOS scans Documents/armsx2_covers, Documents/covers, the game folder, and Documents for JPG, PNG, WebP, HEIC, or HEIF images named after the game file, file stem, game title, or serial-like names such as SLUS-20312. This also works for CHD games when metadata can be resolved."
         ),
     ]),
 ]
