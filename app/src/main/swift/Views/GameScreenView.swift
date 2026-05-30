@@ -292,29 +292,20 @@ struct GameScreenView: View {
                 } header: {
                     Text("Status")
                 } footer: {
-                    Text("Auto Game Presets applies known safe defaults. Manual changes here are remembered for the current game when a game is running.")
+                    Text("Auto Game Presets applies known safe defaults. Manual flags below are remembered for the current game when a game is running.")
                 }
 
                 Section {
-                    ForEach(compatibilityPresets) { preset in
-                        Button {
-                            applyCompatibilityPreset(preset)
-                        } label: {
-                            HStack(spacing: 12) {
-                                Label(preset.title, systemImage: preset.systemImage)
-                                Spacer()
-                                if preset.id == compatibilityPresetKey {
-                                    Image(systemName: "checkmark")
-                                        .font(.body.weight(.semibold))
-                                }
-                            }
-                        }
-                        .foregroundStyle(.primary)
+                    Button {
+                        applyCompatibilityPreset(compatibilityPreset(for: "off"))
+                    } label: {
+                        Label("Use Default / Clear Flags", systemImage: "power")
                     }
+                    .foregroundStyle(.primary)
                 } header: {
-                    Text("Presets")
+                    Text("Reset")
                 } footer: {
-                    Text("Choose one preset when a game needs a known compatibility fallback.")
+                    Text("Use this when testing is done or a game behaves worse with compatibility flags enabled.")
                 }
 
                 Section {
@@ -364,9 +355,9 @@ struct GameScreenView: View {
                         systemImage: "arrow.triangle.branch"
                     )
                 } header: {
-                    Text("Advanced Custom Flags")
+                    Text("Manual Compatibility Flags")
                 } footer: {
-                    Text("Use these only when one preset is not enough. Turning any flag on or off switches this game to Custom Advanced Flags.")
+                    Text("Toggle one or more flags when a game needs compatibility help. Changing any flag switches this game to Custom Advanced Flags.")
                 }
 
                 if !compatibilityIdentity.isEmpty {
@@ -377,7 +368,7 @@ struct GameScreenView: View {
                             refreshCompatibilityState()
                             presentSaveStateStatus("Compatibility preset reset for \(identity)")
                         } label: {
-                            Label("Forget Current Game Preset", systemImage: "trash")
+                            Label("Forget This Game's Override", systemImage: "trash")
                         }
                     }
                 }
