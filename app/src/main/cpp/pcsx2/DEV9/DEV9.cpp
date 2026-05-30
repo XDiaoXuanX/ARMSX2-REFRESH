@@ -182,6 +182,11 @@ void DEV9shutdown()
 s32 DEV9open()
 {
 	DevCon.WriteLn("DEV9: DEV9open");
+	Console.WriteLn("DEV9: open EthEnable=%d EthApi=%d EthDevice='%s' HddEnable=%d",
+		EmuConfig.DEV9.EthEnable ? 1 : 0,
+		static_cast<int>(EmuConfig.DEV9.EthApi),
+		EmuConfig.DEV9.EthDevice.c_str(),
+		EmuConfig.DEV9.HddEnable ? 1 : 0);
 
 	std::string hddPath(GetHDDPath());
 

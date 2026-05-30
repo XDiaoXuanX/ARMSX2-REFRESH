@@ -92,6 +92,11 @@ NetAdapter* GetNetAdapter()
 
 void InitNet()
 {
+	Console.WriteLn("DEV9: InitNet EthApi=%d EthDevice='%s' InterceptDHCP=%d",
+		static_cast<int>(EmuConfig.DEV9.EthApi),
+		EmuConfig.DEV9.EthDevice.c_str(),
+		EmuConfig.DEV9.InterceptDHCP ? 1 : 0);
+
 	NetAdapter* na = GetNetAdapter();
 
 	if (!na)
@@ -103,6 +108,7 @@ void InitNet()
 
 	nif = na;
 	RxRunning = true;
+	Console.WriteLn("DEV9: InitNet ok, starting RX thread");
 
 	rx_thread = std::thread(NetRxThread);
 

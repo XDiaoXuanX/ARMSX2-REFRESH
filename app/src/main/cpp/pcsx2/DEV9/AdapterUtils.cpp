@@ -230,27 +230,46 @@ bool AdapterUtils::GetAdapterAuto(Adapter* adapter, AdapterBuffer* buffer)
 	do
 	{
 		if ((pAdapter->ifa_flags & IFF_LOOPBACK) == 0 &&
-			(pAdapter->ifa_flags & IFF_UP) != 0)
+			(pAdapter->ifa_flags & IFF_UP) != 0 &&
+			pAdapter->ifa_addr != nullptr &&
+			ReadAddressFamily(pAdapter->ifa_addr) == AF_INET)
 		{
 			// Search for an adapter with;
 			// IPv4 Address,
 			// Gateway.
 
 			bool hasIPv4 = false;
+#if !defined(__APPLE__) || !TARGET_OS_IPHONE
 			bool hasGateway = false;
+#endif
 
 			if (GetAdapterIP(pAdapter).has_value())
 				hasIPv4 = true;
 
+#if !defined(__APPLE__) || !TARGET_OS_IPHONE
 			if (GetGateways(pAdapter).size() > 0)
 				hasGateway = true;
+#endif
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			// iOS does not expose the desktop/macOS route sysctl path used by
+			// GetGateways(), but sockets mode only needs a usable IPv4
+			// interface here. The internal DHCP gateway is injected later.
+			if (hasIPv4)
+			{
+				Console.WriteLn("DEV9: Socket: iOS Auto selected adapter '%s' without gateway probe", pAdapter->ifa_name);
+				*adapter = *pAdapter;
+				buffer->swap(adapterInfo);
+				return true;
+			}
+#else
 			if (hasIPv4 && hasGateway)
 			{
 				*adapter = *pAdapter;
 				buffer->swap(adapterInfo);
 				return true;
 			}
+#endif
 		}
 
 		pAdapter = pAdapter->ifa_next;

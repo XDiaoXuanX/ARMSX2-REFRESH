@@ -110,6 +110,7 @@ SocketAdapter::SocketAdapter()
 
 	AdapterUtils::Adapter adapter;
 	AdapterUtils::AdapterBuffer buffer;
+	Console.WriteLn("DEV9: Socket: init requested adapter='%s'", EmuConfig.DEV9.EthDevice.c_str());
 
 	if (strcmp(EmuConfig.DEV9.EthDevice.c_str(), "Auto") != 0)
 	{
@@ -184,6 +185,10 @@ SocketAdapter::SocketAdapter()
 	sendThreadId = std::this_thread::get_id();
 
 	initialized = true;
+	Console.WriteLn("DEV9: Socket: initialized adapter='%s' ps2IP=%u.%u.%u.%u gateway=%u.%u.%u.%u",
+		EmuConfig.DEV9.EthDevice.c_str(),
+		ps2IP.bytes[0], ps2IP.bytes[1], ps2IP.bytes[2], ps2IP.bytes[3],
+		gateway.bytes[0], gateway.bytes[1], gateway.bytes[2], gateway.bytes[3]);
 }
 
 bool SocketAdapter::blocks()

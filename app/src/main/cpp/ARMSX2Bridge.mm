@@ -1577,7 +1577,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
                 continue;
 
             const sa_family_t family = ifa->ifa_addr->sa_family;
-            if (family != AF_INET && family != AF_INET6)
+            if (family != AF_INET)
                 continue;
 
             if ((ifa->ifa_flags & IFF_UP) == 0 || (ifa->ifa_flags & IFF_LOOPBACK) != 0)
