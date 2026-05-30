@@ -65,6 +65,10 @@ private let helpData: [HelpSection] = [
             answer: "The Memory Cards settings page can create 8 MB, 16 MB, 32 MB, 64 MB, or folder memory cards, then assign them to Slot 1 or Slot 2. Slot changes apply on next boot."
         ),
         HelpItem(
+            question: "RetroAchievements",
+            answer: "Enable RetroAchievements from Settings, then log in with your RetroAchievements account. The status panel shows whether the client is active, which game is being tracked, achievement progress, points, leaderboards, and rich presence. Hardcore mode is core-enforced and can restrict cheats, save states, and other non-hardcore features."
+        ),
+        HelpItem(
             question: "VSync Queue Size",
             answer: "Number of pre-rendered frames. Higher values reduce frame drops but increase input latency. Default: 8."
         ),

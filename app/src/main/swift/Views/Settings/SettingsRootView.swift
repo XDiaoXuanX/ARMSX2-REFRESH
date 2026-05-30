@@ -7,6 +7,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
     case emulator
     case graphics
     case memoryCards
+    case retroAchievements
     case overlay
     case gameController
     case virtualPad
@@ -23,6 +24,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "Graphics"
         case .memoryCards:
             return "Memory Cards"
+        case .retroAchievements:
+            return "RetroAchievements"
         case .overlay:
             return "Overlay (OSD)"
         case .gameController:
@@ -44,6 +47,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "paintbrush"
         case .memoryCards:
             return "memorychip"
+        case .retroAchievements:
+            return "trophy"
         case .overlay:
             return "text.below.photo"
         case .gameController:
@@ -96,6 +101,11 @@ struct SettingsRootView: View {
                     Label("Memory Cards", systemImage: "memorychip")
                 }
                 NavigationLink {
+                    RetroAchievementsSettingsView()
+                } label: {
+                    Label("RetroAchievements", systemImage: "trophy")
+                }
+                NavigationLink {
                     OverlaySettingsView()
                 } label: {
                     Label("Overlay (OSD)", systemImage: "text.below.photo")
@@ -144,6 +154,8 @@ struct SettingsRootView: View {
             GraphicsSettingsView()
         case .memoryCards:
             MemoryCardSettingsView()
+        case .retroAchievements:
+            RetroAchievementsSettingsView()
         case .overlay:
             OverlaySettingsView()
         case .gameController:

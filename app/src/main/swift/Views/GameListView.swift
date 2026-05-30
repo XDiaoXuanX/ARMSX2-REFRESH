@@ -4,12 +4,14 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
+import ImageIO
 
 struct ISOEntry: Identifiable {
     var id: String { name }
     let name: String
     let fileURL: URL?
     let coverURL: URL?
+    let coverSignature: String?
     let metadata: [String: String]
     let size: UInt64
     var isFavorite: Bool
@@ -339,7 +341,7 @@ struct GameListView: View {
         } label: {
             VStack(alignment: .leading, spacing: 10) {
                 ZStack(alignment: .topTrailing) {
-                    coverThumbnail(for: game, width: 132, height: 198)
+                    coverThumbnail(for: game, width: 126, height: 189)
                         .frame(maxWidth: .infinity)
 
                     Button {
@@ -384,7 +386,7 @@ struct GameListView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(game.name == appState.runningGameName ? .green.opacity(0.6) : .white.opacity(0.08), lineWidth: 1)
             }
-            .shadow(color: .black.opacity(0.08), radius: 10, x: 0, y: 5)
+            .shadow(color: .black.opacity(0.05), radius: 3, x: 0, y: 2)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -393,32 +395,13 @@ struct GameListView: View {
     }
 
     private func coverThumbnail(for game: ISOEntry, width: CGFloat = 58, height: CGFloat = 87) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.thinMaterial)
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
-
-            if let coverURL = game.coverURL, let image = UIImage(contentsOfFile: coverURL.path) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: width, height: height)
-                    .clipped()
-            } else {
-                VStack(spacing: 6) {
-                    Image(systemName: game.name.lowercased().hasSuffix(".chd") ? "archivebox" : "opticaldisc")
-                        .font(.system(size: 24, weight: .medium))
-                    Text(game.name.lowercased().hasSuffix(".chd") ? "CHD" : "PS2")
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                }
-                .foregroundStyle(.secondary)
-            }
-        }
-        .frame(width: width, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)
+        CoverThumbnailView(
+            gameName: game.name,
+            coverURL: game.coverURL,
+            coverSignature: game.coverSignature,
+            width: width,
+            height: height
+        )
     }
 
     private func vmStatusCard(gameName: String) -> some View {
@@ -535,7 +518,8 @@ struct GameListView: View {
             let fileURL = fm.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
             let metadata = ARMSX2Bridge.gameMetadata(forISO: name)
             let coverURL = coverStore.coverURL(forGameName: name, gamePath: fileURL, metadata: metadata)
-            return ISOEntry(name: name, fileURL: fileURL, coverURL: coverURL, metadata: metadata, size: size, isFavorite: fav)
+            let coverSignature = CoverThumbnailCache.signature(for: coverURL)
+            return ISOEntry(name: name, fileURL: fileURL, coverURL: coverURL, coverSignature: coverSignature, metadata: metadata, size: size, isFavorite: fav)
         }
     }
 
@@ -567,6 +551,129 @@ struct GameListView: View {
         }
         let mb = Double(bytes) / 1_048_576
         return String(format: "%.0f MB", mb)
+    }
+}
+
+private struct CoverThumbnailView: View {
+    let gameName: String
+    let coverURL: URL?
+    let coverSignature: String?
+    let width: CGFloat
+    let height: CGFloat
+
+    @State private var image: UIImage?
+
+    private var cacheID: String {
+        "\(coverSignature ?? "placeholder")|\(Int(width))x\(Int(height))"
+    }
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: width, height: height)
+                    .clipped()
+            } else {
+                VStack(spacing: 6) {
+                    Image(systemName: gameName.lowercased().hasSuffix(".chd") ? "archivebox" : "opticaldisc")
+                        .font(.system(size: 24, weight: .medium))
+                    Text(gameName.lowercased().hasSuffix(".chd") ? "CHD" : "PS2")
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .task(id: cacheID) {
+            await loadThumbnail()
+        }
+    }
+
+    @MainActor
+    private func loadThumbnail() async {
+        guard let coverURL else {
+            image = nil
+            return
+        }
+
+        let scale = UIScreen.main.scale
+        if let cached = CoverThumbnailCache.shared.cachedImage(for: coverURL, signature: coverSignature, width: width, height: height, scale: scale) {
+            image = cached
+            return
+        }
+
+        image = await CoverThumbnailCache.shared.thumbnail(for: coverURL, signature: coverSignature, width: width, height: height, scale: scale)
+    }
+}
+
+private final class CoverThumbnailCache: @unchecked Sendable {
+    static let shared = CoverThumbnailCache()
+
+    private let cache = NSCache<NSString, UIImage>()
+
+    private init() {
+        cache.countLimit = 320
+        cache.totalCostLimit = 48 * 1024 * 1024
+    }
+
+    func cachedImage(for url: URL, signature: String?, width: CGFloat, height: CGFloat, scale: CGFloat) -> UIImage? {
+        cache.object(forKey: cacheKey(for: url, signature: signature, width: width, height: height, scale: scale))
+    }
+
+    func thumbnail(for url: URL, signature: String?, width: CGFloat, height: CGFloat, scale: CGFloat) async -> UIImage? {
+        let key = cacheKey(for: url, signature: signature, width: width, height: height, scale: scale)
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+
+        let path = url.path
+        let maxPixelSize = max(1, Int(max(width, height) * scale))
+        let image = await Task.detached(priority: .utility) {
+            let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+            let thumbnailOptions = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            ] as CFDictionary
+
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions),
+                  let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
+                return UIImage(contentsOfFile: path)
+            }
+
+            return UIImage(cgImage: cgImage, scale: scale, orientation: .up)
+        }.value
+
+        if let image {
+            let cost = max(1, Int(image.size.width * image.scale * image.size.height * image.scale * 4))
+            cache.setObject(image, forKey: key, cost: cost)
+        }
+
+        return image
+    }
+
+    static func signature(for url: URL?) -> String? {
+        guard let url else { return nil }
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let size = values?.fileSize ?? 0
+        return "\(url.path)|\(modified)|\(size)"
+    }
+
+    private func cacheKey(for url: URL, signature: String?, width: CGFloat, height: CGFloat, scale: CGFloat) -> NSString {
+        let pixelWidth = Int(width * scale)
+        let pixelHeight = Int(height * scale)
+        return "\(signature ?? url.path)|\(pixelWidth)x\(pixelHeight)" as NSString
     }
 }
 

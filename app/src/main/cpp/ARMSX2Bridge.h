@@ -48,6 +48,7 @@ typedef NS_ENUM(NSInteger, ARMSX2PadButton) {
 @end
 
 typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
+typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonnull message);
 
 @interface ARMSX2Bridge : NSObject
 
@@ -142,6 +143,16 @@ typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
 + (nullable NSString *)memoryCardNameForSlot:(NSInteger)slot NS_SWIFT_NAME(memoryCardName(forSlot:));
 + (void)setMemoryCardName:(nonnull NSString *)name forSlot:(NSInteger)slot enabled:(BOOL)enabled NS_SWIFT_NAME(setMemoryCard(name:forSlot:enabled:));
 + (BOOL)createMemoryCardNamed:(nonnull NSString *)name sizeMB:(NSInteger)sizeMB folder:(BOOL)folder NS_SWIFT_NAME(createMemoryCard(named:sizeMB:folder:));
+
+// RetroAchievements
++ (nonnull NSDictionary<NSString *, id> *)retroAchievementsState;
++ (void)setRetroAchievementsEnabled:(BOOL)enabled;
++ (void)setRetroAchievementsHardcore:(BOOL)enabled;
++ (void)setRetroAchievementsNotifications:(BOOL)enabled;
++ (void)setRetroAchievementsLeaderboards:(BOOL)enabled;
++ (void)setRetroAchievementsOverlays:(BOOL)enabled;
++ (void)loginRetroAchievementsWithUsername:(nonnull NSString *)username password:(nonnull NSString *)password completion:(nullable ARMSX2RetroAchievementsCompletion)completion NS_SWIFT_NAME(loginRetroAchievements(username:password:completion:));
++ (void)logoutRetroAchievements;
 
 // [P53] Gamepad button mapping
 + (void)startButtonCapture;

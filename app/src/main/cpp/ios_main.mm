@@ -464,6 +464,7 @@ int main(int argc, char* argv[]) {
 
 #include "pcsx2/Host.h"
 #include "pcsx2/Host/AudioStreamTypes.h"
+#include "pcsx2/INISettingsInterface.h"
 
 #include "common/WindowInfo.h"
 #include "common/HTTPDownloader.h"
@@ -513,6 +514,7 @@ extern void GSResizeDisplayWindow(int width, int height, float scale);
 }
 @end
 ARMSX2GameView* g_gameRenderView = nil;  // non-static: accessed from ARMSX2Bridge.mm
+static INISettingsInterface* s_settings_interface = nullptr;
 
 // Touch pad state
 bool g_touchPadState[64] = {};
@@ -560,6 +562,8 @@ static void ARMSX2DrainCPUThreadTasks()
         task->cv.notify_all();
     }
 }
+
+extern "C" void ARMSX2_PostRetroAchievementsStateChanged(void);
 
 // Gamepad button mapping — 16 PS2 buttons → SDL_GamepadButton
 std::atomic<bool> s_captureMode{false};
@@ -775,7 +779,7 @@ namespace Host
     void OnInputDeviceConnected(std::string_view, std::string_view) {}
     void RequestExitApplication(bool) {}
     void CheckForSettingsChanges(const Pcsx2Config&) {}
-    void OnAchievementsRefreshed() {}
+    void OnAchievementsRefreshed() { ARMSX2_PostRetroAchievementsStateChanged(); }
     void PumpMessagesOnCPUThread()
     {
         ARMSX2DrainCPUThreadTasks();
@@ -945,17 +949,21 @@ namespace Host
 #endif // DEBUG — BIOS_NAV
     }
     std::string TranslatePluralToString(const char*, const char*, const char*, int) { return ""; }
-    void CommitBaseSettingChanges() {}
+    void CommitBaseSettingChanges()
+    {
+        if (s_settings_interface)
+            s_settings_interface->Save();
+    }
     void OnInputDeviceDisconnected(InputBindingKey, std::string_view) {}
     void OpenHostFileSelectorAsync(std::string_view, bool, std::function<void(const std::string&)>, std::vector<std::string>, std::string_view) {}
     std::unique_ptr<ProgressCallback> CreateHostProgressCallback() { return nullptr; }
-    void OnAchievementsLoginSuccess(char const*, u32, u32, u32) {}
+    void OnAchievementsLoginSuccess(char const*, u32, u32, u32) { ARMSX2_PostRetroAchievementsStateChanged(); }
     void OnPerformanceMetricsUpdated() {}
-    void OnAchievementsLoginRequested(Achievements::LoginRequestReason) {}
+    void OnAchievementsLoginRequested(Achievements::LoginRequestReason) { ARMSX2_PostRetroAchievementsStateChanged(); }
     bool ShouldPreferHostFileSelector() { return false; }
     void OnCoverDownloaderOpenRequested() {}
     void OnCreateMemoryCardOpenRequested() {}
-    void OnAchievementsHardcoreModeChanged(bool) {}
+    void OnAchievementsHardcoreModeChanged(bool) { ARMSX2_PostRetroAchievementsStateChanged(); }
     void OpenURL(std::string_view) {}
 }
 
@@ -1105,7 +1113,6 @@ bool PCAPAdapter::ValidateEtherFrame(NetPacket*) { return false; }
 #include "3rdparty/simpleini/include/SimpleIni.h"
 #include "pcsx2/INISettingsInterface.h"
 
-static INISettingsInterface* s_settings_interface = nullptr;
 // Expose to ARMSX2Bridge.mm via extern
 INISettingsInterface* g_p44_settings_interface = nullptr;
 
@@ -1175,6 +1182,10 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
             // Speedhacks
             s_settings_interface->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
+
+            // RetroAchievements
+            s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
+            s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
             
             Console.WriteLn("@@CFG_DEFAULTS@@ created=1 CoreType=0 UseArm64Dynarec=false EnableEE=1");
             s_settings_interface->Save();
@@ -1195,6 +1206,12 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     if (!s_settings_interface->ContainsValue("EmuCore/CPU", "ExtraMemory")) {
         s_settings_interface->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
     }
+    if (!s_settings_interface->ContainsValue("Achievements", "Enabled")) {
+        s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
+    }
+    if (!s_settings_interface->ContainsValue("Achievements", "ChallengeMode")) {
+        s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
+    }
     s_settings_interface->Save();
     [self checkAndConfigureBIOS];
 
@@ -1212,6 +1229,9 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
     VMManager::Internal::LoadStartupSettings();
     VMManager::ApplySettings();
+    if (EmuConfig.Achievements.Enabled && !Achievements::IsActive())
+        Achievements::Initialize();
+    ARMSX2_PostRetroAchievementsStateChanged();
     
     // --- Create SDL Window ---
     Host::g_sdl_window = SDL_CreateWindow("PCSX2 iOS", 1280, 720, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE);

@@ -11,6 +11,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "CDVD/CDVDcommon.h"
 #include "VMManager.h"
 #include "Patch.h"
+#include "Achievements.h"
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
 #include "SIO/Memcard/MemoryCardFile.h"
@@ -22,6 +23,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "common/FileSystem.h"
 #include "common/Path.h"
 #include "common/ZipHelpers.h"
+#include "common/Error.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -76,6 +78,39 @@ static NSString* ARMSX2NSStringFromStringView(std::string_view value)
 
     NSString* string = [[NSString alloc] initWithBytes:value.data() length:value.size() encoding:NSUTF8StringEncoding];
     return string ?: @"";
+}
+
+extern "C" void ARMSX2_PostRetroAchievementsStateChanged(void)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2RetroAchievementsStateChanged" object:nil];
+    });
+}
+
+static void ARMSX2EnsureAchievementsClientInitialized()
+{
+    if (!EmuConfig.Achievements.Enabled)
+        return;
+
+    if (!Achievements::IsActive())
+        Achievements::Initialize();
+}
+
+static void ARMSX2SaveBaseSettingBool(const char* section, const char* key, bool value)
+{
+    Host::SetBaseBoolSettingValue(section, key, value);
+    if (g_p44_settings_interface) {
+        g_p44_settings_interface->SetBoolValue(section, key, value);
+        g_p44_settings_interface->Save();
+    }
+}
+
+static void ARMSX2UpdateAchievementsSettings(void (^mutate)())
+{
+    Pcsx2Config::AchievementsOptions old_config = EmuConfig.Achievements;
+    mutate();
+    Achievements::UpdateSettings(old_config);
+    ARMSX2_PostRetroAchievementsStateChanged();
 }
 
 static BOOL ARMSX2GetCurrentSaveStateIdentity(std::string* serial, u32* crc)
@@ -1006,6 +1041,156 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     NSLog(@"[ARMSX2Bridge] MemoryCard create name=%@ folder=%d size=%ld result=%d",
           sanitized, folder ? 1 : 0, static_cast<long>(sizeMB), result ? 1 : 0);
     return result ? YES : NO;
+}
+
+#pragma mark - RetroAchievements
+
++ (nonnull NSDictionary<NSString *, id> *)retroAchievementsState {
+    Achievements::UserStats userStats;
+    Achievements::GameStats gameStats;
+    bool loggedIn = false;
+    bool hasGame = false;
+    bool active = false;
+    bool hardcoreActive = false;
+
+    {
+        auto lock = Achievements::GetLock();
+        active = Achievements::IsActive();
+        loggedIn = Achievements::GetCurrentUserStats(&userStats);
+        hasGame = Achievements::GetCurrentGameStats(&gameStats);
+        hardcoreActive = Achievements::IsHardcoreModeActive();
+    }
+
+    return @{
+        @"enabled": @(EmuConfig.Achievements.Enabled),
+        @"active": @(active),
+        @"loggedIn": @(loggedIn),
+        @"username": ARMSX2NSStringFromStdString(userStats.username),
+        @"displayName": ARMSX2NSStringFromStdString(userStats.display_name),
+        @"avatarPath": ARMSX2NSStringFromStdString(userStats.avatar_path),
+        @"points": @(userStats.points),
+        @"softcorePoints": @(userStats.softcore_points),
+        @"unreadMessages": @(userStats.unread_messages),
+        @"hardcorePreference": @(EmuConfig.Achievements.HardcoreMode),
+        @"hardcoreActive": @(hardcoreActive),
+        @"notifications": @(EmuConfig.Achievements.Notifications),
+        @"leaderboardNotifications": @(EmuConfig.Achievements.LeaderboardNotifications),
+        @"overlays": @(EmuConfig.Achievements.Overlays),
+        @"hasActiveGame": @(hasGame),
+        @"gameTitle": ARMSX2NSStringFromStdString(gameStats.title),
+        @"richPresence": ARMSX2NSStringFromStdString(gameStats.rich_presence),
+        @"gameIconPath": ARMSX2NSStringFromStdString(gameStats.icon_path),
+        @"gameIconURL": ARMSX2NSStringFromStdString(gameStats.icon_url),
+        @"unlockedAchievements": @(gameStats.unlocked_achievements),
+        @"totalAchievements": @(gameStats.total_achievements),
+        @"unlockedPoints": @(gameStats.unlocked_points),
+        @"totalPoints": @(gameStats.total_points),
+        @"gameId": @(gameStats.game_id),
+        @"hasAchievements": @(gameStats.has_achievements),
+        @"hasLeaderboards": @(gameStats.has_leaderboards),
+        @"hasRichPresence": @(gameStats.has_rich_presence),
+    };
+}
+
++ (void)setRetroAchievementsEnabled:(BOOL)enabled {
+    const bool enable = enabled ? true : false;
+    if (EmuConfig.Achievements.Enabled == enable) {
+        ARMSX2SaveBaseSettingBool("Achievements", "Enabled", enable);
+        ARMSX2_PostRetroAchievementsStateChanged();
+        return;
+    }
+
+    ARMSX2UpdateAchievementsSettings(^{
+        EmuConfig.Achievements.Enabled = enable;
+        ARMSX2SaveBaseSettingBool("Achievements", "Enabled", enable);
+    });
+    NSLog(@"[ARMSX2Bridge] RetroAchievements enabled=%d", enable ? 1 : 0);
+}
+
++ (void)setRetroAchievementsHardcore:(BOOL)enabled {
+    const bool enable = enabled ? true : false;
+    if (EmuConfig.Achievements.HardcoreMode == enable) {
+        ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", enable);
+        ARMSX2_PostRetroAchievementsStateChanged();
+        return;
+    }
+
+    ARMSX2UpdateAchievementsSettings(^{
+        EmuConfig.Achievements.HardcoreMode = enable;
+        ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", enable);
+    });
+    NSLog(@"[ARMSX2Bridge] RetroAchievements hardcore=%d", enable ? 1 : 0);
+}
+
++ (void)setRetroAchievementsNotifications:(BOOL)enabled {
+    const bool enable = enabled ? true : false;
+    ARMSX2UpdateAchievementsSettings(^{
+        EmuConfig.Achievements.Notifications = enable;
+        ARMSX2SaveBaseSettingBool("Achievements", "Notifications", enable);
+    });
+}
+
++ (void)setRetroAchievementsLeaderboards:(BOOL)enabled {
+    const bool enable = enabled ? true : false;
+    ARMSX2UpdateAchievementsSettings(^{
+        EmuConfig.Achievements.LeaderboardNotifications = enable;
+        ARMSX2SaveBaseSettingBool("Achievements", "LeaderboardNotifications", enable);
+    });
+}
+
++ (void)setRetroAchievementsOverlays:(BOOL)enabled {
+    const bool enable = enabled ? true : false;
+    ARMSX2UpdateAchievementsSettings(^{
+        EmuConfig.Achievements.Overlays = enable;
+        ARMSX2SaveBaseSettingBool("Achievements", "Overlays", enable);
+    });
+}
+
++ (void)loginRetroAchievementsWithUsername:(nonnull NSString *)username password:(nonnull NSString *)password completion:(nullable ARMSX2RetroAchievementsCompletion)completion {
+    NSString* trimmedUsername = [username stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString* nativePassword = password ?: @"";
+    ARMSX2RetroAchievementsCompletion callback = [completion copy];
+
+    if (trimmedUsername.length == 0 || nativePassword.length == 0) {
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(NO, @"Enter your RetroAchievements username and password."); });
+        return;
+    }
+
+    std::string user(trimmedUsername.UTF8String ?: "");
+    std::string pass(nativePassword.UTF8String ?: "");
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (!EmuConfig.Achievements.Enabled) {
+            Pcsx2Config::AchievementsOptions old_config = EmuConfig.Achievements;
+            EmuConfig.Achievements.Enabled = true;
+            ARMSX2SaveBaseSettingBool("Achievements", "Enabled", true);
+            Achievements::UpdateSettings(old_config);
+        }
+
+        ARMSX2EnsureAchievementsClientInitialized();
+
+        Error error;
+        const bool result = Achievements::Login(user.c_str(), pass.c_str(), &error);
+        NSString* message = result ? @"RetroAchievements login successful." :
+            (error.IsValid() ? ARMSX2NSStringFromStdString(error.GetDescription()) : @"RetroAchievements login failed.");
+
+        NSLog(@"[ARMSX2Bridge] RetroAchievements login username=%@ result=%d message=%@", trimmedUsername, result ? 1 : 0, message);
+        ARMSX2_PostRetroAchievementsStateChanged();
+
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO, message); });
+    });
+}
+
++ (void)logoutRetroAchievements {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        Achievements::Logout();
+        if (g_p44_settings_interface)
+            g_p44_settings_interface->Save();
+        NSLog(@"[ARMSX2Bridge] RetroAchievements logout");
+        ARMSX2_PostRetroAchievementsStateChanged();
+    });
 }
 
 // Gamepad button mapping
