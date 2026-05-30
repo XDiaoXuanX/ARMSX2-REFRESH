@@ -742,6 +742,15 @@ static bool TryStikDebugUniversalPrepareRegion(void*, size_t)
 }
 #endif
 
+static bool ShouldTryStikDebugUniversalPrepareRegion()
+{
+    const char* env = getenv("iPSX2_ENABLE_UNIVERSAL_PREPARE");
+    if (!env)
+        env = getenv("ARMSX2_ENABLE_UNIVERSAL_PREPARE");
+
+    return (env && atoi(env) != 0);
+}
+
 // [P43] Allocate executable code memory with dual-mapping for iOS 26
 void* DarwinMisc::MmapCodeDualMap(size_t size)
 {
@@ -819,13 +828,10 @@ void* DarwinMisc::MmapCodeDualMap(size_t size)
     fprintf(stderr, "@@JIT_ALLOC@@ dual-map mmap(RX) OK rx=%p size=0x%zx\n", rx_ptr, size);
 
     // Step 2: TXM page registration (only for LuckTXM).
-    // Try Universal StikDebug's brk #0xf00d command first, then fall back to the
-    // legacy iPSX2/DolphiniOS brk #0x69 path so UTM-Dolphin remains supported.
+    // Prefer the legacy iPSX2/DolphiniOS brk #0x69 path because UTM-Dolphin
+    // handles it reliably. Universal StikDebug's brk #0xf00d path can hang
+    // under UTM-Dolphin before returning, so keep it behind an explicit opt-in.
     if (mode == JitMode::LuckTXM) {
-        bool brk_ok = TryStikDebugUniversalPrepareRegion(rx_ptr, size);
-        if (!brk_ok)
-            fprintf(stderr, "@@JIT_ALLOC@@ Universal CMD_PREPARE_REGION unavailable; trying legacy brk #0x69\n");
-
         static sigjmp_buf s_alloc_brk_jmp;
         struct sigaction sa_brk = {}, sa_brk_old = {};
         sa_brk.sa_handler = +[](int) { siglongjmp(s_alloc_brk_jmp, 1); };
@@ -833,20 +839,26 @@ void* DarwinMisc::MmapCodeDualMap(size_t size)
         sigemptyset(&sa_brk.sa_mask);
         sigaction(SIGTRAP, &sa_brk, &sa_brk_old);
 
-        if (!brk_ok) {
-            fprintf(stderr, "@@JIT_ALLOC@@ issuing brk #0x69 for TXM registration (x0=%p x1=0x%zx)...\n", rx_ptr, size);
-            if (sigsetjmp(s_alloc_brk_jmp, 1) == 0) {
-                asm volatile("mov x0, %0\n"
-                             "mov x1, %1\n"
-                             "brk #0x69"
-                             :: "r"(rx_ptr), "r"(size) : "x0", "x1");
-                fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 OK (legacy StikDebug handled)\n");
-                brk_ok = true;
-            } else {
-                fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 SIGTRAP - legacy StikDebug not handling brk\n");
-            }
+        bool brk_ok = false;
+        fprintf(stderr, "@@JIT_ALLOC@@ issuing brk #0x69 for TXM registration (x0=%p x1=0x%zx)...\n", rx_ptr, size);
+        if (sigsetjmp(s_alloc_brk_jmp, 1) == 0) {
+            asm volatile("mov x0, %0\n"
+                         "mov x1, %1\n"
+                         "brk #0x69"
+                         :: "r"(rx_ptr), "r"(size) : "x0", "x1");
+            fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 OK (legacy StikDebug handled)\n");
+            brk_ok = true;
+        } else {
+            fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 SIGTRAP - legacy StikDebug not handling brk\n");
         }
         sigaction(SIGTRAP, &sa_brk_old, NULL);
+
+        if (!brk_ok && ShouldTryStikDebugUniversalPrepareRegion()) {
+            fprintf(stderr, "@@JIT_ALLOC@@ legacy brk #0x69 unavailable; trying opt-in Universal CMD_PREPARE_REGION\n");
+            brk_ok = TryStikDebugUniversalPrepareRegion(rx_ptr, size);
+        } else if (!brk_ok) {
+            fprintf(stderr, "@@JIT_ALLOC@@ Universal CMD_PREPARE_REGION skipped; set ARMSX2_ENABLE_UNIVERSAL_PREPARE=1 to test it\n");
+        }
 
         if (!brk_ok) {
             fprintf(stderr, "@@JIT_ALLOC@@ FATAL: TXM registration failed — ensure StikDebug launched iPSX2\n");
