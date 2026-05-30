@@ -47,6 +47,16 @@ typedef NS_ENUM(NSInteger, ARMSX2PadButton) {
 @property (nonatomic, strong, nullable) NSData *previewPNGData;
 @end
 
+@interface ARMSX2BIOSInfo : NSObject
+@property (nonatomic, copy, nonnull) NSString *fileName;
+@property (nonatomic, copy, nonnull) NSString *filePath;
+@property (nonatomic, copy, nonnull) NSString *regionName;
+@property (nonatomic, copy, nonnull) NSString *countryCode;
+@property (nonatomic, copy, nonnull) NSString *descriptionText;
+@property (nonatomic, assign) NSInteger regionCode;
+@property (nonatomic, assign) BOOL valid;
+@end
+
 typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
 typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonnull message);
 
@@ -100,6 +110,8 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 // [P44] BIOS management
 + (nonnull NSString *)biosDirectory;
 + (nonnull NSArray<NSString *> *)availableBIOSes;
++ (nonnull NSArray<ARMSX2BIOSInfo *> *)availableBIOSInfos;
++ (nonnull ARMSX2BIOSInfo *)biosInfoForName:(nonnull NSString *)biosName;
 + (nonnull NSString *)defaultBIOSName;
 + (void)setDefaultBIOS:(nonnull NSString *)biosName;
 

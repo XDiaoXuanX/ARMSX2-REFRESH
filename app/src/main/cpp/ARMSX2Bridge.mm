@@ -18,6 +18,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "Counters.h"
 #include "GS/GSState.h"
 #include "GameList.h"
+#include "ps2/BiosTools.h"
 #include "pcsx2/Host.h"
 #include "pcsx2/INISettingsInterface.h"
 #include "common/FileSystem.h"
@@ -47,6 +48,9 @@ static NSDate* s_lastNVMSaveDate = nil;
 @implementation ARMSX2SaveStateSlotInfo
 @end
 
+@implementation ARMSX2BIOSInfo
+@end
+
 static NSString* const ARMSX2CompatibilityProfileOff = @"off";
 static NSString* const ARMSX2CompatibilityProfileCOP1 = @"cop1";
 static NSString* const ARMSX2CompatibilityProfileLoadStore = @"loadstore";
@@ -60,6 +64,57 @@ static NSString* const ARMSX2CompatibilityProfileBranches = @"branches";
 static NSString* const ARMSX2CompatibilityProfileCustom = @"custom";
 
 static NSString* ARMSX2NSStringFromStdString(const std::string& value);
+
+static NSString* ARMSX2BIOSDisplayRegionForZone(NSString* zone)
+{
+    if ([zone isEqualToString:@"USA"])
+        return @"North America";
+    if ([zone length] > 0)
+        return zone;
+    return @"Unknown Region";
+}
+
+static NSString* ARMSX2BIOSCountryCodeForZone(NSString* zone)
+{
+    if ([zone isEqualToString:@"Japan"])
+        return @"JP";
+    if ([zone isEqualToString:@"USA"])
+        return @"US";
+    if ([zone isEqualToString:@"Europe"])
+        return @"EU";
+    if ([zone isEqualToString:@"Asia"])
+        return @"HK";
+    if ([zone isEqualToString:@"China"])
+        return @"CN";
+    return @"";
+}
+
+static ARMSX2BIOSInfo* ARMSX2MakeBIOSInfo(NSString* fileName, NSString* directory)
+{
+    ARMSX2BIOSInfo* info = [ARMSX2BIOSInfo new];
+    info.fileName = fileName ?: @"";
+    info.filePath = directory ? [directory stringByAppendingPathComponent:fileName ?: @""] : @"";
+    info.regionName = @"Unknown Region";
+    info.countryCode = @"";
+    info.descriptionText = @"Region unavailable";
+    info.regionCode = -1;
+    info.valid = NO;
+
+    u32 version = 0;
+    u32 region = 0;
+    std::string description;
+    std::string zone;
+    if (IsBIOS(info.filePath.UTF8String, version, description, region, zone)) {
+        NSString* zoneString = ARMSX2NSStringFromStdString(zone);
+        info.valid = YES;
+        info.regionCode = static_cast<NSInteger>(region);
+        info.regionName = ARMSX2BIOSDisplayRegionForZone(zoneString);
+        info.countryCode = ARMSX2BIOSCountryCodeForZone(zoneString);
+        info.descriptionText = ARMSX2NSStringFromStdString(description);
+    }
+
+    return info;
+}
 
 static int* ARMSX2JITBisectFlagPtr(NSString* key)
 {
@@ -1030,9 +1085,17 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 }
 
 + (nonnull NSArray<NSString *> *)availableBIOSes {
+    NSArray<ARMSX2BIOSInfo *> *infos = [self availableBIOSInfos];
+    NSMutableArray<NSString *> *bioses = [NSMutableArray arrayWithCapacity:infos.count];
+    for (ARMSX2BIOSInfo *info in infos)
+        [bioses addObject:info.fileName];
+    return bioses;
+}
+
++ (nonnull NSArray<ARMSX2BIOSInfo *> *)availableBIOSInfos {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableSet *seen = [NSMutableSet set];
-    NSMutableArray *bioses = [NSMutableArray array];
+    NSMutableArray<ARMSX2BIOSInfo *> *bioses = [NSMutableArray array];
 
     // Helper block: scan directory for BIOS files (>= 1MB .bin/.rom)
     void (^scanDir)(NSString *) = ^(NSString *dir) {
@@ -1046,7 +1109,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 // BIOS files are >= 1MB and <= 50MB
                 unsigned long long sz = [attrs fileSize];
                 if (sz >= 1024 * 1024 && sz <= 50 * 1024 * 1024) {
-                    [bioses addObject:file];
+                    [bioses addObject:ARMSX2MakeBIOSInfo(file, dir)];
                     [seen addObject:file];
                 }
             }
@@ -1054,7 +1117,14 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     };
 
     scanDir([self biosDirectory]);
+    [bioses sortUsingComparator:^NSComparisonResult(ARMSX2BIOSInfo *lhs, ARMSX2BIOSInfo *rhs) {
+        return [lhs.fileName localizedCaseInsensitiveCompare:rhs.fileName];
+    }];
     return bioses;
+}
+
++ (nonnull ARMSX2BIOSInfo *)biosInfoForName:(nonnull NSString *)biosName {
+    return ARMSX2MakeBIOSInfo(biosName, [self biosDirectory]);
 }
 
 + (nonnull NSString *)defaultBIOSName {

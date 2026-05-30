@@ -5,7 +5,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct BIOSListView: View {
-    @State private var bioses: [String] = []
+    @State private var bioses: [ARMSX2BIOSInfo] = []
     @State private var defaultBIOS: String = ""
     @State private var fileImporter = FileImportHandler.shared
     @State private var showBIOSImporter = false
@@ -56,7 +56,7 @@ struct BIOSListView: View {
                     case .success(let urls):
                         fileImporter.handleURLs(urls, preferredDestination: .bios)
                         loadBIOSes()
-                        if defaultBIOS.isEmpty, let firstBIOS = bioses.first {
+                        if defaultBIOS.isEmpty, let firstBIOS = bioses.first?.fileName {
                             ARMSX2Bridge.setDefaultBIOS(firstBIOS)
                             defaultBIOS = firstBIOS
                         }
@@ -72,22 +72,30 @@ struct BIOSListView: View {
         .onAppear { loadBIOSes() }
     }
 
-    private func biosRow(_ bios: String) -> some View {
+    private func biosRow(_ bios: ARMSX2BIOSInfo) -> some View {
         Button {
-            ARMSX2Bridge.setDefaultBIOS(bios)
-            defaultBIOS = bios
+            ARMSX2Bridge.setDefaultBIOS(bios.fileName)
+            defaultBIOS = bios.fileName
         } label: {
-            HStack {
+            HStack(spacing: 12) {
+                regionBadge(for: bios)
+
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(bios)
+                    Text(bios.fileName)
                         .font(.body)
                         .foregroundStyle(.primary)
-                    Text(regionGuess(bios))
+                    Text(bios.valid ? "\(bios.regionName) BIOS" : "Unknown BIOS Region")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if bios.valid && !bios.descriptionText.isEmpty {
+                        Text(bios.descriptionText)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer()
-                if bios == defaultBIOS {
+                if bios.fileName == defaultBIOS {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.blue)
                 }
@@ -120,19 +128,41 @@ struct BIOSListView: View {
     }
 
     private func loadBIOSes() {
-        bioses = ARMSX2Bridge.availableBIOSes()
+        bioses = ARMSX2Bridge.availableBIOSInfos()
         defaultBIOS = ARMSX2Bridge.defaultBIOSName()
     }
 
-    private func regionGuess(_ name: String) -> String {
-        let upper = name.uppercased()
-        if upper.contains("JP") || upper.contains("JAPAN") || upper.contains("70000") || upper.contains("50000") {
-            return "Japan"
-        } else if upper.contains("US") || upper.contains("AMERICA") || upper.contains("30001") || upper.contains("39001") {
-            return "North America"
-        } else if upper.contains("EU") || upper.contains("EUROPE") || upper.contains("30004") || upper.contains("39004") {
-            return "Europe"
+    private func regionBadge(for bios: ARMSX2BIOSInfo) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+                .frame(width: 44, height: 44)
+
+            if let flag = flagEmoji(for: bios.countryCode) {
+                Text(flag)
+                    .font(.title2)
+            } else {
+                Image(systemName: "globe")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
         }
-        return "Unknown Region"
+        .accessibilityLabel(bios.valid ? "\(bios.regionName) BIOS" : "Unknown BIOS region")
+    }
+
+    private func flagEmoji(for countryCode: String) -> String? {
+        let scalars = countryCode.uppercased().unicodeScalars
+        guard scalars.count == 2 else { return nil }
+
+        var unicodeScalars = String.UnicodeScalarView()
+        for scalar in scalars {
+            guard scalar.value >= 65, scalar.value <= 90,
+                  let regional = UnicodeScalar(0x1F1E6 + scalar.value - 65) else {
+                return nil
+            }
+            unicodeScalars.append(regional)
+        }
+
+        return String(unicodeScalars)
     }
 }
