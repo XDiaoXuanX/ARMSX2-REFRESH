@@ -73,12 +73,33 @@ struct EmulatorSettingsView: View {
                 Toggle("Frame Limiter", isOn: $settings.frameLimiterEnabled)
 
                 if settings.frameLimiterEnabled {
-                    HStack {
-                        Text("Speed Target")
-                        Spacer()
-                        Text("Normal")
-                            .foregroundStyle(.secondary)
-                            .font(.callout.monospacedDigit())
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("FPS Target")
+                            Spacer()
+                            Text(Self.formatFPS(settings.targetFPS))
+                                .foregroundStyle(.secondary)
+                                .font(.callout.monospacedDigit())
+                        }
+
+                        Slider(
+                            value: $settings.targetFPS,
+                            in: SettingsStore.minTargetFPS...SettingsStore.maxTargetFPS,
+                            step: 1.0
+                        )
+
+                        HStack {
+                            Text(Self.formatFPS(SettingsStore.minTargetFPS))
+                            Spacer()
+                            Button("60 FPS") {
+                                settings.targetFPS = SettingsStore.defaultTargetFPS
+                            }
+                            .buttonStyle(.borderless)
+                            Spacer()
+                            Text(Self.formatFPS(SettingsStore.maxTargetFPS))
+                        }
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                     }
                 } else {
                     HStack {
@@ -106,7 +127,7 @@ struct EmulatorSettingsView: View {
                         .font(.callout.monospacedDigit())
                 }
 
-                Text("Frame Limiter controls emulator speed, not a safe 30 FPS display cap. Keep it ON for normal PS2 timing; OFF unlocks speed and can increase heat and battery drain.")
+                Text("FPS Target maps to PCSX2 Normal Speed: 60 FPS is normal NTSC timing, 30 FPS is about 50% speed, and higher values fast-forward. Turning the limiter OFF unlocks speed and can increase heat and battery drain.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

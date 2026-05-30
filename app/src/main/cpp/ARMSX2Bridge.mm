@@ -579,21 +579,17 @@ static void ARMSX2ApplyLiveTargetSpeedSetting(std::function<void()> update, cons
 
 static float ARMSX2NormalizeIOSNominalScalar(float value)
 {
-    const float clamped = std::clamp(value, 0.05f, 10.0f);
-    return (clamped >= 5.0f) ? 10.0f : 1.0f;
+    return std::isfinite(value) ? std::clamp(value, 0.05f, 10.0f) : 1.0f;
 }
 
 static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, float value)
 {
     if (std::strcmp(section, "Framerate") == 0) {
-        const float clamped = std::clamp(value, 0.05f, 10.0f);
+        const float clamped = std::isfinite(value) ? std::clamp(value, 0.05f, 10.0f) : 1.0f;
         if (std::strcmp(key, "NominalScalar") == 0) {
-            // iOS UI only supports normal-speed limiting or unlocked speed.
-            // Older test builds exposed this as an FPS dropdown and could write
-            // 0.5 for "30 FPS", which slows/freezes the whole VM instead.
             const float normalized = ARMSX2NormalizeIOSNominalScalar(value);
             if (std::fabs(normalized - clamped) > 0.001f)
-                NSLog(@"[ARMSX2Bridge] normalizing unsupported NominalScalar %.3f -> %.3f", clamped, normalized);
+                NSLog(@"[ARMSX2Bridge] clamping unsupported NominalScalar %.3f -> %.3f", clamped, normalized);
             ARMSX2ApplyLiveTargetSpeedSetting([normalized]() { EmuConfig.EmulationSpeed.NominalScalar = normalized; }, section, key, normalized);
         } else if (std::strcmp(key, "TurboScalar") == 0)
             ARMSX2ApplyLiveTargetSpeedSetting([clamped]() { EmuConfig.EmulationSpeed.TurboScalar = clamped; }, section, key, clamped);

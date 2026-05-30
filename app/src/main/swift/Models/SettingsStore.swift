@@ -24,6 +24,9 @@ enum OsdPreset: Int, CaseIterable {
 @Observable
 final class SettingsStore: @unchecked Sendable {
     static let shared = SettingsStore()
+    static let minTargetFPS: Float = 15.0
+    static let maxTargetFPS: Float = 120.0
+    static let defaultTargetFPS: Float = 60.0
 
     @ObservationIgnored private var suppressINIWrites = false
 
@@ -55,10 +58,21 @@ final class SettingsStore: @unchecked Sendable {
     var frameLimiterEnabled: Bool {
         didSet { applyFrameLimiterSettings() }
     }
+    var targetFPS: Float {
+        didSet {
+            let normalized = Self.clampedTargetFPS(targetFPS)
+            guard abs(targetFPS - normalized) <= 0.001 else {
+                targetFPS = normalized
+                return
+            }
+            applyFrameLimiterSettings()
+        }
+    }
     var ntscFramerate: Float {
         didSet {
             guard !suppressINIWrites else { return }
             ARMSX2Bridge.setINIFloat("EmuCore/GS", key: "FramerateNTSC", value: ntscFramerate)
+            applyFrameLimiterSettings()
         }
     }
     var palFramerate: Float {
@@ -308,6 +322,7 @@ final class SettingsStore: @unchecked Sendable {
         palFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FrameratePAL", defaultValue: 50.0)
         let nominalScalar = ARMSX2Bridge.getINIFloat("Framerate", key: "NominalScalar", defaultValue: 1.0)
         frameLimiterEnabled = Self.frameLimiterEnabled(fromNominalScalar: nominalScalar)
+        targetFPS = Self.targetFPS(fromNominalScalar: nominalScalar, baseFramerate: loadedNTSCFramerate)
         Self.sanitizeNominalScalarIfNeeded(nominalScalar)
         // Boot
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
@@ -395,6 +410,7 @@ final class SettingsStore: @unchecked Sendable {
         palFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FrameratePAL", defaultValue: 50.0)
         let nominalScalar = ARMSX2Bridge.getINIFloat("Framerate", key: "NominalScalar", defaultValue: 1.0)
         frameLimiterEnabled = Self.frameLimiterEnabled(fromNominalScalar: nominalScalar)
+        targetFPS = Self.targetFPS(fromNominalScalar: nominalScalar, baseFramerate: ntscFramerate)
         Self.sanitizeNominalScalarIfNeeded(nominalScalar)
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
         eeCycleRate = Int(ARMSX2Bridge.getINIInt("EmuCore/Speedhacks", key: "EECycleRate", defaultValue: 0))
@@ -464,22 +480,32 @@ final class SettingsStore: @unchecked Sendable {
 
     private static func sanitizedNominalScalar(_ scalar: Float) -> Float {
         guard scalar.isFinite else { return 1.0 }
-        return scalar >= 5.0 ? 10.0 : 1.0
+        return min(max(scalar, 0.05), 10.0)
+    }
+
+    private static func clampedTargetFPS(_ fps: Float) -> Float {
+        guard fps.isFinite else { return defaultTargetFPS }
+        return min(max(fps.rounded(), minTargetFPS), maxTargetFPS)
+    }
+
+    private static func targetFPS(fromNominalScalar scalar: Float, baseFramerate: Float) -> Float {
+        guard frameLimiterEnabled(fromNominalScalar: scalar) else { return defaultTargetFPS }
+        return clampedTargetFPS(sanitizedNominalScalar(scalar) * max(baseFramerate, 1.0))
     }
 
     private static func sanitizeNominalScalarIfNeeded(_ scalar: Float) {
         let sanitized = sanitizedNominalScalar(scalar)
         guard abs(scalar - sanitized) > 0.001 else { return }
 
-        NSLog("[ARMSX2 iOS Settings] Sanitizing unsupported NominalScalar %.3f -> %.3f", scalar, sanitized)
+        NSLog("[ARMSX2 iOS Settings] Clamping unsupported NominalScalar %.3f -> %.3f", scalar, sanitized)
         ARMSX2Bridge.setINIFloat("Framerate", key: "NominalScalar", value: sanitized)
     }
 
     private func applyFrameLimiterSettings() {
         guard !suppressINIWrites else { return }
-        let scalar: Float = frameLimiterEnabled ? 1.0 : 10.0
-        NSLog("[ARMSX2 iOS Settings] Frame limiter %@ NominalScalar=%.3f",
-              frameLimiterEnabled ? "ON" : "OFF", scalar)
+        let scalar: Float = frameLimiterEnabled ? Self.sanitizedNominalScalar(targetFPS / max(ntscFramerate, 1.0)) : 10.0
+        NSLog("[ARMSX2 iOS Settings] Frame limiter %@ targetFPS=%.0f NominalScalar=%.3f",
+              frameLimiterEnabled ? "ON" : "OFF", targetFPS, scalar)
         ARMSX2Bridge.setINIFloat("Framerate", key: "NominalScalar", value: scalar)
     }
 
@@ -526,6 +552,7 @@ final class SettingsStore: @unchecked Sendable {
         vu1Recompiler = true
         fastBoot = false
         fastmem = true
+        targetFPS = Self.defaultTargetFPS
         frameLimiterEnabled = true
         ntscFramerate = 59.94
         palFramerate = 50.0

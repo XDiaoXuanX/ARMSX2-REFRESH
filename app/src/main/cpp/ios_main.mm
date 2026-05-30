@@ -549,9 +549,7 @@ static float ARMSX2SanitizedNominalScalar(float scalar)
     if (!std::isfinite(scalar))
         return 1.0f;
 
-    // iOS exposes normal-speed limiting or unlocked speed only. Legacy test
-    // builds could save 0.5 for "30 FPS", which is a half-speed VM target.
-    return (scalar >= 5.0f) ? 10.0f : 1.0f;
+    return std::clamp(scalar, 0.05f, 10.0f);
 }
 
 static void ARMSX2SanitizeFrameLimiterConfig(const char* reason)
@@ -562,7 +560,7 @@ static void ARMSX2SanitizeFrameLimiterConfig(const char* reason)
     const float raw = s_settings_interface->GetFloatValue("Framerate", "NominalScalar", 1.0f);
     const float sanitized = ARMSX2SanitizedNominalScalar(raw);
     if (std::fabs(raw - sanitized) > 0.001f) {
-        Console.Warning("@@FRAMELIMIT@@ sanitizing unsupported NominalScalar %.3f -> %.3f reason=%s",
+        Console.Warning("@@FRAMELIMIT@@ clamping unsupported NominalScalar %.3f -> %.3f reason=%s",
             raw, sanitized, reason ? reason : "unknown");
         s_settings_interface->SetFloatValue("Framerate", "NominalScalar", sanitized);
         s_settings_interface->Save();

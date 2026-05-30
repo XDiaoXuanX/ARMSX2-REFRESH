@@ -34,6 +34,7 @@ struct GameScreenView: View {
     @State private var vmMenuAvailable = false
     @State private var gameMenuAvailable = false
     @State private var showSaveStates = false
+    @State private var showSpeedControl = false
     @State private var showPNACHImporter = false
     @State private var compatibilityPresetKey = "off"
     @State private var compatibilityIdentity = ""
@@ -79,6 +80,10 @@ struct GameScreenView: View {
             SaveStatesPanel { message in
                 presentSaveStateStatus(message)
             }
+        }
+        .sheet(isPresented: $showSpeedControl) {
+            SpeedControlPanel(settings: settings)
+                .presentationDetents([.medium])
         }
         .fileImporter(
             isPresented: $showPNACHImporter,
@@ -148,6 +153,12 @@ struct GameScreenView: View {
                     resetCurrentROM()
                 } label: {
                     Label("Reset ROM", systemImage: "arrow.counterclockwise.circle")
+                }
+
+                Button {
+                    showSpeedControl = true
+                } label: {
+                    Label("Speed / FPS Target", systemImage: "speedometer")
                 }
 
                 Menu {
@@ -559,6 +570,94 @@ private struct SaveStatesPanel: View {
                 }
             }
         }
+    }
+}
+
+private struct SpeedControlPanel: View {
+    @Bindable var settings: SettingsStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Frame Limiter") {
+                    Toggle("Enable Limiter", isOn: $settings.frameLimiterEnabled)
+
+                    if settings.frameLimiterEnabled {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("FPS Target")
+                                Spacer()
+                                Text(Self.formatFPS(settings.targetFPS))
+                                    .foregroundStyle(.secondary)
+                                    .font(.callout.monospacedDigit())
+                            }
+
+                            Slider(
+                                value: $settings.targetFPS,
+                                in: SettingsStore.minTargetFPS...SettingsStore.maxTargetFPS,
+                                step: 1.0
+                            )
+
+                            HStack {
+                                quickTargetButton(30)
+                                quickTargetButton(45)
+                                quickTargetButton(60)
+                                quickTargetButton(90)
+                                quickTargetButton(120)
+                            }
+                        }
+                    } else {
+                        Text("Limiter is OFF. Games can run above normal speed and may draw more power.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("How It Works") {
+                    Text("This controls PCSX2 Normal Speed. On NTSC games, 60 FPS is normal speed and 30 FPS is about 50% speed. It is safe to change while a game is running.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack {
+                        Text("Normal Speed")
+                        Spacer()
+                        Text(Self.formatPercent(settings.targetFPS / max(settings.ntscFramerate, 1.0)))
+                            .foregroundStyle(.secondary)
+                            .font(.callout.monospacedDigit())
+                    }
+                }
+            }
+            .navigationTitle("Speed / FPS Target")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private func quickTargetButton(_ fps: Float) -> some View {
+        Button(Self.formatCompactFPS(fps)) {
+            settings.frameLimiterEnabled = true
+            settings.targetFPS = fps
+        }
+        .buttonStyle(.bordered)
+        .font(.caption.monospacedDigit())
+    }
+
+    private static func formatFPS(_ value: Float) -> String {
+        String(format: "%.0f FPS", value)
+    }
+
+    private static func formatCompactFPS(_ value: Float) -> String {
+        String(format: "%.0f", value)
+    }
+
+    private static func formatPercent(_ scalar: Float) -> String {
+        String(format: "%.0f%%", scalar * 100.0)
     }
 }
 

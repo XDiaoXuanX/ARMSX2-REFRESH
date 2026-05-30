@@ -58,7 +58,7 @@ private let helpData: [HelpSection] = [
         ),
         HelpItem(
             question: "Frame Limiter",
-            answer: "Keeps gameplay near the selected FPS target. Turning it off uses the same unlimited-speed style setting as ARMSX2 Android, which is useful for testing but can make games run too fast."
+            answer: "Keeps gameplay near the selected FPS target by changing PCSX2 Normal Speed. 60 FPS is normal NTSC timing, 30 FPS is about 50% speed, and turning it off unlocks speed for testing at the cost of heat and battery."
         ),
         HelpItem(
             question: "Patches and cheats",
