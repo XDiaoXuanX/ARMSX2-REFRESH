@@ -49,7 +49,8 @@ struct BIOSListView: View {
             .sheet(isPresented: $showBIOSImporter) {
                 ImportDocumentPicker(
                     allowedContentTypes: FileImportHandler.biosContentTypes,
-                    allowsMultipleSelection: true
+                    allowsMultipleSelection: true,
+                    legacyDocumentTypes: ["public.data", "public.item", "public.content"]
                 ) { result in
                     showBIOSImporter = false
                     switch result {

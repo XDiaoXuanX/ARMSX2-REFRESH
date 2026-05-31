@@ -284,18 +284,38 @@ final class FileImportHandler: @unchecked Sendable {
 struct ImportDocumentPicker: UIViewControllerRepresentable {
     let allowedContentTypes: [UTType]
     let allowsMultipleSelection: Bool
+    let legacyDocumentTypes: [String]?
     let onComplete: (Result<[URL], Error>) -> Void
+
+    init(
+        allowedContentTypes: [UTType],
+        allowsMultipleSelection: Bool,
+        legacyDocumentTypes: [String]? = nil,
+        onComplete: @escaping (Result<[URL], Error>) -> Void
+    ) {
+        self.allowedContentTypes = allowedContentTypes
+        self.allowsMultipleSelection = allowsMultipleSelection
+        self.legacyDocumentTypes = legacyDocumentTypes
+        self.onComplete = onComplete
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onComplete: onComplete)
     }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: allowedContentTypes, asCopy: true)
+        let picker: UIDocumentPickerViewController
+        if let legacyDocumentTypes {
+            picker = UIDocumentPickerViewController(documentTypes: legacyDocumentTypes, in: UIDocumentPickerMode.import)
+            NSLog("[ARMSX2 iOS Import] opening legacy document picker types=%@ multiple=%d",
+                  legacyDocumentTypes.joined(separator: ","), allowsMultipleSelection ? 1 : 0)
+        } else {
+            picker = UIDocumentPickerViewController(forOpeningContentTypes: allowedContentTypes, asCopy: true)
+            NSLog("[ARMSX2 iOS Import] opening document picker types=%@ multiple=%d",
+                  allowedContentTypes.map(\.identifier).joined(separator: ","), allowsMultipleSelection ? 1 : 0)
+        }
         picker.allowsMultipleSelection = allowsMultipleSelection
         picker.delegate = context.coordinator
-        NSLog("[ARMSX2 iOS Import] opening document picker types=%@ multiple=%d",
-              allowedContentTypes.map(\.identifier).joined(separator: ","), allowsMultipleSelection ? 1 : 0)
         return picker
     }
 
