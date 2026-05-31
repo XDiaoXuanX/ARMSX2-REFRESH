@@ -748,6 +748,7 @@ struct PerGameSettingsPanel: View {
     @Environment(\.dismiss) private var dismiss
 
     let game: ISOEntry
+    let onDone: (() -> Void)?
 
     @State private var enabled: Bool
     @State private var upscaleMultiplier: Float
@@ -758,8 +759,9 @@ struct PerGameSettingsPanel: View {
     @State private var enablePatches: Bool
     @State private var statusMessage: String?
 
-    init(game: ISOEntry) {
+    init(game: ISOEntry, onDone: (() -> Void)? = nil) {
         self.game = game
+        self.onDone = onDone
         let info = ARMSX2Bridge.gameSettings(forISO: game.name)
         _enabled = State(initialValue: Self.boolValue(info["enabled"], defaultValue: false))
         _upscaleMultiplier = State(initialValue: Self.floatValue(info["upscaleMultiplier"], defaultValue: 1.0))
@@ -842,7 +844,11 @@ struct PerGameSettingsPanel: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") {
-                        dismiss()
+                        if let onDone {
+                            onDone()
+                        } else {
+                            dismiss()
+                        }
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {

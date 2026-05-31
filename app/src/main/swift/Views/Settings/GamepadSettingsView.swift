@@ -66,6 +66,7 @@ struct GamepadSettingsView: View {
     @State private var capturingIndex: Int? = nil
     @State private var mappingVersion = 0
     @State private var pollTimer: Timer? = nil
+    @State private var statusMessage: String?
 
     var body: some View {
         Form {
@@ -100,11 +101,24 @@ struct GamepadSettingsView: View {
             }
 
             Section {
+                Button {
+                    ARMSX2Bridge.testControllerRumble()
+                    statusMessage = "Controller rumble test sent."
+                } label: {
+                    Label("Test Controller Rumble", systemImage: "waveform.path")
+                }
+
                 Button("Reset to Default") {
                     ARMSX2Bridge.resetButtonMappings()
                     mappingVersion += 1
                 }
                 .foregroundStyle(.red)
+            } header: {
+                Text("Tools")
+            } footer: {
+                if let statusMessage {
+                    Text(statusMessage)
+                }
             }
         }
         .navigationTitle("Game Controller")

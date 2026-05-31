@@ -92,10 +92,6 @@ struct GameScreenView: View {
             compatibilityLabPanel
                 .presentationDetents([.medium, .large])
         }
-        .sheet(isPresented: $showPerGameSettings, onDismiss: restoreGameAfterPerGameSettings) {
-            runtimePerGameSettingsSheet
-                .presentationDetents([.medium, .large])
-        }
         .sheet(isPresented: $showPNACHImporter) {
             ImportDocumentPicker(
                 allowedContentTypes: FileImportHandler.pnachContentTypes,
@@ -115,6 +111,12 @@ struct GameScreenView: View {
         }
         .overlay(alignment: .bottom) {
             saveStateToast
+        }
+        .overlay {
+            if showPerGameSettings {
+                runtimePerGameSettingsOverlay
+                    .transition(.opacity)
+            }
         }
         .onAppear(perform: refreshRuntimeMenuState)
         .onReceive(NotificationCenter.default.publisher(for: runtimeMenuStateChangedNotification)) { _ in
@@ -269,9 +271,11 @@ struct GameScreenView: View {
     }
 
     @ViewBuilder
-    private var runtimePerGameSettingsSheet: some View {
+    private var runtimePerGameSettingsContent: some View {
         if let runtimePerGameSettingsEntry {
-            PerGameSettingsPanel(game: runtimePerGameSettingsEntry)
+            PerGameSettingsPanel(game: runtimePerGameSettingsEntry) {
+                closePerGameSettingsOverlay()
+            }
         } else {
             NavigationStack {
                 ContentUnavailableView(
@@ -283,10 +287,29 @@ struct GameScreenView: View {
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") {
-                            showPerGameSettings = false
+                            closePerGameSettingsOverlay()
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private var runtimePerGameSettingsOverlay: some View {
+        GeometryReader { geo in
+            let isLandscape = geo.size.width > geo.size.height
+
+            ZStack {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+
+                runtimePerGameSettingsContent
+                    .frame(maxWidth: isLandscape ? 760 : .infinity, maxHeight: isLandscape ? 560 : .infinity)
+                    .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 34, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
+                    .shadow(color: .black.opacity(0.35), radius: 24, y: 12)
+                    .padding(.horizontal, isLandscape ? 28 : 12)
+                    .padding(.vertical, isLandscape ? 18 : 8)
             }
         }
     }
@@ -315,15 +338,14 @@ struct GameScreenView: View {
         showPerGameSettings = true
     }
 
-    private func restoreGameAfterPerGameSettings() {
+    private func closePerGameSettingsOverlay() {
         runtimePerGameSettingsEntry = nil
+        showPerGameSettings = false
         refreshRuntimeMenuState()
-        NotificationCenter.default.post(name: NSNotification.Name("ARMSX2iOSEnterGameScreen"), object: nil)
         ARMSX2Bridge.setFullScreen(fullScreen)
         ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            NotificationCenter.default.post(name: NSNotification.Name("ARMSX2iOSEnterGameScreen"), object: nil)
             ARMSX2Bridge.setFullScreen(fullScreen)
             ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
             refreshRuntimeMenuState()
