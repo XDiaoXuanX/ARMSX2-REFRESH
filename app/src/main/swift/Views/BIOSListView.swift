@@ -9,6 +9,7 @@ struct BIOSListView: View {
     @State private var defaultBIOS: String = ""
     @State private var fileImporter = FileImportHandler.shared
     @State private var showBIOSImporter = false
+    @State private var showBIOSCompatibilityImporter = false
 
     var body: some View {
         NavigationStack {
@@ -30,7 +31,20 @@ struct BIOSListView: View {
             .navigationTitle("BIOS")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showBIOSImporter = true } label: {
+                    Menu {
+                        Button {
+                            NSLog("[ARMSX2 iOS BIOS] opening primary BIOS picker")
+                            showBIOSImporter = true
+                        } label: {
+                            Label("Import BIOS", systemImage: "doc.badge.plus")
+                        }
+                        Button {
+                            NSLog("[ARMSX2 iOS BIOS] opening compatibility BIOS picker")
+                            showBIOSCompatibilityImporter = true
+                        } label: {
+                            Label("Compatibility Picker", systemImage: "folder.badge.plus")
+                        }
+                    } label: {
                         Image(systemName: "plus")
                     }
                     .accessibilityLabel("Import BIOS")
@@ -49,34 +63,20 @@ struct BIOSListView: View {
             .sheet(isPresented: $showBIOSImporter) {
                 ImportDocumentPicker(
                     allowedContentTypes: FileImportHandler.biosContentTypes,
-                    allowsMultipleSelection: true,
-                    legacyDocumentTypes: ["public.data", "public.item", "public.content"]
+                    allowsMultipleSelection: false
                 ) { result in
                     showBIOSImporter = false
-                    switch result {
-                    case .success(let urls):
-                        NSLog("[ARMSX2 iOS BIOS] picker completed with %d URL(s)", urls.count)
-                        fileImporter.handleURLs(urls, preferredDestination: .bios)
-                        loadBIOSes()
-                        if defaultBIOS.isEmpty, let firstBIOS = bioses.first?.fileName {
-                            ARMSX2Bridge.setDefaultBIOS(firstBIOS)
-                            defaultBIOS = firstBIOS
-                        }
-                        if bioses.isEmpty, !urls.isEmpty {
-                            fileImporter.lastImportMessage = [
-                                fileImporter.lastImportMessage,
-                                "No usable PS2 BIOS was found after import. Use a 1-50 MB .bin or .rom BIOS dump."
-                            ]
-                            .compactMap { $0 }
-                            .joined(separator: "\n")
-                            fileImporter.showImportAlert = true
-                        }
-                    case .failure(let error):
-                        if (error as NSError).code != NSUserCancelledError {
-                            fileImporter.lastImportMessage = "Import failed: \(error.localizedDescription)"
-                            fileImporter.showImportAlert = true
-                        }
-                    }
+                    handleBIOSPickerResult(result, source: "primary")
+                }
+            }
+            .sheet(isPresented: $showBIOSCompatibilityImporter) {
+                ImportDocumentPicker(
+                    allowedContentTypes: FileImportHandler.biosContentTypes,
+                    allowsMultipleSelection: false,
+                    legacyDocumentTypes: ["public.item", "public.data", "public.content"]
+                ) { result in
+                    showBIOSCompatibilityImporter = false
+                    handleBIOSPickerResult(result, source: "compatibility")
                 }
             }
         }
@@ -128,14 +128,53 @@ struct BIOSListView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Button {
+                NSLog("[ARMSX2 iOS BIOS] opening primary BIOS picker from empty state")
                 showBIOSImporter = true
             } label: {
                 Label("Import BIOS", systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
+            Button {
+                NSLog("[ARMSX2 iOS BIOS] opening compatibility BIOS picker from empty state")
+                showBIOSCompatibilityImporter = true
+            } label: {
+                Label("Compatibility Picker", systemImage: "folder.badge.plus")
+            }
+            .buttonStyle(.bordered)
+            Text("If one picker refuses to select your .bin/.rom file, try the other.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func handleBIOSPickerResult(_ result: Result<[URL], Error>, source: String) {
+        switch result {
+        case .success(let urls):
+            NSLog("[ARMSX2 iOS BIOS] %@ picker completed with %d URL(s)", source, urls.count)
+            fileImporter.handleURLs(urls, preferredDestination: .bios)
+            loadBIOSes()
+            if defaultBIOS.isEmpty, let firstBIOS = bioses.first?.fileName {
+                ARMSX2Bridge.setDefaultBIOS(firstBIOS)
+                defaultBIOS = firstBIOS
+            }
+            if bioses.isEmpty, !urls.isEmpty {
+                fileImporter.lastImportMessage = [
+                    fileImporter.lastImportMessage,
+                    "No usable PS2 BIOS was found after import. Use a 1-50 MB .bin or .rom BIOS dump."
+                ]
+                .compactMap { $0 }
+                .joined(separator: "\n")
+                fileImporter.showImportAlert = true
+            }
+        case .failure(let error):
+            if (error as NSError).code != NSUserCancelledError {
+                fileImporter.lastImportMessage = "BIOS import failed: \(error.localizedDescription)"
+                fileImporter.showImportAlert = true
+            }
+        }
     }
 
     private func loadBIOSes() {

@@ -31,9 +31,9 @@ final class FileImportHandler: @unchecked Sendable {
     // .bin files > 50MB are treated as game images, not BIOS
     private static let biosSizeThreshold: UInt64 = 50 * 1024 * 1024
 
-    // BIOS dumps use loose/non-standard UTTypes on iOS. Keep the picker permissive,
-    // then validate extension/size in the import path before copying to bios/.
-    static let biosContentTypes: [UTType] = [.item, .data, .content]
+    // BIOS dumps use loose/non-standard UTTypes on iOS. Keep the picker permissive
+    // but include explicit .bin/.rom types so sideloaded Files providers expose them.
+    static let biosContentTypes: [UTType] = broaderContentTypes(for: ["bin", "rom"])
     static let gameContentTypes: [UTType] = broaderContentTypes(for: ["iso", "chd", "img", "bin", "cue", "mdf", "cso", "zso", "gz", "elf"])
     static let pnachContentTypes: [UTType] = Array(Set([.item, .data, .content, .text, .plainText] + contentTypes(for: ["pnach", "txt", "patch"])))
 
