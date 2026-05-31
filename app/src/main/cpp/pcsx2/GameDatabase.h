@@ -126,6 +126,7 @@ namespace GameDatabaseSchema
 namespace GameDatabase
 {
 	void ensureLoaded();
+	size_t entryCount();
 	const GameDatabaseSchema::GameEntry* findGame(const std::string_view serial);
 
 	struct TrackHash

@@ -130,6 +130,9 @@ namespace VMManager
 
 	static bool AutoDetectSource(const std::string& filename);
 	static void UpdateDiscDetails(bool booting);
+	static void ShowGameDatabaseStatusOSD(const std::string& title, const std::string& serial, u32 crc,
+		bool game_found, size_t gamefix_count, size_t gs_fix_count, size_t patch_group_count,
+		size_t dynamic_patch_count);
 	static void ClearDiscDetails();
 	static void HandleELFChange(bool verbose_patches_if_changed);
 	static void UpdateELFInfo(std::string elf_path);
@@ -1361,12 +1364,18 @@ bool VMManager::UpdateGameSettingsLayer()
 void VMManager::UpdateDiscDetails(bool booting)
 {
 	std::string memcardFilters;
+	bool serial_is_valid = false;
+	bool gamedb_game_found = false;
+	size_t gamedb_gamefix_count = 0;
+	size_t gamedb_gs_fix_count = 0;
+	size_t gamedb_patch_group_count = 0;
+	size_t gamedb_dynamic_patch_count = 0;
+	std::string gamedb_display_title;
 	{
 		// Only need to protect writes with the mutex.
 		std::unique_lock lock(s_info_mutex);
 		const std::string old_serial = std::move(s_disc_serial);
 		const u32 old_crc = s_disc_crc;
-		bool serial_is_valid = false;
 		std::string title;
 
 		if (GSDumpReplayer::IsReplayingDump())
@@ -1415,6 +1424,12 @@ void VMManager::UpdateDiscDetails(bool booting)
 		{
 			if (const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(s_disc_serial))
 			{
+				gamedb_game_found = true;
+				gamedb_gamefix_count = game->gameFixes.size();
+				gamedb_gs_fix_count = game->gsHWFixes.size();
+				gamedb_patch_group_count = game->patches.size();
+				gamedb_dynamic_patch_count = game->dynaPatches.size();
+
 				if (!game->name_en.empty())
 				{
 					s_title_en_search = game->name;
@@ -1458,6 +1473,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 		}
 
 		s_title = std::move(title);
+		gamedb_display_title = s_title;
 	}
 
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn(Color_StrongGreen,
@@ -1472,6 +1488,11 @@ void VMManager::UpdateDiscDetails(bool booting)
 
 	// Patches are game-dependent, thus should get applied after game settings ia loaded.
 	Patch::ReloadPatches(s_disc_serial, HasBootedELF() ? s_current_crc : 0, true, true, false, false);
+	if (serial_is_valid && !GSDumpReplayer::IsReplayingDump())
+	{
+		ShowGameDatabaseStatusOSD(gamedb_display_title, s_disc_serial, s_disc_crc, gamedb_game_found,
+			gamedb_gamefix_count, gamedb_gs_fix_count, gamedb_patch_group_count, gamedb_dynamic_patch_count);
+	}
 
 	ReportGameChangeToHost();
 	if (MTGS::IsOpen())
@@ -1484,6 +1505,57 @@ void VMManager::UpdateDiscDetails(bool booting)
 		UpdateDiscordPresence(s_state.load(std::memory_order_relaxed) == VMState::Initializing);
 		FileMcd_Reopen(memcardFilters.empty() ? s_disc_serial : memcardFilters);
 	}
+}
+
+void VMManager::ShowGameDatabaseStatusOSD(const std::string& title, const std::string& serial, u32 crc,
+	bool game_found, size_t gamefix_count, size_t gs_fix_count, size_t patch_group_count,
+	size_t dynamic_patch_count)
+{
+	const size_t entry_count = GameDatabase::entryCount();
+	if (entry_count == 0)
+	{
+		Host::AddIconOSDMessage("GameDBStatus", ICON_FA_EXCLAMATION_TRIANGLE,
+			TRANSLATE_SV("VMManager", "Warning: GameDB missing.\nAutomatic game fixes unavailable."),
+			Host::OSD_WARNING_DURATION);
+		return;
+	}
+
+	const std::string crc_text = fmt::format("{:08X}", crc);
+	if (!game_found)
+	{
+		Host::AddIconOSDMessage("GameDBStatus", ICON_FA_DATABASE,
+			fmt::format(TRANSLATE_FS("VMManager",
+				"GameDB loaded: {} entries\nNo entry found for this game\n{} / CRC {}"),
+				entry_count, serial, crc_text),
+			Host::OSD_INFO_DURATION);
+		return;
+	}
+
+	const size_t compatibility_fix_count = gamefix_count + gs_fix_count;
+	const size_t available_patch_group_count = patch_group_count + dynamic_patch_count;
+	const u32 applied_gamedb_patch_count = Patch::GetActiveGameDBPatchCount();
+
+	SmallString status;
+	if (compatibility_fix_count > 0)
+		status.append("Compatibility fixes applied");
+	else
+		status.append("GameDB entry found; no special fixes listed");
+
+	if (applied_gamedb_patch_count > 0)
+	{
+		status.append_format("\nPatches applied: {}", applied_gamedb_patch_count);
+	}
+	else if (available_patch_group_count > 0 && !EmuConfig.EnablePatches)
+	{
+		status.append("\nGameDB patches available, but disabled");
+	}
+
+	const std::string display_title = title.empty() ? serial : title;
+
+	Host::AddIconOSDMessage("GameDBStatus", ICON_FA_DATABASE,
+		fmt::format(TRANSLATE_FS("VMManager", "GameDB loaded: {} entries\n{} recognized\n{} / CRC {}\n{}"),
+			entry_count, display_title, serial, crc_text, status.view()),
+		Host::OSD_INFO_DURATION);
 }
 
 void VMManager::ClearDiscDetails()

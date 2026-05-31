@@ -186,6 +186,7 @@ namespace Patch
 	static EnablePatchList s_just_enabled_cheats;
 	static EnablePatchList s_just_enabled_patches;
 	static u32 s_patches_crc;
+	static u32 s_active_gamedb_patch_count;
 	static std::optional<float> s_override_aspect_ratio;
 	static std::optional<GSInterlaceMode> s_override_interlace_mode;
 
@@ -761,6 +762,7 @@ void Patch::UpdateActivePatches(bool reload_enabled_list, bool verbose, bool ver
 		if (gp_count > 0)
 			message.append(TRANSLATE_PLURAL_STR("Patch", "%n GameDB patches are active.", "OSD Message", gp_count));
 	}
+	s_active_gamedb_patch_count = gp_count;
 
 	const u32 p_count = EnablePatches(s_game_patches, s_enabled_patches, apply_new_patches ? s_just_enabled_patches : EnablePatchList());
 	if (p_count > 0)
@@ -793,6 +795,11 @@ void Patch::UpdateActivePatches(bool reload_enabled_list, bool verbose, bool ver
 				Host::OSD_INFO_DURATION);
 		}
 	}
+}
+
+u32 Patch::GetActiveGameDBPatchCount()
+{
+	return s_active_gamedb_patch_count;
 }
 
 void Patch::ApplyPatchSettingOverrides()

@@ -994,6 +994,12 @@ void GameDatabase::ensureLoaded()
 	});
 }
 
+size_t GameDatabase::entryCount()
+{
+	GameDatabase::ensureLoaded();
+	return s_game_db.size();
+}
+
 const GameDatabaseSchema::GameEntry* GameDatabase::findGame(const std::string_view serial)
 {
 	GameDatabase::ensureLoaded();
