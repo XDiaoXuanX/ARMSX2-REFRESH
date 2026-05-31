@@ -766,7 +766,8 @@ const int s_defaultMap[16] = {
 static constexpr u32 ARMSX2_MAX_IOS_GAMEPADS = 4;
 static SDL_Gamepad* s_gamepads[ARMSX2_MAX_IOS_GAMEPADS] = {};
 static std::atomic<u32> s_pendingGamepadRumble[ARMSX2_MAX_IOS_GAMEPADS];
-static u32 s_appliedGamepadRumble[ARMSX2_MAX_IOS_GAMEPADS] = {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
+static u32 s_appliedGamepadRumble[ARMSX2_MAX_IOS_GAMEPADS] = {};
+static bool s_appliedGamepadRumbleValid[ARMSX2_MAX_IOS_GAMEPADS] = {};
 static bool s_loggedGamepadRumbleFailure = false;
 static bool s_loggedSDLGamepadRumble = false;
 static std::atomic<u32> s_loggedPadRumbleCommandCount{0};
@@ -777,7 +778,8 @@ static constexpr u32 ARMSX2_GAMEPAD_RUMBLE_DURATION_MS = 65535;
 static GCController* s_nativeHapticController = nil;
 static CHHapticEngine* s_nativeHapticEngine = nil;
 static id<CHHapticAdvancedPatternPlayer> s_nativeHapticPlayer = nil;
-static u32 s_nativeAppliedGamepadRumble = 0xffffffffu;
+static u32 s_nativeAppliedGamepadRumble = 0;
+static bool s_nativeAppliedGamepadRumbleValid = false;
 static bool s_loggedNativeGamepadRumbleReady = false;
 static bool s_loggedNativeGamepadRumbleUnavailable = false;
 
@@ -1032,7 +1034,8 @@ static void ARMSX2ResetNativeGamepadRumbleOnMain()
         s_nativeHapticEngine = nil;
     }
     s_nativeHapticController = nil;
-    s_nativeAppliedGamepadRumble = 0xffffffffu;
+    s_nativeAppliedGamepadRumble = 0;
+    s_nativeAppliedGamepadRumbleValid = false;
     s_loggedNativeGamepadRumbleReady = false;
 }
 
@@ -1082,12 +1085,14 @@ static bool ARMSX2EnsureNativeGamepadRumbleOnMain(float intensity, float sharpne
         s_nativeHapticEngine.autoShutdownEnabled = YES;
         s_nativeHapticEngine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
             s_nativeHapticPlayer = nil;
-            s_nativeAppliedGamepadRumble = 0xffffffffu;
+            s_nativeAppliedGamepadRumble = 0;
+            s_nativeAppliedGamepadRumbleValid = false;
             Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic engine stopped reason=%ld", static_cast<long>(reason));
         };
         s_nativeHapticEngine.resetHandler = ^{
             s_nativeHapticPlayer = nil;
-            s_nativeAppliedGamepadRumble = 0xffffffffu;
+            s_nativeAppliedGamepadRumble = 0;
+            s_nativeAppliedGamepadRumbleValid = false;
             Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic engine reset");
         };
     }
@@ -1151,7 +1156,7 @@ static bool ARMSX2EnsureNativeGamepadRumbleOnMain(float intensity, float sharpne
 
 static void ARMSX2ApplyNativeGamepadRumbleOnMain(u32 packed)
 {
-    if (packed == s_nativeAppliedGamepadRumble)
+    if (s_nativeAppliedGamepadRumbleValid && packed == s_nativeAppliedGamepadRumble)
         return;
 
     const float large = ARMSX2RumbleLargeIntensity(packed);
@@ -1160,12 +1165,15 @@ static void ARMSX2ApplyNativeGamepadRumbleOnMain(u32 packed)
     if (intensity <= 0.01f) {
         ARMSX2StopNativeGamepadRumbleOnMain();
         s_nativeAppliedGamepadRumble = packed;
+        s_nativeAppliedGamepadRumbleValid = true;
         return;
     }
 
     const float sharpness = std::clamp(0.20f + (small * 0.65f) - (large * 0.10f), 0.0f, 1.0f);
-    if (ARMSX2EnsureNativeGamepadRumbleOnMain(intensity, sharpness))
+    if (ARMSX2EnsureNativeGamepadRumbleOnMain(intensity, sharpness)) {
         s_nativeAppliedGamepadRumble = packed;
+        s_nativeAppliedGamepadRumbleValid = true;
+    }
 }
 
 static void ARMSX2ApplyPendingGamepadRumble(u32 gamepad_index)
@@ -1174,7 +1182,7 @@ static void ARMSX2ApplyPendingGamepadRumble(u32 gamepad_index)
         return;
 
     const u32 packed = s_pendingGamepadRumble[gamepad_index].load(std::memory_order_relaxed);
-    if (packed == s_appliedGamepadRumble[gamepad_index])
+    if (s_appliedGamepadRumbleValid[gamepad_index] && packed == s_appliedGamepadRumble[gamepad_index])
         return;
 
     const u16 large = static_cast<u16>((packed >> 16) & 0xffffu);
@@ -1199,6 +1207,7 @@ static void ARMSX2ApplyPendingGamepadRumble(u32 gamepad_index)
     }
 
     s_appliedGamepadRumble[gamepad_index] = packed;
+    s_appliedGamepadRumbleValid[gamepad_index] = true;
 }
 
 extern "C" void ARMSX2_iOSTestGamepadRumble(void)
@@ -1246,7 +1255,8 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
     const u32 packed = ARMSX2PackGamepadRumble(1.0f, 1.0f);
     for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
         s_pendingGamepadRumble[slot].store(packed, std::memory_order_relaxed);
-        s_appliedGamepadRumble[slot] = 0xffffffffu;
+        s_appliedGamepadRumble[slot] = 0;
+        s_appliedGamepadRumbleValid[slot] = false;
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1258,7 +1268,8 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
         }
         Console.WriteLn("[ARMSX2 iOS Gamepad] Test native controllers=%lu haptics=%lu",
             static_cast<unsigned long>(controllers.count), static_cast<unsigned long>(hapticCount));
-        s_nativeAppliedGamepadRumble = 0xffffffffu;
+        s_nativeAppliedGamepadRumble = 0;
+        s_nativeAppliedGamepadRumbleValid = false;
         ARMSX2ApplyNativeGamepadRumbleOnMain(packed);
     });
 
@@ -1267,9 +1278,11 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
             if (s_gamepads[slot])
                 SDL_RumbleGamepad(s_gamepads[slot], 0, 0, 0);
             s_pendingGamepadRumble[slot].store(0, std::memory_order_relaxed);
-            s_appliedGamepadRumble[slot] = 0xffffffffu;
+            s_appliedGamepadRumble[slot] = 0;
+            s_appliedGamepadRumbleValid[slot] = false;
         }
-        s_nativeAppliedGamepadRumble = 0xffffffffu;
+        s_nativeAppliedGamepadRumble = 0;
+        s_nativeAppliedGamepadRumbleValid = false;
         ARMSX2ApplyNativeGamepadRumbleOnMain(0);
         Console.WriteLn("[ARMSX2 iOS Gamepad] Test controller rumble stopped");
     });
@@ -1287,7 +1300,8 @@ static void ARMSX2RefreshIOSGamepads()
         if (!SDL_GamepadConnected(gamepad)) {
             Console.WriteLn("[Files] MFi gamepad %u disconnected", slot + 1);
             s_pendingGamepadRumble[slot].store(0, std::memory_order_relaxed);
-            s_appliedGamepadRumble[slot] = 0xffffffffu;
+            s_appliedGamepadRumble[slot] = 0;
+            s_appliedGamepadRumbleValid[slot] = false;
             if (slot == 0) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     ARMSX2ResetNativeGamepadRumbleOnMain();
