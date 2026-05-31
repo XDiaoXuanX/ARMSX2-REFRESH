@@ -8,6 +8,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
     case graphics
     case network
     case memoryCards
+    case storage
     case retroAchievements
     case overlay
     case gameController
@@ -28,6 +29,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "Network"
         case .memoryCards:
             return "Memory Cards"
+        case .storage:
+            return "Storage"
         case .retroAchievements:
             return "RetroAchievements"
         case .overlay:
@@ -55,6 +58,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "network"
         case .memoryCards:
             return "memorychip"
+        case .storage:
+            return "internaldrive"
         case .retroAchievements:
             return "trophy"
         case .overlay:
@@ -114,6 +119,11 @@ struct SettingsRootView: View {
                     MemoryCardSettingsView()
                 } label: {
                     Label("Memory Cards", systemImage: "memorychip")
+                }
+                NavigationLink {
+                    StorageSettingsView()
+                } label: {
+                    Label("Storage", systemImage: "internaldrive")
                 }
                 NavigationLink {
                     RetroAchievementsSettingsView()
@@ -176,6 +186,8 @@ struct SettingsRootView: View {
             NetworkSettingsView()
         case .memoryCards:
             MemoryCardSettingsView()
+        case .storage:
+            StorageSettingsView()
         case .retroAchievements:
             RetroAchievementsSettingsView()
         case .overlay:
