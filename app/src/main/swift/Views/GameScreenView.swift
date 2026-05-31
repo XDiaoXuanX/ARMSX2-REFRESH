@@ -309,9 +309,7 @@ struct GameScreenView: View {
     }
 
     private func makeRuntimePerGameSettingsEntry() -> ISOEntry? {
-        guard let gameName = appState.runningGameName,
-              gameName != "BIOS",
-              gameName != "AutoBoot" else {
+        guard let gameName = currentRuntimeGameName() else {
             return nil
         }
 
@@ -336,6 +334,36 @@ struct GameScreenView: View {
             size: size,
             isFavorite: ARMSX2Bridge.isFavorite(gameName)
         )
+    }
+
+    private func currentRuntimeGameName() -> String? {
+        if let gameName = normalizedRuntimeGameName(appState.runningGameName) {
+            return gameName
+        }
+
+        if let gameName = normalizedRuntimeGameName(ARMSX2Bridge.currentISOPath()) {
+            return gameName
+        }
+
+        let bootISO = ARMSX2Bridge.getINIString("GameISO", key: "BootISO", defaultValue: "")
+        return normalizedRuntimeGameName(bootISO)
+    }
+
+    private func normalizedRuntimeGameName(_ value: String?) -> String? {
+        guard var value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        let fileName = (value as NSString).lastPathComponent
+        guard !fileName.isEmpty,
+              fileName != "BIOS",
+              fileName != "AutoBoot" else {
+            return nil
+        }
+
+        return fileName
     }
 
     private var compatibilityLabPanel: some View {
