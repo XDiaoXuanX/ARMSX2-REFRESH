@@ -92,7 +92,7 @@ struct GameScreenView: View {
             compatibilityLabPanel
                 .presentationDetents([.medium, .large])
         }
-        .sheet(isPresented: $showPerGameSettings) {
+        .sheet(isPresented: $showPerGameSettings, onDismiss: restoreGameAfterPerGameSettings) {
             runtimePerGameSettingsSheet
                 .presentationDetents([.medium, .large])
         }
@@ -306,6 +306,21 @@ struct GameScreenView: View {
 
         runtimePerGameSettingsEntry = entry
         showPerGameSettings = true
+    }
+
+    private func restoreGameAfterPerGameSettings() {
+        runtimePerGameSettingsEntry = nil
+        refreshRuntimeMenuState()
+        NotificationCenter.default.post(name: NSNotification.Name("ARMSX2iOSEnterGameScreen"), object: nil)
+        ARMSX2Bridge.setFullScreen(fullScreen)
+        ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            NotificationCenter.default.post(name: NSNotification.Name("ARMSX2iOSEnterGameScreen"), object: nil)
+            ARMSX2Bridge.setFullScreen(fullScreen)
+            ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
+            refreshRuntimeMenuState()
+        }
     }
 
     private func makeRuntimePerGameSettingsEntry() -> ISOEntry? {
