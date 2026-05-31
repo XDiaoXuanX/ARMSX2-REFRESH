@@ -36,7 +36,9 @@ struct GameScreenView: View {
     @State private var showSaveStates = false
     @State private var showSpeedControl = false
     @State private var showCompatibilityLab = false
+    @State private var showPerGameSettings = false
     @State private var showPNACHImporter = false
+    @State private var runtimePerGameSettingsEntry: ISOEntry?
     @State private var compatibilityPresetKey = "off"
     @State private var compatibilityIdentity = ""
     @State private var compatibilityAutoPresets = true
@@ -88,6 +90,10 @@ struct GameScreenView: View {
         }
         .sheet(isPresented: $showCompatibilityLab) {
             compatibilityLabPanel
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showPerGameSettings) {
+            runtimePerGameSettingsSheet
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showPNACHImporter) {
@@ -217,6 +223,12 @@ struct GameScreenView: View {
 
             if gameMenuAvailable {
                 Button {
+                    openPerGameSettingsForCurrentGame()
+                } label: {
+                    Label("Per-Game Settings", systemImage: "slider.horizontal.3")
+                }
+
+                Button {
                     showPNACHImporter = true
                 } label: {
                     Label("Import PNACH / 60 FPS Patch", systemImage: "wand.and.stars")
@@ -249,6 +261,29 @@ struct GameScreenView: View {
         }
     }
 
+    @ViewBuilder
+    private var runtimePerGameSettingsSheet: some View {
+        if let runtimePerGameSettingsEntry {
+            PerGameSettingsPanel(game: runtimePerGameSettingsEntry)
+        } else {
+            NavigationStack {
+                ContentUnavailableView(
+                    "No Game Active",
+                    systemImage: "gamecontroller",
+                    description: Text("Start a game before changing per-game settings.")
+                )
+                .navigationTitle("Per-Game Settings")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            showPerGameSettings = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func refreshRuntimeMenuState() {
         let vmRunning = ARMSX2Bridge.isVMRunning()
         let gameReady = ARMSX2Bridge.hasValidSaveStateGame()
@@ -259,6 +294,48 @@ struct GameScreenView: View {
             gameMenuAvailable = gameReady
         }
         refreshCompatibilityState()
+    }
+
+    private func openPerGameSettingsForCurrentGame() {
+        guard let entry = makeRuntimePerGameSettingsEntry() else {
+            runtimePerGameSettingsEntry = nil
+            showPerGameSettings = true
+            presentSaveStateStatus("Per-game settings need a running game.")
+            return
+        }
+
+        runtimePerGameSettingsEntry = entry
+        showPerGameSettings = true
+    }
+
+    private func makeRuntimePerGameSettingsEntry() -> ISOEntry? {
+        guard let gameName = appState.runningGameName,
+              gameName != "BIOS",
+              gameName != "AutoBoot" else {
+            return nil
+        }
+
+        let isoDir = ARMSX2Bridge.isoDirectory()
+        let docsDir = ARMSX2Bridge.documentsDirectory()
+        let fm = FileManager.default
+        var path = (isoDir as NSString).appendingPathComponent(gameName)
+        if !fm.fileExists(atPath: path) {
+            path = (docsDir as NSString).appendingPathComponent(gameName)
+        }
+
+        let fileURL = fm.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
+        let attrs = try? fm.attributesOfItem(atPath: path)
+        let size = attrs?[.size] as? UInt64 ?? 0
+        let metadata = ARMSX2Bridge.gameMetadata(forISO: gameName)
+        return ISOEntry(
+            name: gameName,
+            fileURL: fileURL,
+            coverURL: nil,
+            coverSignature: nil,
+            metadata: metadata,
+            size: size,
+            isFavorite: ARMSX2Bridge.isFavorite(gameName)
+        )
     }
 
     private var compatibilityLabPanel: some View {

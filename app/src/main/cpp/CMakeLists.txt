@@ -278,6 +278,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		"-framework CoreText"
 		"-framework CoreGraphics"
 		"-framework ImageIO"
+		"-framework GameController"
+		"-framework CoreHaptics"
 	)
 	if(NOT ARMSX2_MAC_CATALYST)
 		list(APPEND ARMSX2_APPLE_FRAMEWORKS "-framework OpenGLES")

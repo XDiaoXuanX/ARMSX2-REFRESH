@@ -12,8 +12,15 @@
 
 #include "IconsPromptFont.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #if defined(__ANDROID__)
 extern void AndroidUpdatePadVibration(u32 pad_index, float large_intensity, float small_intensity);
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+extern "C" void ARMSX2_iOSUpdatePadVibration(u32 pad_index, float large_intensity, float small_intensity);
 #endif
 
 static const InputBindingInfo s_bindings[] = {
@@ -255,6 +262,9 @@ u8 PadDualshock2::Poll(u8 commandByte)
 			InputManager::SetPadVibrationIntensity(this->unifiedSlot, large_intensity, small_intensity);
 #if defined(__ANDROID__)
 			AndroidUpdatePadVibration(this->unifiedSlot, large_intensity, small_intensity);
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+			ARMSX2_iOSUpdatePadVibration(this->unifiedSlot, large_intensity, small_intensity);
 #endif
 
 			// PS1 mode: If the controller is still in digital mode, it is time to stop acknowledging.

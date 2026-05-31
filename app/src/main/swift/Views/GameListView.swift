@@ -268,6 +268,9 @@ struct GameListView: View {
             .padding(.top, 12)
         }
         .background(Color(.systemGroupedBackground))
+        .transaction { transaction in
+            transaction.animation = nil
+        }
     }
 
     private func vmStatusSection(gameName: String) -> some View {
@@ -414,13 +417,12 @@ struct GameListView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(8)
-            .frame(maxWidth: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, minHeight: 268, alignment: .top)
             .background(.background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(game.name == appState.runningGameName ? .green.opacity(0.6) : .white.opacity(0.08), lineWidth: 1)
             }
-            .shadow(color: .black.opacity(0.05), radius: 3, x: 0, y: 2)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -742,7 +744,7 @@ private struct GameInfoPanel: View {
     }
 }
 
-private struct PerGameSettingsPanel: View {
+struct PerGameSettingsPanel: View {
     @Environment(\.dismiss) private var dismiss
 
     let game: ISOEntry

@@ -761,6 +761,45 @@ const int s_defaultMap[16] = {
     SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK,
 };
 
+static SDL_Gamepad* s_gamepad = nullptr;
+static std::atomic<u32> s_pendingGamepadRumble{0};
+static u32 s_appliedGamepadRumble = 0xffffffffu;
+static bool s_loggedGamepadRumbleFailure = false;
+static constexpr u32 ARMSX2_GAMEPAD_RUMBLE_DURATION_MS = 65535;
+
+static u32 ARMSX2PackGamepadRumble(float large_intensity, float small_intensity)
+{
+    const u32 large = static_cast<u32>(std::clamp(large_intensity, 0.0f, 1.0f) * 65535.0f);
+    const u32 small = static_cast<u32>(std::clamp(small_intensity, 0.0f, 1.0f) * 65535.0f);
+    return ((large & 0xffffu) << 16) | (small & 0xffffu);
+}
+
+extern "C" void ARMSX2_iOSUpdatePadVibration(u32 pad_index, float large_intensity, float small_intensity)
+{
+    if (pad_index != 0)
+        return;
+
+    s_pendingGamepadRumble.store(ARMSX2PackGamepadRumble(large_intensity, small_intensity), std::memory_order_relaxed);
+}
+
+static void ARMSX2ApplyPendingGamepadRumble()
+{
+    if (!s_gamepad)
+        return;
+
+    const u32 packed = s_pendingGamepadRumble.load(std::memory_order_relaxed);
+    if (packed == s_appliedGamepadRumble)
+        return;
+
+    const u16 large = static_cast<u16>((packed >> 16) & 0xffffu);
+    const u16 small = static_cast<u16>(packed & 0xffffu);
+    if (!SDL_RumbleGamepad(s_gamepad, large, small, ARMSX2_GAMEPAD_RUMBLE_DURATION_MS) && !s_loggedGamepadRumbleFailure) {
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Controller rumble unavailable: %s", SDL_GetError());
+        s_loggedGamepadRumbleFailure = true;
+    }
+    s_appliedGamepadRumble = packed;
+}
+
 // View controller references for background color switching
 static UIViewController* __unsafe_unretained s_menuVC = nil;
 static UIViewController* __unsafe_unretained s_rootVC = nil;
@@ -995,7 +1034,6 @@ namespace Host
 
         // MFi / External gamepad support via SDL3
         {
-            static SDL_Gamepad* s_gamepad = nullptr;
             // Auto-detect: open first available gamepad if not already open
             if (!s_gamepad) {
                 int count = 0;
@@ -1010,11 +1048,14 @@ namespace Host
             // Handle disconnect
             if (s_gamepad && !SDL_GamepadConnected(s_gamepad)) {
                 Console.WriteLn("[Files] MFi gamepad disconnected");
+                s_pendingGamepadRumble.store(0, std::memory_order_relaxed);
+                s_appliedGamepadRumble = 0xffffffffu;
                 SDL_CloseGamepad(s_gamepad);
                 s_gamepad = nullptr;
             }
             if (s_gamepad) {
                 SDL_UpdateGamepads();
+                ARMSX2ApplyPendingGamepadRumble();
                 // Capture mode: detect any pressed button for remapping UI
                 if (s_captureMode.load()) {
                     for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++) {
