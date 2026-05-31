@@ -31,7 +31,9 @@ final class FileImportHandler: @unchecked Sendable {
     // .bin files > 50MB are treated as game images, not BIOS
     private static let biosSizeThreshold: UInt64 = 50 * 1024 * 1024
 
-    static let biosContentTypes: [UTType] = broaderContentTypes(for: ["bin", "rom"])
+    // BIOS dumps use loose/non-standard UTTypes on iOS. Keep the picker permissive,
+    // then validate extension/size in the import path before copying to bios/.
+    static let biosContentTypes: [UTType] = [.item, .data, .content]
     static let gameContentTypes: [UTType] = broaderContentTypes(for: ["iso", "chd", "img", "bin", "cue", "mdf", "cso", "zso", "gz", "elf"])
     static let pnachContentTypes: [UTType] = Array(Set([.item, .data, .content, .text, .plainText] + contentTypes(for: ["pnach", "txt", "patch"])))
 
@@ -49,6 +51,8 @@ final class FileImportHandler: @unchecked Sendable {
 
     @discardableResult
     func importURLs(_ urls: [URL], preferredDestination: ImportDestination = .automatic) -> [ImportedGame] {
+        NSLog("[ARMSX2 iOS Import] importing %d file(s), destination=%@", urls.count, String(describing: preferredDestination))
+
         var imported: [String] = []
         var importedGames: [ImportedGame] = []
         var rejected: [String] = []
@@ -128,6 +132,8 @@ final class FileImportHandler: @unchecked Sendable {
 
         let ext = url.pathExtension.lowercased()
         let fileName = url.lastPathComponent
+        NSLog("[ARMSX2 iOS Import] candidate: %@ ext=%@ securityScoped=%d",
+              fileName, ext.isEmpty ? "(none)" : ext, accessing ? 1 : 0)
 
         if preferredDestination == .pnachCheat || (preferredDestination == .automatic && Self.pnachExtensions.contains(ext)) {
             return importPNACHFile(url, destinationPath: ARMSX2Bridge.pnachPathForCurrentGame(asCheat: true), asCheat: true)
@@ -151,6 +157,14 @@ final class FileImportHandler: @unchecked Sendable {
                 NSLog("[ARMSX2 iOS Import] unsupported BIOS file: %@", fileName)
                 return .unsupported(fileName)
             }
+
+            let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let size = attrs?[.size] as? UInt64 ?? 0
+            if size > 0 && size > Self.biosSizeThreshold {
+                NSLog("[ARMSX2 iOS Import] rejecting oversized BIOS candidate: %@ size=%llu", fileName, size)
+                return .failure("\(fileName): too large for a PS2 BIOS dump.")
+            }
+
             destDir = (docsPath as NSString).appendingPathComponent("bios")
             category = "BIOS"
         } else if Self.gameExtensions.subtracting(Self.biosExtensions).contains(ext) {
@@ -280,6 +294,8 @@ struct ImportDocumentPicker: UIViewControllerRepresentable {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: allowedContentTypes, asCopy: true)
         picker.allowsMultipleSelection = allowsMultipleSelection
         picker.delegate = context.coordinator
+        NSLog("[ARMSX2 iOS Import] opening document picker types=%@ multiple=%d",
+              allowedContentTypes.map(\.identifier).joined(separator: ","), allowsMultipleSelection ? 1 : 0)
         return picker
     }
 
@@ -293,10 +309,13 @@ struct ImportDocumentPicker: UIViewControllerRepresentable {
         }
 
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            NSLog("[ARMSX2 iOS Import] picker returned %d URL(s): %@",
+                  urls.count, urls.map(\.lastPathComponent).joined(separator: ", "))
             onComplete(.success(urls))
         }
 
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            NSLog("[ARMSX2 iOS Import] picker cancelled")
             onComplete(.failure(CocoaError(.userCancelled)))
         }
     }

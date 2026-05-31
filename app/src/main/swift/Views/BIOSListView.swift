@@ -54,11 +54,21 @@ struct BIOSListView: View {
                     showBIOSImporter = false
                     switch result {
                     case .success(let urls):
+                        NSLog("[ARMSX2 iOS BIOS] picker completed with %d URL(s)", urls.count)
                         fileImporter.handleURLs(urls, preferredDestination: .bios)
                         loadBIOSes()
                         if defaultBIOS.isEmpty, let firstBIOS = bioses.first?.fileName {
                             ARMSX2Bridge.setDefaultBIOS(firstBIOS)
                             defaultBIOS = firstBIOS
+                        }
+                        if bioses.isEmpty, !urls.isEmpty {
+                            fileImporter.lastImportMessage = [
+                                fileImporter.lastImportMessage,
+                                "No usable PS2 BIOS was found after import. Use a 1-50 MB .bin or .rom BIOS dump."
+                            ]
+                            .compactMap { $0 }
+                            .joined(separator: "\n")
+                            fileImporter.showImportAlert = true
                         }
                     case .failure(let error):
                         if (error as NSError).code != NSUserCancelledError {

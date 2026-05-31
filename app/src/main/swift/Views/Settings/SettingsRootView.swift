@@ -11,6 +11,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
     case retroAchievements
     case overlay
     case gameController
+    case localMultiplayer
     case virtualPad
     case licenses
     case about
@@ -33,6 +34,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "Overlay (OSD)"
         case .gameController:
             return "Game Controller"
+        case .localMultiplayer:
+            return "Local Multiplayer"
         case .virtualPad:
             return "Virtual Pad"
         case .licenses:
@@ -58,6 +61,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "text.below.photo"
         case .gameController:
             return "gamecontroller"
+        case .localMultiplayer:
+            return "person.3"
         case .virtualPad:
             return "hand.draw"
         case .licenses:
@@ -126,6 +131,11 @@ struct SettingsRootView: View {
                     Label("Game Controller", systemImage: "gamecontroller")
                 }
                 NavigationLink {
+                    LocalMultiplayerSettingsView()
+                } label: {
+                    Label("Local Multiplayer", systemImage: "person.3")
+                }
+                NavigationLink {
                     VirtualPadSettingsView()
                 } label: {
                     Label("Virtual Pad", systemImage: "hand.draw")
@@ -172,6 +182,8 @@ struct SettingsRootView: View {
             OverlaySettingsView()
         case .gameController:
             GamepadSettingsView()
+        case .localMultiplayer:
+            LocalMultiplayerSettingsView()
         case .virtualPad:
             VirtualPadSettingsView()
         case .licenses:

@@ -33,6 +33,10 @@ private let multitapModes: [(id: Int, title: String)] = [
     (4, "Port 1 + Port 2 Multitap"),
 ]
 
+private func multitapModeTitle(_ id: Int) -> String {
+    multitapModes.first(where: { $0.id == id })?.title ?? "Auto"
+}
+
 // SDL_GamepadButton → display name (matches SDL3 enum order)
 private func sdlButtonName(_ idx: Int) -> String {
     switch idx {
@@ -66,22 +70,23 @@ struct GamepadSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Multitap Mode", selection: $settings.controllerMultitapMode) {
-                    ForEach(multitapModes, id: \.id) { mode in
-                        Text(mode.title).tag(mode.id)
+                NavigationLink {
+                    LocalMultiplayerSettingsView()
+                } label: {
+                    Label {
+                        HStack {
+                            Text("Local Multiplayer")
+                            Spacer()
+                            Text(multitapModeTitle(settings.controllerMultitapMode))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "person.3")
                     }
                 }
-
-                HStack {
-                    Text("Current Mode")
-                    Spacer()
-                    Text(multitapModes.first(where: { $0.id == settings.controllerMultitapMode })?.title ?? "Auto")
-                        .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Local Multiplayer")
             } footer: {
-                Text("Auto enables Console Port 1 multitap only when 3 or more controllers are detected before boot. Manual modes take effect on the next boot/reset.")
+                Text("Configure multitap for 3-4 local controllers.")
             }
 
             Section {
@@ -166,5 +171,39 @@ struct GamepadSettingsView: View {
         pollTimer = nil
         capturingIndex = nil
         ARMSX2Bridge.stopButtonCapture()
+    }
+}
+
+struct LocalMultiplayerSettingsView: View {
+    @State private var settings = SettingsStore.shared
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Multitap Mode", selection: $settings.controllerMultitapMode) {
+                    ForEach(multitapModes, id: \.id) { mode in
+                        Text(mode.title).tag(mode.id)
+                    }
+                }
+
+                HStack {
+                    Text("Current Mode")
+                    Spacer()
+                    Text(multitapModeTitle(settings.controllerMultitapMode))
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Multitap")
+            } footer: {
+                Text("Auto enables Port 1 multitap when 3 or more controllers are detected before boot. Manual modes take effect on the next boot/reset.")
+            }
+
+            Section("Controller Mapping") {
+                Text("Disabled maps controllers 1-2 to normal PS2 ports. Port 1 Multitap maps controllers 1-4 to 1A/1B/1C/1D. Port 2 Multitap keeps controller 1 on Port 1 and maps controllers 2-4 to Port 2 multitap slots.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Local Multiplayer")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
