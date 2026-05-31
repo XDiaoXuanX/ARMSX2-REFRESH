@@ -879,6 +879,7 @@ static void ARMSX2EnsureIOSPadType(u32 unified_slot)
 
 static u32 ARMSX2DetectedSDLGamepadCount()
 {
+    SDL_PumpEvents();
     SDL_UpdateGamepads();
     int count = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&count);
@@ -1200,12 +1201,6 @@ static void ARMSX2ApplyPendingGamepadRumble(u32 gamepad_index)
         }
     }
 
-    if (gamepad_index == 0) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            ARMSX2ApplyNativeGamepadRumbleOnMain(packed);
-        });
-    }
-
     s_appliedGamepadRumble[gamepad_index] = packed;
     s_appliedGamepadRumbleValid[gamepad_index] = true;
 }
@@ -1214,9 +1209,11 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
 {
     Console.WriteLn("[ARMSX2 iOS Gamepad] Test controller rumble requested");
 
+    SDL_PumpEvents();
     SDL_UpdateGamepads();
     int count = 0;
     SDL_JoystickID* ids = SDL_GetGamepads(&count);
+    Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL detected=%d", count);
     if (ids) {
         for (int id_index = 0; id_index < count; id_index++) {
             bool already_open = false;
@@ -1232,6 +1229,9 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
             for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
                 if (!s_gamepads[slot]) {
                     s_gamepads[slot] = SDL_OpenGamepad(ids[id_index]);
+                    Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL open slot=%u id=%d result=%s",
+                        slot + 1, ids[id_index],
+                        s_gamepads[slot] ? (SDL_GetGamepadName(s_gamepads[slot]) ?: "unknown") : SDL_GetError());
                     break;
                 }
             }
@@ -1246,8 +1246,11 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
 
         anySDLGamepad = true;
         const bool ok = SDL_RumbleGamepad(s_gamepads[slot], 0xffff, 0xffff, 500);
+        const bool trigger_ok = SDL_RumbleGamepadTriggers(s_gamepads[slot], 0xffff, 0xffff, 500);
         Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL controller %u rumble %s%s%s",
             slot + 1, ok ? "accepted" : "failed", ok ? "" : ": ", ok ? "" : SDL_GetError());
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL controller %u trigger rumble %s%s%s",
+            slot + 1, trigger_ok ? "accepted" : "failed", trigger_ok ? "" : ": ", trigger_ok ? "" : SDL_GetError());
     }
     if (!anySDLGamepad)
         Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL rumble skipped: no SDL gamepad open");
@@ -1259,37 +1262,25 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
         s_appliedGamepadRumbleValid[slot] = false;
     }
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSArray<GCController*>* controllers = [GCController controllers];
-        NSUInteger hapticCount = 0;
-        for (GCController* controller in controllers) {
-            if (controller.haptics)
-                hapticCount++;
-        }
-        Console.WriteLn("[ARMSX2 iOS Gamepad] Test native controllers=%lu haptics=%lu",
-            static_cast<unsigned long>(controllers.count), static_cast<unsigned long>(hapticCount));
-        s_nativeAppliedGamepadRumble = 0;
-        s_nativeAppliedGamepadRumbleValid = false;
-        ARMSX2ApplyNativeGamepadRumbleOnMain(packed);
-    });
+    Console.WriteLn("[ARMSX2 iOS Gamepad] Native CoreHaptics fallback disabled; using SDL rumble only");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
-            if (s_gamepads[slot])
+            if (s_gamepads[slot]) {
                 SDL_RumbleGamepad(s_gamepads[slot], 0, 0, 0);
+                SDL_RumbleGamepadTriggers(s_gamepads[slot], 0, 0, 0);
+            }
             s_pendingGamepadRumble[slot].store(0, std::memory_order_relaxed);
             s_appliedGamepadRumble[slot] = 0;
             s_appliedGamepadRumbleValid[slot] = false;
         }
-        s_nativeAppliedGamepadRumble = 0;
-        s_nativeAppliedGamepadRumbleValid = false;
-        ARMSX2ApplyNativeGamepadRumbleOnMain(0);
         Console.WriteLn("[ARMSX2 iOS Gamepad] Test controller rumble stopped");
     });
 }
 
 static void ARMSX2RefreshIOSGamepads()
 {
+    SDL_PumpEvents();
     SDL_UpdateGamepads();
 
     for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
