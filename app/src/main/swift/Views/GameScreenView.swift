@@ -43,6 +43,7 @@ struct GameScreenView: View {
     @State private var compatibilityIdentity = ""
     @State private var compatibilityAutoPresets = true
     @State private var saveStateStatus: String? = nil
+    @State private var runtimeOverlayPauseActive = false
 
     var body: some View {
         GeometryReader { geo in
@@ -119,6 +120,11 @@ struct GameScreenView: View {
             }
         }
         .onAppear(perform: refreshRuntimeMenuState)
+        .onChange(of: showSaveStates) { _, _ in updateRuntimeOverlayPause() }
+        .onChange(of: showSpeedControl) { _, _ in updateRuntimeOverlayPause() }
+        .onChange(of: showCompatibilityLab) { _, _ in updateRuntimeOverlayPause() }
+        .onChange(of: showPerGameSettings) { _, _ in updateRuntimeOverlayPause() }
+        .onChange(of: showPNACHImporter) { _, _ in updateRuntimeOverlayPause() }
         .onReceive(NotificationCenter.default.publisher(for: runtimeMenuStateChangedNotification)) { _ in
             refreshRuntimeMenuState()
         }
@@ -349,6 +355,16 @@ struct GameScreenView: View {
             ARMSX2Bridge.setFullScreen(fullScreen)
             ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
             refreshRuntimeMenuState()
+        }
+    }
+
+    private func updateRuntimeOverlayPause() {
+        let shouldPause = showSaveStates || showSpeedControl || showCompatibilityLab || showPerGameSettings || showPNACHImporter
+        guard runtimeOverlayPauseActive != shouldPause else { return }
+
+        runtimeOverlayPauseActive = shouldPause
+        if ARMSX2Bridge.isVMRunning() {
+            ARMSX2Bridge.setVMPaused(shouldPause)
         }
     }
 

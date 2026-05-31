@@ -827,6 +827,25 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     NSLog(@"[ARMSX2Bridge] VM stop requested");
 }
 
++ (void)setVMPaused:(BOOL)paused {
+    if (!VMManager::HasValidVM())
+        return;
+
+    Host::RunOnCPUThread([paused]() {
+        if (!VMManager::HasValidVM())
+            return;
+
+        const VMState state = VMManager::GetState();
+        if (paused && state == VMState::Running) {
+            VMManager::SetPaused(true);
+            Console.WriteLn("@@IOS_VM_PAUSE@@ paused=1 reason=swiftui-menu");
+        } else if (!paused && state == VMState::Paused) {
+            VMManager::SetPaused(false);
+            Console.WriteLn("@@IOS_VM_PAUSE@@ paused=0 reason=swiftui-menu");
+        }
+    }, false);
+}
+
 + (void)setFullScreen:(BOOL)enabled {
     ARMSX2_SetSDLFullscreen(enabled ? true : false);
 }
@@ -983,6 +1002,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     const int globalBlendingAccuracy = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "accurate_blending_unit", 1) : 1;
     const bool globalEnableCheats = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableCheats", false) : false;
     const bool globalEnablePatches = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnablePatches", true) : true;
+    const bool globalEnableGameFixes = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableGameFixes", true) : true;
+    const bool globalEnableGameDBHardwareFixes = g_p44_settings_interface ? !g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks", false) : true;
     NSMutableDictionary<NSString*, id>* result = [@{
         @"enabled": @NO,
         @"path": @"",
@@ -994,6 +1015,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         @"blendingAccuracy": @(globalBlendingAccuracy),
         @"enableCheats": @(globalEnableCheats),
         @"enablePatches": @(globalEnablePatches),
+        @"enableGameFixes": @(globalEnableGameFixes),
+        @"enableGameDBHardwareFixes": @(globalEnableGameDBHardwareFixes),
     } mutableCopy];
 
     if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
@@ -1017,7 +1040,9 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.ContainsValue("EmuCore/GS", "filter") ||
         si.ContainsValue("EmuCore/GS", "accurate_blending_unit") ||
         si.ContainsValue("EmuCore", "EnableCheats") ||
-        si.ContainsValue("EmuCore", "EnablePatches");
+        si.ContainsValue("EmuCore", "EnablePatches") ||
+        si.ContainsValue("EmuCore", "EnableGameFixes") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks");
 
     result[@"enabled"] = @(hasKnownOverride);
     NSString* currentAspect = [result[@"aspectRatio"] isKindOfClass:NSString.class] ? result[@"aspectRatio"] : @"Auto 4:3/3:2";
@@ -1027,6 +1052,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     result[@"blendingAccuracy"] = @(si.GetIntValue("EmuCore/GS", "accurate_blending_unit", [result[@"blendingAccuracy"] intValue]));
     result[@"enableCheats"] = @(si.GetBoolValue("EmuCore", "EnableCheats", [result[@"enableCheats"] boolValue]));
     result[@"enablePatches"] = @(si.GetBoolValue("EmuCore", "EnablePatches", [result[@"enablePatches"] boolValue]));
+    result[@"enableGameFixes"] = @(si.GetBoolValue("EmuCore", "EnableGameFixes", [result[@"enableGameFixes"] boolValue]));
+    result[@"enableGameDBHardwareFixes"] = @(!si.GetBoolValue("EmuCore/GS", "UserHacks", ![result[@"enableGameDBHardwareFixes"] boolValue]));
     return result;
 }
 
@@ -1037,7 +1064,9 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
               textureFiltering:(int)textureFiltering
               blendingAccuracy:(int)blendingAccuracy
                   enableCheats:(BOOL)enableCheats
-                 enablePatches:(BOOL)enablePatches {
+                 enablePatches:(BOOL)enablePatches
+              enableGameFixes:(BOOL)enableGameFixes
+    enableGameDBHardwareFixes:(BOOL)enableGameDBHardwareFixes {
     GameList::Entry entry;
     NSString* resolvedPath = nil;
     if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
@@ -1059,6 +1088,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.SetIntValue("EmuCore/GS", "accurate_blending_unit", blendingAccuracy);
         si.SetBoolValue("EmuCore", "EnableCheats", enableCheats);
         si.SetBoolValue("EmuCore", "EnablePatches", enablePatches);
+        si.SetBoolValue("EmuCore", "EnableGameFixes", enableGameFixes);
+        si.SetBoolValue("EmuCore/GS", "UserHacks", !enableGameDBHardwareFixes);
     } else {
         si.DeleteValue("ARMSX2iOS/PerGame", "Enabled");
         si.DeleteValue("EmuCore/GS", "upscale_multiplier");
@@ -1067,6 +1098,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.DeleteValue("EmuCore/GS", "accurate_blending_unit");
         si.DeleteValue("EmuCore", "EnableCheats");
         si.DeleteValue("EmuCore", "EnablePatches");
+        si.DeleteValue("EmuCore", "EnableGameFixes");
+        si.DeleteValue("EmuCore/GS", "UserHacks");
         si.RemoveEmptySections();
     }
 

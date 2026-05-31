@@ -68,6 +68,9 @@ final class AppState: @unchecked Sendable {
     }
 
     func returnToMenu() {
+        if ARMSX2Bridge.isVMRunning() {
+            ARMSX2Bridge.setVMPaused(true)
+        }
         currentScreen = .menu
         // [P44-2] Restore opaque background on hosting controller
         NotificationCenter.default.post(name: NSNotification.Name("ARMSX2iOSReturnToMenu"), object: nil)
@@ -78,6 +81,7 @@ final class AppState: @unchecked Sendable {
             // [P44-2] Clear background so Metal surface shows through
             NotificationCenter.default.post(name: NSNotification.Name("ARMSX2iOSEnterGameScreen"), object: nil)
             currentScreen = .playing
+            ARMSX2Bridge.setVMPaused(false)
         }
     }
 

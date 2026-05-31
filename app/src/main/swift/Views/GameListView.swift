@@ -757,6 +757,8 @@ struct PerGameSettingsPanel: View {
     @State private var blendingAccuracy: Int
     @State private var enableCheats: Bool
     @State private var enablePatches: Bool
+    @State private var enableGameFixes: Bool
+    @State private var enableGameDBHardwareFixes: Bool
     @State private var statusMessage: String?
 
     init(game: ISOEntry, onDone: (() -> Void)? = nil) {
@@ -770,6 +772,8 @@ struct PerGameSettingsPanel: View {
         _blendingAccuracy = State(initialValue: Self.intValue(info["blendingAccuracy"], defaultValue: 1))
         _enableCheats = State(initialValue: Self.boolValue(info["enableCheats"], defaultValue: false))
         _enablePatches = State(initialValue: Self.boolValue(info["enablePatches"], defaultValue: true))
+        _enableGameFixes = State(initialValue: Self.boolValue(info["enableGameFixes"], defaultValue: true))
+        _enableGameDBHardwareFixes = State(initialValue: Self.boolValue(info["enableGameDBHardwareFixes"], defaultValue: true))
     }
 
     var body: some View {
@@ -825,9 +829,13 @@ struct PerGameSettingsPanel: View {
                 Section("Patches & Cheats") {
                     Toggle("Enable PNACH Cheats", isOn: $enableCheats)
                         .disabled(!enabled)
-                    Toggle("Enable GameDB Patches", isOn: $enablePatches)
+                    Toggle("GameDB PNACH Patches", isOn: $enablePatches)
                         .disabled(!enabled)
-                    Text("Use the long-press PNACH importer to add 60 FPS patches or cheats for this game.")
+                    Toggle("GameDB Core Fixes", isOn: $enableGameFixes)
+                        .disabled(!enabled)
+                    Toggle("GameDB Graphics Fixes", isOn: $enableGameDBHardwareFixes)
+                        .disabled(!enabled)
+                    Text("If a game looks worse after GameDB, turn off GameDB Graphics Fixes for this game and reset/relaunch it. Core fixes cover timing, clamps, and other compatibility behavior.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -869,7 +877,9 @@ struct PerGameSettingsPanel: View {
             textureFiltering: Int32(textureFiltering),
             blendingAccuracy: Int32(blendingAccuracy),
             enableCheats: enableCheats,
-            enablePatches: enablePatches
+            enablePatches: enablePatches,
+            enableGameFixes: enableGameFixes,
+            enableGameDBHardwareFixes: enableGameDBHardwareFixes
         )
         statusMessage = enabled ? "Saved for \(game.metadata["serial"] ?? game.name). Reset or relaunch the game to apply." : "Per-game overrides cleared."
     }

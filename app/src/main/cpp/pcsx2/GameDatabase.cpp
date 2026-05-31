@@ -24,6 +24,10 @@
 #include <mutex>
 #include <optional>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 namespace GameDatabaseSchema
 {
 	static const char* getHWFixName(GSHWFixId id);
@@ -815,8 +819,20 @@ void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions&
 				break;
 
 			case GSHWFixId::NativeScaling:
-				config.UserHacks_NativeScaling = static_cast<GSNativeScaling>(value);
-				break;
+			{
+				int applied_value = value;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+				if (applied_value >= static_cast<int>(GSNativeScaling::Aggressive))
+				{
+					Console.Warning("@@IOS_GAMEDB_GS_CLAMP@@ game=\"%s\" fix=nativeScaling requested=%d applied=%d",
+						name.c_str(), applied_value, static_cast<int>(GSNativeScaling::Normal));
+					applied_value = static_cast<int>(GSNativeScaling::Normal);
+				}
+#endif
+				if (applied_value >= 0 && applied_value < static_cast<int>(GSNativeScaling::MaxCount))
+					config.UserHacks_NativeScaling = static_cast<GSNativeScaling>(applied_value);
+			}
+			break;
 
 			case GSHWFixId::TexturePreloading:
 			{

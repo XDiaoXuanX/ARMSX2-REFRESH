@@ -84,6 +84,7 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 
 // VM control
 + (void)requestVMStop;
++ (void)setVMPaused:(BOOL)paused;
 + (void)setFullScreen:(BOOL)enabled;
 
 // Info
@@ -111,7 +112,9 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
               blendingAccuracy:(int)blendingAccuracy
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
-    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:blendingAccuracy:enableCheats:enablePatches:));
+              enableGameFixes:(BOOL)enableGameFixes
+    enableGameDBHardwareFixes:(BOOL)enableGameDBHardwareFixes
+    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:blendingAccuracy:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
 + (void)changeDiscToISO:(nonnull NSString *)isoName completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(changeDisc(toISO:completion:));
 + (void)ejectDiscWithCompletion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(ejectDisc(completion:));
 

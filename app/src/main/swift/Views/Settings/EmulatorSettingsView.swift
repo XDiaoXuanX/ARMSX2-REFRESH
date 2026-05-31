@@ -149,12 +149,21 @@ struct EmulatorSettingsView: View {
             }
 
             Section("Patches & Cheats") {
-                Toggle("Enable GameDB Patches", isOn: $settings.enablePatches)
+                Toggle("GameDB Automatic Fixes", isOn: Binding(
+                    get: { settings.enableGameFixes && settings.enableGameDBHardwareFixes },
+                    set: { enabled in
+                        settings.enableGameFixes = enabled
+                        settings.enableGameDBHardwareFixes = enabled
+                    }
+                ))
+                Toggle("GameDB Core Fixes", isOn: $settings.enableGameFixes)
+                Toggle("GameDB Graphics Fixes", isOn: $settings.enableGameDBHardwareFixes)
+                Toggle("GameDB PNACH Patches", isOn: $settings.enablePatches)
                 Toggle("Enable PNACH Cheats", isOn: $settings.enableCheats)
                 Toggle("Widescreen Patches", isOn: $settings.enableWidescreenPatches)
                 Toggle("No-Interlacing Patches", isOn: $settings.enableNoInterlacingPatches)
 
-                Text("PNACH cheats and 60 FPS patches can be imported from the in-game quick menu or from a game's long-press menu. They are renamed to Serial_CRC.pnach automatically.")
+                Text("GameDB Core Fixes covers timing, clamps, and gamefixes. GameDB Graphics Fixes covers renderer-specific hardware fixes; turn it off globally or per-game if a title looks worse on Metal. PNACH cheats and 60 FPS patches can be imported from the in-game quick menu or from a game's long-press menu.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
