@@ -13,6 +13,13 @@ target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_20)
 target_compile_definitions(PCSX2_FLAGS INTERFACE "${PCSX2_DEFS}")
 target_compile_options(PCSX2_FLAGS INTERFACE "${PCSX2_WARNINGS}")
 
+if(ANDROID)
+	target_compile_definitions(PCSX2_FLAGS INTERFACE
+		"PCSX2_CORE=1"
+		"DISABLE_RECORDING"
+	)
+endif()
+
 # Check that people use the good file
 if(NOT TOP_CMAKE_WAS_SOURCED)
 	message(FATAL_ERROR "

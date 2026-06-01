@@ -1281,10 +1281,19 @@ void mvu1AnalyzeBlock(
 	//   - First three uppers write to ACC (toACC=1 in encoding), fourth
 	//     writes to VF[fd] with fd != 0
 	//   - VFd of the MADDw is not VF[0] (interp no-ops fd==0 case)
+	// User-facing kill switch for the NEON peephole fusions — gated via
+	// the EmuCore/Speedhacks/vuNeonFusions bit so the Performance tab's
+	// "VU NEON Fusions" toggle (and per-game override) can disable both
+	// MAC and OPMAC fusion when a game regresses. When off, the flag
+	// reset loops below still run so any stale IR state is cleared, but
+	// the detection loops are skipped entirely.
+	const bool fusionsOn = EmuConfig.Speedhacks.vuNeonFusions;
+
 	for (u32 i = 0; i < numPairs; i++)
 	{
-		ir.info[i].mac_cluster_lead   = false;
-		ir.info[i].mac_cluster_member = false;
+		ir.info[i].mac_cluster_lead     = false;
+		ir.info[i].mac_cluster_member   = false;
+		ir.info[i].mac_cluster_xyz_only = false;
 	}
 
 	auto isClusterUpper = [](u32 upper, u32 expected_op6_low5, bool to_acc) -> bool {
@@ -1315,8 +1324,11 @@ void mvu1AnalyzeBlock(
 	auto isFullMask = [](const _VURegsNum& uregs) -> bool {
 		return uregs.VFwxyzw == 0xFu;
 	};
+	auto isXyzMask = [](const _VURegsNum& uregs) -> bool {
+		return uregs.VFwxyzw == 0xEu; // xyz lanes only (W bit clear)
+	};
 
-	for (u32 i = 0; i + 3 < numPairs; i++)
+	for (u32 i = 0; fusionsOn && i + 3 < numPairs; i++)
 	{
 		const u32 u0 = ir.info[i + 0].upper;
 		const u32 u1 = ir.info[i + 1].upper;
@@ -1336,11 +1348,15 @@ void mvu1AnalyzeBlock(
 		const u32 ft3 = (u3 >> 16) & 0x1Fu;
 		if (ft0 != ft1 || ft1 != ft2 || ft2 != ft3) continue;
 
-		// Full xyzw mask on each pair (lane-merge isn't implemented).
-		if (!isFullMask(uregs_data[i + 0])) continue;
-		if (!isFullMask(uregs_data[i + 1])) continue;
-		if (!isFullMask(uregs_data[i + 2])) continue;
-		if (!isFullMask(uregs_data[i + 3])) continue;
+		// Uniform mask across all 4 pairs. Two supported variants:
+		//   - all xyzw (0xF): full 4-vector chain
+		//   - all xyz  (0xE): 3-vector chain, ACC.w + VFd.w preserved
+		// Mixed-mask chains (e.g., MULAx xyzw + MADDw xyz) aren't supported.
+		bool xyzw_chain = isFullMask(uregs_data[i + 0]) && isFullMask(uregs_data[i + 1])
+		               && isFullMask(uregs_data[i + 2]) && isFullMask(uregs_data[i + 3]);
+		bool xyz_chain  = isXyzMask(uregs_data[i + 0]) && isXyzMask(uregs_data[i + 1])
+		               && isXyzMask(uregs_data[i + 2]) && isXyzMask(uregs_data[i + 3]);
+		if (!xyzw_chain && !xyz_chain) continue;
 
 		// I-bit on any cluster pair would mean lower is immediate, not
 		// an opcode — disrupts our "the lower runs normally per pair"
@@ -1376,14 +1392,80 @@ void mvu1AnalyzeBlock(
 		if (fd3 == 0) continue;
 
 		// All gates passed — mark the cluster.
-		ir.info[i + 0].mac_cluster_lead   = true;
-		ir.info[i + 1].mac_cluster_member = true;
-		ir.info[i + 2].mac_cluster_member = true;
-		ir.info[i + 3].mac_cluster_member = true;
+		ir.info[i + 0].mac_cluster_lead     = true;
+		ir.info[i + 0].mac_cluster_xyz_only = xyz_chain;
+		ir.info[i + 1].mac_cluster_member   = true;
+		ir.info[i + 2].mac_cluster_member   = true;
+		ir.info[i + 3].mac_cluster_member   = true;
 
 		// Advance past the cluster so we don't overlap (e.g., the MADDw
 		// can't be the lead of a new cluster — it's a follower).
 		i += 3;
+	}
+
+	// FMAC opt #20: OPMULA + OPMSUB cross-product cluster.
+	// 2-pair pattern: OPMULA(a, b) → ACC.xyz, then OPMSUB(b, a) → VFd.xyz.
+	// The operand-swap on OPMSUB makes the combined effect a standard 3D
+	// cross product `a × b`. Lead emit produces both writes from one
+	// load of (a, b); member no-ops.
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		ir.info[i].opmac_cluster_lead   = false;
+		ir.info[i].opmac_cluster_member = false;
+	}
+
+	for (u32 i = 0; fusionsOn && i + 1 < numPairs; i++)
+	{
+		const u32 u0 = ir.info[i + 0].upper;
+		const u32 u1 = ir.info[i + 1].upper;
+
+		// OPMULA: op6=0x3E, fd field = 0x0B (FD_10 subtable's OPMULA slot).
+		// OPMSUB: top-level op6 = 0x2E.
+		const u32 op6_0 = u0 & 0x3Fu;
+		const u32 fd_0  = (u0 >> 6) & 0x1Fu;
+		const u32 op6_1 = u1 & 0x3Fu;
+		if (op6_0 != 0x3Eu || fd_0 != 0x0Bu) continue; // not OPMULA
+		if (op6_1 != 0x2Eu) continue;                   // not OPMSUB
+
+		// I-bit guard.
+		if (ir.info[i + 0].iBit || ir.info[i + 1].iBit) continue;
+
+		// Operand swap convention: OPMSUB's (fs, ft) == OPMULA's (ft, fs).
+		// Without the swap, the math isn't a clean cross product and the
+		// existing per-pair codegen is correct — skip fusion.
+		const u32 fs0 = (u0 >> 11) & 0x1Fu;
+		const u32 ft0 = (u0 >> 16) & 0x1Fu;
+		const u32 fs1 = (u1 >> 11) & 0x1Fu;
+		const u32 ft1 = (u1 >> 16) & 0x1Fu;
+		if (fs1 != ft0 || ft1 != fs0) continue;
+
+		// OPMSUB destination must not be VF[0].
+		const u32 fd1 = (u1 >> 6) & 0x1Fu;
+		if (fd1 == 0) continue;
+
+		// No VF/CLIP hazards on either pair.
+		bool hazard = false;
+		for (u32 k = 0; k < 2 && !hazard; k++)
+		{
+			const microOp& mo = ir.info[i + k];
+			if (mo.vf_read_after_write || mo.vf_write_collision)   hazard = true;
+			if (mo.clip_read_after_write || mo.clip_write_collision) hazard = true;
+		}
+		if (hazard) continue;
+
+		// No flag-reader lower on either pair (FCAND/FMAND in between
+		// would observe the OPMULA's partial ACC value).
+		if (ir.info[i + 0].isFlagRead || ir.info[i + 1].isFlagRead) continue;
+
+		// Don't fuse if either pair was already part of a MAC chain
+		// (lead or member). This shouldn't happen given the opcode
+		// patterns are disjoint, but be defensive against future changes.
+		if (ir.info[i + 0].mac_cluster_lead || ir.info[i + 0].mac_cluster_member) continue;
+		if (ir.info[i + 1].mac_cluster_lead || ir.info[i + 1].mac_cluster_member) continue;
+
+		ir.info[i + 0].opmac_cluster_lead   = true;
+		ir.info[i + 1].opmac_cluster_member = true;
+		i += 1; // skip past the follower
 	}
 
 	// ABS-of-known-positive elimination (FMAC opt #4). Forward-walk the
@@ -1490,12 +1572,18 @@ void emitVU1Lower(u32 lower);
 extern bool g_vu1NeedsFlags;
 extern bool g_vu1MacClusterLead;
 extern bool g_vu1MacClusterMember;
+extern bool g_vu1MacClusterXyzOnly;
 extern u32  g_vu1MacClusterFt;
 extern u32  g_vu1MacClusterFs0;
 extern u32  g_vu1MacClusterFs1;
 extern u32  g_vu1MacClusterFs2;
 extern u32  g_vu1MacClusterFs3;
 extern u32  g_vu1MacClusterFd;
+extern bool g_vu1OpmacClusterLead;
+extern bool g_vu1OpmacClusterMember;
+extern u32  g_vu1OpmacClusterFs;
+extern u32  g_vu1OpmacClusterFt;
+extern u32  g_vu1OpmacClusterFd;
 extern u32 g_vu1CurrentPC;
 // analyzeBranchVI gate (audit item #12) — set per-pair from
 // ir.info[i].needs_vi_backup before the lower emit. When false, the
@@ -3075,22 +3163,23 @@ void vfCacheStore(int vfreg, const a64::VRegister& src_reg, u8 xyzw_mask)
 	}
 
 #ifdef VU1_DEFER_VF_WRITES
-	// Phase 2: deferred writes. Mark the just-written lanes as dirty;
-	// memory Str is emitted at the next flush site (LRU eviction in
-	// vfCacheAllocSlot, BL via vfCacheFlushAndInvalidate, inline-bypass
-	// via vfCacheFlushOne, block end). Saves 1 Str per FMAC pair when a
-	// subsequent op in the same block re-reads or re-writes the same VF.
-	//
-	// Run with VU1_SHADOW_VERIFY enabled to catch missed flush sites —
-	// any path that reads VF memory directly without going through the
-	// cache will surface as a per-pair divergence (likely VF[N] mismatch).
+	// Compile-time forced-on path (for the shadow-verify investigation
+	// harness). Always defer.
 	s_vfCache[slot].dirty_lanes |= xyzw_mask;
 #else
-	// Phase 2.5: write through to memory immediately. Pass xyzw_mask, not
-	// any accumulated dirty_lanes — only the just-modified lanes need to
-	// hit memory; force-load already wrote unmodified lanes back to
-	// matching memory values. dirty_lanes stays 0.
-	vfCacheEmitPartialLaneStore(slot, vfreg, xyzw_mask);
+	// Runtime EmuCore/Speedhacks/vuDeferredWrites bit. When true, defer
+	// the per-pair Str via the dirty-lanes mechanism — flush sites
+	// (vfCacheFlushAndInvalidate / vfCacheFlushOne / block end / LRU
+	// eviction) commit the deferred writes. Saves 1 Str per FMAC pair on
+	// transform-heavy blocks. Known to break SH2 graphics and other
+	// games with cross-pair memory coherence assumptions. Default OFF.
+	//
+	// When false: write through to memory immediately. dirty_lanes stays
+	// 0, so the flush sites naturally no-op. Original Phase 2.5 path.
+	if (EmuConfig.Speedhacks.vuDeferredWrites)
+		s_vfCache[slot].dirty_lanes |= xyzw_mask;
+	else
+		vfCacheEmitPartialLaneStore(slot, vfreg, xyzw_mask);
 #endif
 	s_vfCache[slot].last_use = ++s_vfCacheClock;
 }
@@ -6018,20 +6107,31 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// fall through to call_helper
 
 			armAsm->Bind(&call_helper);
-			// 2026-05-17 REVERTED: emitVu1CallNeonFree + inline FMAC drain
-			// were breaking Futurama main menu. The NEON-clobber assumption
-			// (helper is scalar-only per objdump → VF cache slots survive
-			// the BL) held in our Debug build but tripped Futurama
-			// somewhere — possibly a Release-build vectorization, a
-			// libc-pulled NEON helper for u64 math, or a cache-state
-			// interaction not yet pinned down. Back to safe emitVu1Call
-			// (full vfCacheFlushAndInvalidate + viCacheInvalidateAll)
-			// until the assumption is verified the right way.
-			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
-			armAsm->Mov(x2, VU1_CYCLE_REG);
-			armAsm->Mov(x0, VU1_BASE_REG);
-			emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
-			armAsm->Mov(VU1_FMACCOUNT_REG, w0);
+			// EmuCore/Speedhacks/vuSkipStallSim — aggressive runtime gate
+			// that elides the BL entirely. Memory profiling showed this
+			// helper at 19-32% of total CPU on Futurama / GoW2 / Ape
+			// Escape 3 — skipping it is the single largest VU1 perf
+			// lever available, but breaks any game that relies on
+			// accurate FMAC / FDIV / EFU / IALU pipeline-stall timing
+			// (visible as glitched models, missing geometry, audio
+			// crackle on VU-driven pipelines). The skip_helper label
+			// below jumps past the post-BL fmaccount writeback, which is
+			// correct here since the helper would have updated
+			// VU1_FMACCOUNT_REG via w0 — but with the BL skipped, the
+			// register is left intact across the (skipped) helper.
+			if (!EmuConfig.Speedhacks.vuSkipStallSim)
+			{
+				// 2026-05-17 REVERTED: emitVu1CallNeonFree + inline FMAC
+				// drain were breaking Futurama main menu. Back to safe
+				// emitVu1Call (full vfCacheFlushAndInvalidate +
+				// viCacheInvalidateAll) until the NEON-clobber
+				// assumption is verified the right way.
+				armAsm->Mov(w1, VU1_FMACCOUNT_REG);
+				armAsm->Mov(x2, VU1_CYCLE_REG);
+				armAsm->Mov(x0, VU1_BASE_REG);
+				emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
+				armAsm->Mov(VU1_FMACCOUNT_REG, w0);
+			}
 
 			armAsm->Bind(&skip_helper);
 			VU1_PERF_END(_pp_s6, "VU1_TestPipes_0x%04x", pc);
@@ -6120,14 +6220,20 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// ACC before pair K+1 ran, but fusion writes the final ACC only
 		// after K+3. Force-disable under shadow so per-pair commits stay
 		// in sync with interp.
-		g_vu1MacClusterLead   = false;
-		g_vu1MacClusterMember = false;
-		g_vu1MacClusterFt     = 0;
-		g_vu1MacClusterFs0    = 0;
-		g_vu1MacClusterFs1    = 0;
-		g_vu1MacClusterFs2    = 0;
-		g_vu1MacClusterFs3    = 0;
-		g_vu1MacClusterFd     = 0;
+		g_vu1MacClusterLead    = false;
+		g_vu1MacClusterMember  = false;
+		g_vu1MacClusterXyzOnly = false;
+		g_vu1MacClusterFt      = 0;
+		g_vu1MacClusterFs0     = 0;
+		g_vu1MacClusterFs1     = 0;
+		g_vu1MacClusterFs2     = 0;
+		g_vu1MacClusterFs3     = 0;
+		g_vu1MacClusterFd      = 0;
+		g_vu1OpmacClusterLead   = false;
+		g_vu1OpmacClusterMember = false;
+		g_vu1OpmacClusterFs     = 0;
+		g_vu1OpmacClusterFt     = 0;
+		g_vu1OpmacClusterFd     = 0;
 #else
 		// Downgrade gate: the fused emit path doesn't compute per-pair MAC
 		// flags. If any pair in the cluster needs flags (Pass 1's
@@ -6148,9 +6254,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			}
 		}
 
-		g_vu1MacClusterLead   = ir.info[i].mac_cluster_lead;   // re-read (may have just been downgraded)
-		g_vu1MacClusterMember = ir.info[i].mac_cluster_member; // (downgraded by an earlier iteration's lead check)
-		g_vu1MacClusterFt     = (ir_op.upper >> 16) & 0x1Fu;
+		g_vu1MacClusterLead    = ir.info[i].mac_cluster_lead;   // re-read (may have just been downgraded)
+		g_vu1MacClusterMember  = ir.info[i].mac_cluster_member; // (downgraded by an earlier iteration's lead check)
+		g_vu1MacClusterXyzOnly = ir.info[i].mac_cluster_xyz_only;
+		g_vu1MacClusterFt      = (ir_op.upper >> 16) & 0x1Fu;
 		if (g_vu1MacClusterLead && i + 3 < numPairs)
 		{
 			// Read the follower pairs' upper words from the IR so the
@@ -6173,6 +6280,33 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			g_vu1MacClusterFs2 = 0;
 			g_vu1MacClusterFs3 = 0;
 			g_vu1MacClusterFd  = 0;
+		}
+
+		// FMAC opt #20: OPMULA + OPMSUB cluster downgrade gate (same idea
+		// as the MAC chain: any cluster pair needing flags forces back to
+		// per-pair). Only 2 pairs to check here.
+		if (ir.info[i].opmac_cluster_lead && i + 1 < numPairs)
+		{
+			if (pair_needs_flags[i] || pair_needs_flags[i + 1])
+			{
+				ir.info[i + 0].opmac_cluster_lead   = false;
+				ir.info[i + 1].opmac_cluster_member = false;
+			}
+		}
+		g_vu1OpmacClusterLead   = ir.info[i].opmac_cluster_lead;
+		g_vu1OpmacClusterMember = ir.info[i].opmac_cluster_member;
+		if (g_vu1OpmacClusterLead && i + 1 < numPairs)
+		{
+			const u32 u1 = ir.info[i + 1].upper;
+			g_vu1OpmacClusterFs = (ir_op.upper >> 11) & 0x1Fu; // OPMULA fs (= a)
+			g_vu1OpmacClusterFt = (ir_op.upper >> 16) & 0x1Fu; // OPMULA ft (= b)
+			g_vu1OpmacClusterFd = (u1          >>  6) & 0x1Fu; // OPMSUB fd
+		}
+		else
+		{
+			g_vu1OpmacClusterFs = 0;
+			g_vu1OpmacClusterFt = 0;
+			g_vu1OpmacClusterFd = 0;
 		}
 #endif
 

@@ -9,30 +9,28 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import com.armsx2.Main
-import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
+import com.armsx2.ui.InGameOverlay
 import kr.co.iefriends.pcsx2.NativeApp
 
 /**
  * Renderer section of the in-game settings overlay.
  *
- * Most fields write into [Settings] via [ConfigStore]. Upscale is the
- * one outlier — it has its own dedicated `Main.upscale` state that's
+ * Most fields write into [Settings] via [InGameOverlay.saveSettings],
+ * which honors the overlay's scope toggle (Global / Game). Upscale is
+ * the one outlier — it has its own dedicated `Main.upscale` state that's
  * also consumed by `Main.applyRendererPrefs` and the setup wizard, so
  * the slider mutates that state directly + calls
  * `NativeApp.renderUpscalemultiplier` for live-apply, mirroring the
- * existing toolbar behavior.
+ * existing toolbar behavior. (Upscale therefore stays global-only for
+ * now; the rest of this tab is per-game-aware.)
  */
 @Composable
 fun RendererTab(state: MutableState<Settings>) {
     val s = state.value
     val scroll = remember { ScrollState(0) }
 
-    fun apply(updated: Settings) {
-        state.value = updated
-        ConfigStore.saveGlobal(updated)
-        updated.applyTo()
-    }
+    fun apply(updated: Settings) = InGameOverlay.saveSettings(updated)
 
     Column(
         modifier = Modifier

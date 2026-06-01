@@ -15,8 +15,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
-import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
+import com.armsx2.ui.InGameOverlay
 
 /**
  * Recompiler section of the in-game settings overlay.
@@ -35,11 +35,7 @@ fun RecompilerTab(state: MutableState<Settings>) {
     val s = state.value
     val scroll = remember { ScrollState(0) }
 
-    fun apply(updated: Settings) {
-        state.value = updated
-        ConfigStore.saveGlobal(updated)
-        updated.applyTo()
-    }
+    fun apply(updated: Settings) = InGameOverlay.saveSettings(updated)
 
     Column(
         modifier = Modifier

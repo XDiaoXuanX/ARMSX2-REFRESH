@@ -21,6 +21,19 @@ import org.json.JSONObject
  * reads happen at game launch (once per launch). Both well within
  * SharedPreferences' overhead.
  */
+/**
+ * Where overlay setting changes land. The overlay header picks one at
+ * runtime via a switch; default is [Game] when a game is loaded,
+ * [Global] otherwise.
+ *
+ *   - [Global] writes the full Settings to `config.global`. Affects every
+ *     future game launch that doesn't have its own per-game override.
+ *   - [Game] writes the SPARSE diff (only fields differing from current
+ *     global) to `config.game.<serial>`. Global stays untouched; only
+ *     this title sees the change.
+ */
+enum class SettingsScope { Global, Game }
+
 object ConfigStore {
     private const val KEY_GLOBAL = "config.global"
     private fun keyForGame(serial: String) = "config.game.$serial"
@@ -68,5 +81,24 @@ object ConfigStore {
         if (serial == null) return global
         val overrides = loadOverrides(serial) ?: return global
         return Settings.merge(global, overrides)
+    }
+
+    /**
+     * Single entry point for overlay tabs to persist a settings change.
+     * Scope picks the storage tier; serial may be null (Global is the
+     * only valid scope in that case).
+     *
+     * Game scope writes the sparse diff vs current global, so a later
+     * global tweak still propagates to the field unless the user
+     * explicitly overrode it for this title.
+     */
+    fun save(scope: SettingsScope, serial: String?, updated: Settings) {
+        if (scope == SettingsScope.Game && serial != null) {
+            val global = loadGlobal()
+            val diff = Settings.diff(global, updated)
+            saveOverrides(serial, diff)
+        } else {
+            saveGlobal(updated)
+        }
     }
 }

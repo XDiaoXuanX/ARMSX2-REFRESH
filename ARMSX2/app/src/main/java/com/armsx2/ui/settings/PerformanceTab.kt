@@ -12,16 +12,18 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
+import com.armsx2.ui.InGameOverlay
 
 /**
  * Performance section of the in-game settings overlay.
  *
- * Mutates the global [Settings] in [ConfigStore] on every change and
- * applies via [Settings.applyTo] — toggles take effect immediately on a
- * running VM. Every visible setting maps 1-1 onto an EmuCore key (see
- * Settings field comments for the exact `<section>/<key>`).
+ * Mutates the live [Settings] state and routes the write through
+ * [InGameOverlay.saveSettings], which picks the global or per-game
+ * storage tier based on the overlay's current scope. Applies via
+ * [Settings.applyTo] so toggles take effect immediately on a running
+ * VM. Every visible setting maps 1-1 onto an EmuCore key (see Settings
+ * field comments for the exact `<section>/<key>`).
  *
  * Column + verticalScroll instead of LazyColumn so the tab can sit
  * inside the wrap-content RootTabs container without needing a hard
@@ -32,11 +34,7 @@ fun PerformanceTab(state: MutableState<Settings>) {
     val s = state.value
     val scroll = remember { ScrollState(0) }
 
-    fun apply(updated: Settings) {
-        state.value = updated
-        ConfigStore.saveGlobal(updated)
-        updated.applyTo()
-    }
+    fun apply(updated: Settings) = InGameOverlay.saveSettings(updated)
 
     Column(
         modifier = Modifier
@@ -101,6 +99,41 @@ fun PerformanceTab(state: MutableState<Settings>) {
                 ToggleBubble("Frame Limiter", s.frameLimitEnable, modifier = Modifier.weight(1f)) {
                     apply(s.copy(frameLimitEnable = it))
                 }
+                // ARMSX2 perf-knob: A/B disable for the arm64 VU1 JIT
+                // NEON peephole fusions. Default on; flip off to confirm
+                // whether a per-game regression traces back to our
+                // matrix-transform / cross-product fusion peepholes.
+                // Block recompilation is not invalidated on toggle —
+                // already-compiled blocks keep their fused path; new
+                // blocks pick up the new gate. Restart the game for a
+                // clean A/B (or hit the recompiler tab to flip a CPU off
+                // then on, which forces a cache rebuild).
+                ToggleBubble("VU NEON Fusions", s.vuNeonFusions, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(vuNeonFusions = it))
+                }
+            }
+            // Heavy / aggressive perf levers — off by default, may break
+            // some games. Effective on next block recompile; for a clean
+            // A/B, restart the game (or bounce a CPU recompiler toggle
+            // off→on to force a JIT cache rebuild).
+            //
+            //   Skip VU Stall Sim — drops the vu1_TestPipes_VU1 BL
+            //     entirely. Was 19-32% of total CPU on Futurama / GoW2 /
+            //     Ape Escape 3. Breaks games that depend on accurate
+            //     FMAC / FDIV / EFU / IALU pipeline-stall timing
+            //     (glitched models, missing geometry, audio crackle).
+            //   Defer VU Writes — VF stores held in the NEON cache,
+            //     committed at flush sites. Saves 1 Str per FMAC pair on
+            //     transforms. Known to break SH2 graphics (cross-pair
+            //     coherence) and similar.
+            BubbleGridRow {
+                ToggleBubble("Skip VU Stall Sim", s.vuSkipStallSim, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(vuSkipStallSim = it))
+                }
+                ToggleBubble("Defer VU Writes", s.vuDeferredWrites, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(vuDeferredWrites = it))
+                }
+                Spacer(Modifier.weight(1f))
                 Spacer(Modifier.weight(1f))
             }
         }

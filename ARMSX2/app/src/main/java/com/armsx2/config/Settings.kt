@@ -37,6 +37,22 @@ data class Settings(
     val intcStat: Boolean = true,
     /** EmuCore/Speedhacks/WaitLoop — detect EE wait loops. */
     val waitLoop: Boolean = true,
+    /** EmuCore/Speedhacks/vuNeonFusions — ARMSX2-only. Gates the arm64
+     *  VU1 JIT NEON peephole fusions (MAC cluster
+     *  MULAx+MADDAy+MADDAz+MADDw, OPMULA+OPMSUB cross-product). Default
+     *  on — toggle off to A/B whether one of those JIT fusions is
+     *  responsible for a per-game regression. */
+    val vuNeonFusions: Boolean = true,
+    /** EmuCore/Speedhacks/vuDeferredWrites — EXPERIMENTAL. Defers
+     *  per-pair VF stores via the NEON cache; flush sites commit later.
+     *  Big perf win on transform-heavy code. Known to break SH2 graphics
+     *  and other games with cross-pair memory coherence assumptions. */
+    val vuDeferredWrites: Boolean = false,
+    /** EmuCore/Speedhacks/vuSkipStallSim — AGGRESSIVE. Skips the
+     *  vu1_TestPipes_VU1 BL in the JIT — was 19-32% of total CPU on
+     *  Futurama/GoW2/Ape Escape 3 per profiling. Breaks any game that
+     *  relies on accurate FMAC/FDIV/EFU/IALU pipeline-stall timing. */
+    val vuSkipStallSim: Boolean = false,
 
     // ---- EmuCore/GS — frame limiter ----
     /** EmuCore/GS/FrameLimitEnable. */
@@ -95,6 +111,9 @@ data class Settings(
         NativeApp.setSetting("EmuCore/Speedhacks", "fastCDVD", "bool", fastCDVD.toString())
         NativeApp.setSetting("EmuCore/Speedhacks", "IntcStat", "bool", intcStat.toString())
         NativeApp.setSetting("EmuCore/Speedhacks", "WaitLoop", "bool", waitLoop.toString())
+        NativeApp.setSetting("EmuCore/Speedhacks", "vuNeonFusions", "bool", vuNeonFusions.toString())
+        NativeApp.setSetting("EmuCore/Speedhacks", "vuDeferredWrites", "bool", vuDeferredWrites.toString())
+        NativeApp.setSetting("EmuCore/Speedhacks", "vuSkipStallSim", "bool", vuSkipStallSim.toString())
         // GS frame limit. The setting key is persisted (read by runVMThread
         // after Initialize so cold starts honor the preference) AND the live
         // limiter mode is poked via speedhackLimitermode so toggling in-game
@@ -139,6 +158,9 @@ data class Settings(
         put("fastCDVD", fastCDVD)
         put("intcStat", intcStat)
         put("waitLoop", waitLoop)
+        put("vuNeonFusions", vuNeonFusions)
+        put("vuDeferredWrites", vuDeferredWrites)
+        put("vuSkipStallSim", vuSkipStallSim)
         put("frameLimitEnable", frameLimitEnable)
         put("recEE", recEE)
         put("recIOP", recIOP)
@@ -170,6 +192,9 @@ data class Settings(
                 fastCDVD = json.optBoolean("fastCDVD", def.fastCDVD),
                 intcStat = json.optBoolean("intcStat", def.intcStat),
                 waitLoop = json.optBoolean("waitLoop", def.waitLoop),
+                vuNeonFusions = json.optBoolean("vuNeonFusions", def.vuNeonFusions),
+                vuDeferredWrites = json.optBoolean("vuDeferredWrites", def.vuDeferredWrites),
+                vuSkipStallSim = json.optBoolean("vuSkipStallSim", def.vuSkipStallSim),
                 frameLimitEnable = json.optBoolean("frameLimitEnable", def.frameLimitEnable),
                 recEE = json.optBoolean("recEE", def.recEE),
                 recIOP = json.optBoolean("recIOP", def.recIOP),
@@ -189,6 +214,45 @@ data class Settings(
         }
 
         /** Treat any field present in [overrides] as a delta over [base]. */
+        /**
+         * Compute the sparse override JSON between two Settings: returns
+         * only fields where `current` differs from `base`. Used by the
+         * overlay's per-game save path so we only persist what the user
+         * actually changed for this title — global tweaks still flow
+         * through fields the user hasn't touched. Mirrors the field set
+         * of [merge] above (must stay in sync).
+         */
+        fun diff(base: Settings, current: Settings): JSONObject {
+            val j = JSONObject()
+            if (current.eeCycleRate         != base.eeCycleRate)         j.put("eeCycleRate", current.eeCycleRate)
+            if (current.eeCycleSkip         != base.eeCycleSkip)         j.put("eeCycleSkip", current.eeCycleSkip)
+            if (current.mtvu                != base.mtvu)                j.put("mtvu", current.mtvu)
+            if (current.vu1Instant          != base.vu1Instant)          j.put("vu1Instant", current.vu1Instant)
+            if (current.vuFlagHack          != base.vuFlagHack)          j.put("vuFlagHack", current.vuFlagHack)
+            if (current.fastCDVD            != base.fastCDVD)            j.put("fastCDVD", current.fastCDVD)
+            if (current.intcStat            != base.intcStat)            j.put("intcStat", current.intcStat)
+            if (current.waitLoop            != base.waitLoop)            j.put("waitLoop", current.waitLoop)
+            if (current.vuNeonFusions       != base.vuNeonFusions)       j.put("vuNeonFusions", current.vuNeonFusions)
+            if (current.vuDeferredWrites    != base.vuDeferredWrites)    j.put("vuDeferredWrites", current.vuDeferredWrites)
+            if (current.vuSkipStallSim      != base.vuSkipStallSim)      j.put("vuSkipStallSim", current.vuSkipStallSim)
+            if (current.frameLimitEnable    != base.frameLimitEnable)    j.put("frameLimitEnable", current.frameLimitEnable)
+            if (current.recEE               != base.recEE)               j.put("recEE", current.recEE)
+            if (current.recIOP              != base.recIOP)              j.put("recIOP", current.recIOP)
+            if (current.recVU0              != base.recVU0)              j.put("recVU0", current.recVU0)
+            if (current.recVU1              != base.recVU1)              j.put("recVU1", current.recVU1)
+            if (current.enableFastmem       != base.enableFastmem)       j.put("enableFastmem", current.enableFastmem)
+            if (current.hwMipmap            != base.hwMipmap)            j.put("hwMipmap", current.hwMipmap)
+            if (current.accurateBlendingUnit!= base.accurateBlendingUnit)j.put("accurateBlendingUnit", current.accurateBlendingUnit)
+            if (current.textureFiltering    != base.textureFiltering)    j.put("textureFiltering", current.textureFiltering)
+            if (current.texturePreloading   != base.texturePreloading)   j.put("texturePreloading", current.texturePreloading)
+            if (current.autoFlush           != base.autoFlush)           j.put("autoFlush", current.autoFlush)
+            if (current.halfPixelOffset     != base.halfPixelOffset)     j.put("halfPixelOffset", current.halfPixelOffset)
+            if (current.triFilter           != base.triFilter)           j.put("triFilter", current.triFilter)
+            if (current.maxAnisotropy       != base.maxAnisotropy)       j.put("maxAnisotropy", current.maxAnisotropy)
+            if (current.gpuProfile          != base.gpuProfile)          j.put("gpuProfile", current.gpuProfile)
+            return j
+        }
+
         fun merge(base: Settings, overrides: JSONObject): Settings = Settings(
             eeCycleRate = if (overrides.has("eeCycleRate")) overrides.getInt("eeCycleRate") else base.eeCycleRate,
             eeCycleSkip = if (overrides.has("eeCycleSkip")) overrides.getInt("eeCycleSkip") else base.eeCycleSkip,
@@ -198,6 +262,9 @@ data class Settings(
             fastCDVD = if (overrides.has("fastCDVD")) overrides.getBoolean("fastCDVD") else base.fastCDVD,
             intcStat = if (overrides.has("intcStat")) overrides.getBoolean("intcStat") else base.intcStat,
             waitLoop = if (overrides.has("waitLoop")) overrides.getBoolean("waitLoop") else base.waitLoop,
+            vuNeonFusions = if (overrides.has("vuNeonFusions")) overrides.getBoolean("vuNeonFusions") else base.vuNeonFusions,
+            vuDeferredWrites = if (overrides.has("vuDeferredWrites")) overrides.getBoolean("vuDeferredWrites") else base.vuDeferredWrites,
+            vuSkipStallSim = if (overrides.has("vuSkipStallSim")) overrides.getBoolean("vuSkipStallSim") else base.vuSkipStallSim,
             frameLimitEnable = if (overrides.has("frameLimitEnable")) overrides.getBoolean("frameLimitEnable") else base.frameLimitEnable,
             recEE = if (overrides.has("recEE")) overrides.getBoolean("recEE") else base.recEE,
             recIOP = if (overrides.has("recIOP")) overrides.getBoolean("recIOP") else base.recIOP,

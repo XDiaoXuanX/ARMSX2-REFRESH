@@ -150,14 +150,36 @@ struct alignas(16) microOp
 	//                       computed the result). cycle++/fmaccount still
 	//                       increment normally since each VU pair still
 	//                       consumes one cycle.
+	// mac_cluster_xyz_only — set on the LEAD when all 4 pairs use mask 0xE
+	//                       (xyz lanes only). The fused emit then preserves
+	//                       ACC.w around the chain (save-restore via lane
+	//                       Mov on a scratch reg) and writes VFd with the
+	//                       0xE mask instead of 0xF. When false the cluster
+	//                       is the full xyzw=0xF variant.
 	//
 	// Confirmation gates (all required, conservative): 4 consecutive
-	// pairs MULAx/MADDAy/MADDAz/MADDw; shared VF[ft]; xyzw=0xF on all
-	// four (full-vector ops); no flag dependence between cluster pairs;
-	// no VF/CLIP hazard with the lower; first three write ACC, fourth
-	// writes VFd. Anything else falls back to per-pair codegen.
+	// pairs MULAx/MADDAy/MADDAz/MADDw; shared VF[ft]; uniform xyzw across
+	// all four pairs (must all be 0xF OR all be 0xE — partial-lane chains
+	// other than these are uncommon and not supported yet); no flag
+	// dependence between cluster pairs; no VF/CLIP hazard with the lower;
+	// first three write ACC, fourth writes VFd. Anything else falls back
+	// to per-pair codegen.
 	bool mac_cluster_lead;
 	bool mac_cluster_member;
+	bool mac_cluster_xyz_only;
+
+	// FMAC opt #20: OPMULA + OPMSUB 2-pair cross-product cluster.
+	// OPMULA ACC.xyz = (a.y*b.z, a.z*b.x, a.x*b.y)
+	// OPMSUB VFd.xyz = ACC.xyz - (b.y*a.z, b.z*a.x, b.x*a.y)
+	//                 = a × b   (standard 3D cross product with operand-swap)
+	//
+	// Detection requires: OPMULA at i, OPMSUB at i+1, OPMSUB's (fs, ft) is
+	// OPMULA's (ft, fs) swap, no hazard pairs, OPMSUB fd != 0.
+	//
+	// Lead pair (OPMULA) emits the fused cross product into ACC.xyz +
+	// VFd.xyz with the operand pair loaded once. Follower (OPMSUB) no-ops.
+	bool opmac_cluster_lead;
+	bool opmac_cluster_member;
 };
 
 // Block-level IR. Lives alongside the existing skip_info[] / pair_needs_flags[]

@@ -76,6 +76,7 @@ import com.armsx2.Main
 import com.armsx2.R
 import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
+import com.armsx2.config.SettingsScope
 import com.armsx2.ui.settings.PerformanceTab
 import com.armsx2.ui.settings.RecompilerTab
 import com.armsx2.ui.settings.RendererTab
@@ -137,6 +138,21 @@ object InGameOverlay {
     // Hydrated from ConfigStore on every overlay open so we pick up any
     // out-of-band edits (e.g. from a future global Settings screen).
     private val settingsState = mutableStateOf(Settings())
+
+    // Settings scope picked by the overlay header switch. Defaults to
+    // [Game] when a game is loaded on open; falls back to [Global] when
+    // no game serial is available. The settings tabs read this to decide
+    // which tier to persist a change to (see ConfigStore.save). Held on
+    // the overlay singleton so it survives tab switches but resets on
+    // each open (the default-from-serial pass runs in open()).
+    val settingsScope = mutableStateOf(SettingsScope.Global)
+
+    // Serial of the currently-loaded game (null when on BIOS / disc swap
+    // limbo). Resolved on overlay open via the cached Main.currentGame
+    // first, falling back to NativeApp.getPauseGameSerial — same chain
+    // GameInfoHeader uses. The scope toggle's "Game" option is gated on
+    // this being non-null.
+    val currentSerial = mutableStateOf<String?>(null)
 
     // Polled from NativeApp.isHardcoreMode while the overlay is open. Drives
     // the Save/Load state row dimming and the AchievementsPanel button
@@ -211,6 +227,22 @@ object InGameOverlay {
             ?: ""
     }
 
+    /**
+     * Single entry point for the Performance / Renderer / Recompiler tabs
+     * to persist a settings change. Routes through ConfigStore.save which
+     * picks the global or per-game tier based on the overlay's current
+     * scope, then pushes the merged effective settings to native.
+     *
+     * The Settings object held in [settingsState] is already the
+     * effective (global ∘ overrides) view, so applying it directly to
+     * native is correct regardless of where the persisted bytes landed.
+     */
+    fun saveSettings(updated: Settings) {
+        settingsState.value = updated
+        ConfigStore.save(settingsScope.value, currentSerial.value, updated)
+        updated.applyTo()
+    }
+
     /** Open the overlay. Pauses the VM. Safe to call when already open. */
     fun open() {
         if (WindowImpl.overlayVisible.value) return
@@ -218,8 +250,22 @@ object InGameOverlay {
         if (pausedByOverlay) Main.pause()
         state.value = State.Root
         currentTab.value = Tab.PlayingNow
-        // Re-hydrate settings from disk in case anything edited out-of-band.
-        settingsState.value = ConfigStore.loadGlobal()
+        // Resolve the current game's serial first; scope and settings
+        // hydration both depend on it. Mirrors GameInfoHeader's chain —
+        // cached GameInfo (carries through file picker paths that lack a
+        // native serial), then NativeApp.getPauseGameSerial. Empty
+        // string from native means "no disc loaded" → fall back to
+        // global scope/settings.
+        val serial = Main.currentGame.value?.serial
+            ?: runCatching { NativeApp.getPauseGameSerial() }.getOrNull()
+                ?.takeIf { it.isNotEmpty() }
+        currentSerial.value = serial
+        settingsScope.value =
+            if (serial != null) SettingsScope.Game else SettingsScope.Global
+        // Re-hydrate the live Settings state from disk. When a game is
+        // loaded we want to see the EFFECTIVE settings (global ∘ overrides)
+        // so the user edits the merged value; otherwise just the global.
+        settingsState.value = ConfigStore.resolveForGame(serial)
         // Sync pill state from native — covers emucore-driven swaps that
         // happened while the overlay was closed. Auto is sticky against
         // the sync (the user picked "let it decide", so we keep showing
@@ -302,6 +348,14 @@ object InGameOverlay {
                 if (state.value is State.Root) {
                     Spacer(Modifier.height(12.dp))
                     TabStrip()
+                    // The scope toggle only matters for settings tabs.
+                    // PlayingNow's actions (Resume / Save State / etc.)
+                    // are session controls, not persisted settings — no
+                    // notion of "global vs game" applies.
+                    if (currentTab.value != Tab.PlayingNow) {
+                        Spacer(Modifier.height(4.dp))
+                        ScopeToggle()
+                    }
                     Spacer(Modifier.height(6.dp))
                     // weight(1f) gives RootTabs the remaining vertical
                     // space, bounding Performance/Renderer's verticalScroll
@@ -504,17 +558,16 @@ object InGameOverlay {
 
     /** One-line rich-presence subtitle. Renders directly when the string
      *  fits within the available width; runs a back-and-forth ping-pong
-     *  marquee when it overflows. Holds 1s at each end so the user has
-     *  time to read both the start and the tail before the slide flips
-     *  direction. Linear scroll between holds so the motion reads as a
-     *  deliberate reveal rather than easing. */
+     *  marquee when it overflows. Holds at each end so the user has time
+     *  to read both the start and the tail before the slide flips
+     *  direction. Scrolls just far enough to align the right edge of the
+     *  text with the right edge of the container — never past, never
+     *  off-screen. */
     @Composable
     private fun MarqueeRichPresence(text: String) {
         // Measure the text's INTRINSIC width via TextMeasurer. onSizeChanged
         // on the rendered Text reports the constrained width (== container)
-        // when the parent caps it, which makes overflow detection a no-op
-        // and the marquee never starts. TextMeasurer gives us the actual
-        // size the text wants to be, regardless of layout pressure.
+        // when the parent caps it, which makes overflow detection a no-op.
         val style = remember {
             TextStyle(color = Color(0xFFBBBBBB), fontSize = 11.sp)
         }
@@ -523,15 +576,44 @@ object InGameOverlay {
             measurer.measure(text = text, style = style, softWrap = false, maxLines = 1).size.width
         }
         var containerWidth by remember(text) { mutableIntStateOf(0) }
-        val overflowPx = (intrinsicTextWidth - containerWidth).coerceAtLeast(0)
-        val needsMarquee = overflowPx > 0 && containerWidth > 0
 
-        // Ping-pong timing: 1s hold → scroll → 1s hold → scroll back.
-        // Scroll speed pinned at ~60 px/sec so a long string takes a
-        // perceptible amount of time without dragging.
-        val holdMs = 1000
-        val scrollMs = if (needsMarquee) (overflowPx * 1000 / 60).coerceAtLeast(800) else 0
-        val totalMs = (holdMs * 2 + scrollMs * 2).coerceAtLeast(1)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clipToBounds()
+                .onSizeChanged { containerWidth = it.width },
+        ) {
+            val overflowPx = intrinsicTextWidth - containerWidth
+            if (containerWidth <= 0 || overflowPx <= 0) {
+                // Fits, or container not yet measured — plain Text. Compose
+                // settles the layout in the next frame and recomposes us
+                // with a real containerWidth, at which point we either stay
+                // here (fits) or drop into the marquee branch below.
+                Text(
+                    text = text,
+                    style = style,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Visible,
+                )
+            } else {
+                // Marquee branch. Composables here only enter the slot
+                // table when overflowPx is real, so the keyframes can't
+                // capture a "containerWidth = 0" max-offset and stick.
+                MarqueeText(text = text, style = style, overflowPx = overflowPx)
+            }
+        }
+    }
+
+    @Composable
+    private fun MarqueeText(text: String, style: TextStyle, overflowPx: Int) {
+        // ~40 px/sec scroll. Brisk enough to feel responsive on long
+        // rich-presence strings without overrunning the reading pace.
+        // 1.5s hold at each end so eye has time to land before the slide
+        // resumes.
+        val holdMs = 1500
+        val scrollMs = (overflowPx * 1000 / 40).coerceAtLeast(1200)
+        val totalMs = holdMs * 2 + scrollMs * 2
         val maxOffset = overflowPx.toFloat()
 
         val transition = rememberInfiniteTransition(label = "rp-marquee")
@@ -552,25 +634,14 @@ object InGameOverlay {
             label = "rp-offset",
         )
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clipToBounds()
-                .onSizeChanged { containerWidth = it.width },
-        ) {
-            Text(
-                text = text,
-                color = Color(0xFFBBBBBB),
-                fontSize = 11.sp,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Visible,
-                modifier = Modifier
-                    .offset {
-                        IntOffset(if (needsMarquee) offsetPx.toInt() else 0, 0)
-                    },
-            )
-        }
+        Text(
+            text = text,
+            style = style,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Visible,
+            modifier = Modifier.offset { IntOffset(offsetPx.toInt(), 0) },
+        )
     }
 
     @Composable
@@ -701,6 +772,77 @@ object InGameOverlay {
                     )
                 }
             }
+        }
+    }
+
+    /** Tiny Global / Game pill that decides where settings tab edits
+     *  land. Game side is disabled (and the toggle locked to Global)
+     *  when there's no current serial — BIOS boots have nowhere to write
+     *  per-game overrides. Active half gets the PS2-blue accent so the
+     *  user can see at a glance what scope is "live". */
+    @Composable
+    private fun ScopeToggle() {
+        val serial = currentSerial.value
+        val gameEnabled = serial != null
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFF1A1A1A))
+                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(4.dp))
+                .height(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ScopeHalf(
+                label = "Global",
+                active = settingsScope.value == SettingsScope.Global,
+                enabled = true,
+                modifier = Modifier.weight(1f),
+            ) { settingsScope.value = SettingsScope.Global }
+            ScopeHalf(
+                label = if (serial != null) "Game · $serial" else "Game",
+                active = settingsScope.value == SettingsScope.Game,
+                enabled = gameEnabled,
+                modifier = Modifier.weight(1f),
+            ) {
+                if (gameEnabled) settingsScope.value = SettingsScope.Game
+            }
+        }
+    }
+
+    @Composable
+    private fun ScopeHalf(
+        label: String,
+        active: Boolean,
+        enabled: Boolean,
+        modifier: Modifier = Modifier,
+        onClick: () -> Unit,
+    ) {
+        val bg = when {
+            !enabled -> Color.Transparent
+            active   -> Colors.pasx2_blue.copy(alpha = 0.30f)
+            else     -> Color.Transparent
+        }
+        val fg = when {
+            !enabled -> Color(0xFF555555)
+            active   -> Color.White
+            else     -> Color(0xFF888888)
+        }
+        Box(
+            modifier = modifier
+                .fillMaxHeight()
+                .background(bg)
+                .clickable(enabled = enabled, onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                label,
+                color = fg,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 

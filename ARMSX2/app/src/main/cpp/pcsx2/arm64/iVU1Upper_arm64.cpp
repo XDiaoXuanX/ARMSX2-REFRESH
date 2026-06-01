@@ -116,14 +116,22 @@ bool g_vu1AbsSrcKnownNonNeg = false;
 //                           accounting in CompileBlock still increments.
 //   g_vu1MacClusterFt     — VF[ft] = the shared broadcast vector for the
 //                           chain. Lead emit uses this; followers ignore.
-bool g_vu1MacClusterLead   = false;
-bool g_vu1MacClusterMember = false;
-u32  g_vu1MacClusterFt     = 0; // shared broadcast vector
-u32  g_vu1MacClusterFs0    = 0; // MULAx fs  = matrix col 0
-u32  g_vu1MacClusterFs1    = 0; // MADDAy fs = matrix col 1
-u32  g_vu1MacClusterFs2    = 0; // MADDAz fs = matrix col 2
-u32  g_vu1MacClusterFs3    = 0; // MADDw fs  = matrix col 3
-u32  g_vu1MacClusterFd     = 0; // MADDw fd  = result destination (non-zero, gated by Pass 1)
+bool g_vu1MacClusterLead    = false;
+bool g_vu1MacClusterMember  = false;
+bool g_vu1MacClusterXyzOnly = false; // true when all 4 pairs use mask 0xE (preserve W)
+u32  g_vu1MacClusterFt      = 0;     // shared broadcast vector
+u32  g_vu1MacClusterFs0     = 0;     // MULAx fs  = matrix col 0
+u32  g_vu1MacClusterFs1     = 0;     // MADDAy fs = matrix col 1
+u32  g_vu1MacClusterFs2     = 0;     // MADDAz fs = matrix col 2
+u32  g_vu1MacClusterFs3     = 0;     // MADDw fs  = matrix col 3
+u32  g_vu1MacClusterFd      = 0;     // MADDw fd  = result destination (non-zero, gated by Pass 1)
+
+// FMAC opt #20: OPMULA + OPMSUB cross-product cluster.
+bool g_vu1OpmacClusterLead   = false;
+bool g_vu1OpmacClusterMember = false;
+u32  g_vu1OpmacClusterFs     = 0; // OPMULA fs (= a in cross(a, b))
+u32  g_vu1OpmacClusterFt     = 0; // OPMULA ft (= b in cross(a, b))
+u32  g_vu1OpmacClusterFd     = 0; // OPMSUB fd (cross product destination)
 
 // ============================================================================
 //  Deferred VF writeback for vf_read_after_write hazard pairs.
@@ -2277,6 +2285,7 @@ void recVU1_MULAx() {
 		//   v0..v3 = matrix cols VF[fs0..fs3]
 		//   v4     = broadcast vector VF[ft]
 		//   v5     = scratch (intermediate per-pair product)
+		//   v6.S[0] = saved ACC.w (xyz-only variant; preserves W lane)
 		//   v16    = pinned VU1_ACC_REG (final ACC after MADDAz)
 		//
 		// Semantics preserved (vs per-pair):
@@ -2288,12 +2297,16 @@ void recVU1_MULAx() {
 		//     pairs; per-pair Mov-from/to-ACC dance is collapsed.
 		//   * MADDw semantics: VF[fd] = ACC + col3*vec.w; ACC keeps
 		//     the value from MADDAz (NOT updated by MADDw).
+		//   * xyz-only variant (mask 0xE): preserve ACC.w by saving to
+		//     v6.S[0] before chain + restoring before MADDw; final
+		//     writeback uses cache mask 0xE so VFd.w is untouched.
 		const u32 fs0 = g_vu1MacClusterFs0;
 		const u32 fs1 = g_vu1MacClusterFs1;
 		const u32 fs2 = g_vu1MacClusterFs2;
 		const u32 fs3 = g_vu1MacClusterFs3;
 		const u32 ft  = g_vu1MacClusterFt;
 		const u32 fd  = g_vu1MacClusterFd;
+		const bool xyz_only = g_vu1MacClusterXyzOnly;
 
 		// Step 1: load the four matrix columns and the broadcast vector
 		// from the VF cache. vfCacheLoadInto hits the slot directly if
@@ -2303,6 +2316,11 @@ void recVU1_MULAx() {
 		vfCacheLoadInto(static_cast<int>(fs2), v2);
 		vfCacheLoadInto(static_cast<int>(fs3), v3);
 		vfCacheLoadInto(static_cast<int>(ft),  v4);
+
+		// xyz-only chain: save VU1_ACC_REG.w into v6.S[0] so we can
+		// restore it after the FMUL chain (which writes all 4 lanes).
+		if (xyz_only)
+			armAsm->Mov(v6.V4S(), 3, VU1_ACC_REG.V4S(), 3);
 
 		// Step 2: MULAx → ACC = col0 * vec.x  (writes pinned VU1_ACC_REG).
 		armAsm->Fmul(VU1_ACC_REG.V4S(), v0.V4S(), v4.S(), 0);
@@ -2315,14 +2333,20 @@ void recVU1_MULAx() {
 		armAsm->Fmul(v5.V4S(), v2.V4S(), v4.S(), 2);
 		armAsm->Fadd(VU1_ACC_REG.V4S(), VU1_ACC_REG.V4S(), v5.V4S());
 
+		// xyz-only: restore ACC.w from saved scratch so MADDw and any
+		// downstream consumer sees the original VU1_ACC_REG.w.
+		if (xyz_only)
+			armAsm->Mov(VU1_ACC_REG.V4S(), 3, v6.V4S(), 3);
+
 		// Step 5: MADDw → VFd = ACC + col3 * vec.w. ACC unchanged.
 		armAsm->Fmul(v5.V4S(), v3.V4S(), v4.S(), 3);
 		armAsm->Fadd(v5.V4S(), VU1_ACC_REG.V4S(), v5.V4S());
 
 		// Step 6: writeback VFd via the cache (deferred Str fires at
 		// block end / hazard boundary / BL via vfCacheFlushAndInvalidate).
-		// fd != 0 is gated by Pass 1.
-		vfCacheStore(static_cast<int>(fd), v5, 0xF);
+		// fd != 0 is gated by Pass 1. Mask depends on the chain variant:
+		// 0xF for full xyzw, 0xE for xyz-only (preserves VFd.w).
+		vfCacheStore(static_cast<int>(fd), v5, xyz_only ? 0xEu : 0xFu);
 
 		// Invalidate broadcast plan — we just bypassed the planning machinery.
 		vu1BroadcastCacheReset();
@@ -2814,6 +2838,71 @@ void recVU1_CLIP() {
 REC_VU1_UPPER_INTERP(OPMULA)
 #else
 void recVU1_OPMULA() {
+	if (g_vu1OpmacClusterLead) {
+		// FMAC opt #20: fused OPMULA + OPMSUB cross-product.
+		//
+		// cross(a, b) = (a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
+		//
+		// We emit:
+		//   ACC.xyz = (a.y*b.z, a.z*b.x, a.x*b.y)  (OPMULA result)
+		//   VFd.xyz = ACC.xyz - (a.z*b.y, a.x*b.z, a.y*b.x)
+		//                     = (a.y*b.z - a.z*b.y, ...)  (OPMSUB result)
+		//
+		// Both .w lanes preserved (ACC.w and VFd.w untouched), matching
+		// VU semantics.
+		//
+		// Per-pair codegen would do this same work twice (~26-30 NEON
+		// insns). Fused: ~20 insns (skip one cache-load pair, ACC scratch
+		// Mov, redundant clamp setup).
+		const u32 fs = g_vu1OpmacClusterFs;
+		const u32 ft = g_vu1OpmacClusterFt;
+		const u32 fd = g_vu1OpmacClusterFd;
+
+		vfCacheLoadInto(static_cast<int>(fs), v0); // v0 = a
+		vfCacheLoadInto(static_cast<int>(ft), v1); // v1 = b
+
+		// Build OPMULA permutations:
+		//   v2 = {a.y, a.z, a.x, _}
+		//   v3 = {b.z, b.x, b.y, _}
+		armAsm->Mov(v2.V4S(), 0, v0.V4S(), 1);
+		armAsm->Mov(v2.V4S(), 1, v0.V4S(), 2);
+		armAsm->Mov(v2.V4S(), 2, v0.V4S(), 0);
+		armAsm->Mov(v3.V4S(), 0, v1.V4S(), 2);
+		armAsm->Mov(v3.V4S(), 1, v1.V4S(), 0);
+		armAsm->Mov(v3.V4S(), 2, v1.V4S(), 1);
+
+		// v5.xyz = OPMULA product (xyz lanes only — W untouched in scratch).
+		armAsm->Fmul(v5.V4S(), v2.V4S(), v3.V4S());
+
+		// Build OPMSUB permutations (operand-swap: OPMSUB sees (b, a)):
+		//   v6 = {b.y, b.z, b.x, _}    perm of v1 (b)
+		//   v7 = {a.z, a.x, a.y, _}    perm of v0 (a)
+		armAsm->Mov(v6.V4S(), 0, v1.V4S(), 1);
+		armAsm->Mov(v6.V4S(), 1, v1.V4S(), 2);
+		armAsm->Mov(v6.V4S(), 2, v1.V4S(), 0);
+		armAsm->Mov(v7.V4S(), 0, v0.V4S(), 2);
+		armAsm->Mov(v7.V4S(), 1, v0.V4S(), 0);
+		armAsm->Mov(v7.V4S(), 2, v0.V4S(), 1);
+
+		// v4 = OPMSUB's second product.
+		armAsm->Fmul(v4.V4S(), v6.V4S(), v7.V4S());
+
+		// Writeback ACC.xyz from v5 (OPMULA result). Lane-by-lane Mov so
+		// VU1_ACC_REG.w is preserved.
+		armAsm->Mov(VU1_ACC_REG.V4S(), 0, v5.V4S(), 0);
+		armAsm->Mov(VU1_ACC_REG.V4S(), 1, v5.V4S(), 1);
+		armAsm->Mov(VU1_ACC_REG.V4S(), 2, v5.V4S(), 2);
+
+		// VFd.xyz = OPMULA product - OPMSUB product = cross(a, b).
+		armAsm->Fsub(v5.V4S(), v5.V4S(), v4.V4S());
+
+		// Writeback VFd via cache (xyz mask; preserves VFd.w).
+		vfCacheStore(static_cast<int>(fd), v5, 0xEu);
+
+		vu1BroadcastCacheReset();
+		return;
+	}
+
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 ft = (VU1.code >> 16) & 0x1F;
 	emitOpFmac(/*isSub=*/false, fs, ft, /*fd=*/0);
@@ -2824,6 +2913,7 @@ void recVU1_OPMULA() {
 REC_VU1_UPPER_INTERP(OPMSUB)
 #else
 void recVU1_OPMSUB() {
+	if (g_vu1OpmacClusterMember) return; // OPMULA lead already emitted everything
 	const u32 fd = (VU1.code >>  6) & 0x1F;
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 ft = (VU1.code >> 16) & 0x1F;

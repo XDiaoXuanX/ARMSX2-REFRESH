@@ -1161,7 +1161,22 @@ struct Pcsx2Config
 			WaitLoop : 1, // enables constant loop detection and fast-forwarding
 			vuFlagHack : 1, // microVU specific flag hack
 			vuThread : 1, // Enable Threaded VU1
-			vu1Instant : 1; // Enable Instant VU1 (Without MTVU only)
+			vu1Instant : 1, // Enable Instant VU1 (Without MTVU only)
+			vuNeonFusions : 1, // ARMSX2: gate the arm64 VU1 NEON peephole fusions
+			                   // (MAC cluster MULAx+MADDAy+MADDAz+MADDw, OPMULA+OPMSUB
+			                   // cross-product). Toggle off to confirm whether a game
+			                   // regression is caused by our JIT fusion peepholes.
+			vuDeferredWrites : 1, // ARMSX2 (EXPERIMENTAL): defer per-pair VF stores via
+			                      // the NEON cache instead of writing through. Big perf
+			                      // win when it works (saves 1 Str per FMAC pair on
+			                      // hot transform code). Known to break SH2 graphics
+			                      // and similar games with cross-pair coherence
+			                      // assumptions. Default OFF.
+			vuSkipStallSim : 1; // ARMSX2 (AGGRESSIVE): skip the vu1_TestPipes_VU1 BL
+			                    // in the JIT. Memory profiling showed 19-32% of CPU in
+			                    // this helper on Futurama / GoW2 / etc. Skipping breaks
+			                    // any game that relies on accurate FMAC/FDIV/EFU/IALU
+			                    // pipeline-stall timing. Default OFF.
 		BITFIELD_END
 
 		s8 EECycleRate; // EE cycle rate selector (1.0, 1.5, 2.0)
