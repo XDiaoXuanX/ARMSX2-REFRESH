@@ -317,13 +317,36 @@ enum ARMSX2DeepLinkHandler {
     }
 
     private static func queryValue(_ names: [String], in url: URL) -> String? {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            for name in names {
+                if let value = components.queryItems?.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame })?.value,
+                   !value.isEmpty {
+                    return value
+                }
+            }
+        }
+
+        // Some frontends send callback URLs without percent-encoding (for example,
+        // callback=ludihub://armsx2-callback). Parse the raw query as a fallback.
+        let wantedNames = Set(names.map { $0.lowercased() })
+        guard let query = url.query else {
             return nil
         }
 
-        for name in names {
-            if let value = components.queryItems?.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame })?.value,
-               !value.isEmpty {
+        for item in query.split(separator: "&", omittingEmptySubsequences: false) {
+            let parts = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else {
+                continue
+            }
+
+            let key = String(parts[0]).removingPercentEncoding ?? String(parts[0])
+            guard wantedNames.contains(key.lowercased()) else {
+                continue
+            }
+
+            let rawValue = String(parts[1])
+            let value = rawValue.removingPercentEncoding ?? rawValue
+            if !value.isEmpty {
                 return value
             }
         }
@@ -349,7 +372,14 @@ enum ARMSX2DeepLinkHandler {
             }
 
             NSLog("[ARMSX2 iOS DeepLink] exporting library count=%d callback=%@", payload.gameCount, callbackURL.absoluteString)
-            UIApplication.shared.open(callbackURL, options: [:])
+            UIApplication.shared.open(callbackURL, options: [:]) { didOpen in
+                NSLog("[ARMSX2 iOS DeepLink] callback open result=%d callback=%@", didOpen ? 1 : 0, callbackURL.absoluteString)
+                if !didOpen {
+                    Task { @MainActor in
+                        showMessage("LudiHub callback could not be opened.")
+                    }
+                }
+            }
         } catch {
             showMessage("LudiHub library export failed: \(error.localizedDescription)")
             NSLog("[ARMSX2 iOS DeepLink] library export failed: %@", error.localizedDescription)
@@ -426,15 +456,24 @@ enum ARMSX2DeepLinkHandler {
     }
 
     private static func callbackURL(base: String, payload: String) -> URL? {
-        guard var components = URLComponents(string: base) else {
-            return nil
+        let decodedBase = base.removingPercentEncoding ?? base
+        let candidates = decodedBase == base ? [base] : [base, decodedBase]
+
+        for candidate in candidates {
+            guard var components = URLComponents(string: candidate) else {
+                continue
+            }
+
+            var items = components.queryItems ?? []
+            items.append(URLQueryItem(name: "source", value: "armsx2-ios"))
+            items.append(URLQueryItem(name: "payload", value: payload))
+            components.queryItems = items
+            if let url = components.url {
+                return url
+            }
         }
 
-        var items = components.queryItems ?? []
-        items.append(URLQueryItem(name: "source", value: "armsx2-ios"))
-        items.append(URLQueryItem(name: "payload", value: payload))
-        components.queryItems = items
-        return components.url
+        return nil
     }
 
     private static func base64URLEncoded(_ data: Data) -> String {
