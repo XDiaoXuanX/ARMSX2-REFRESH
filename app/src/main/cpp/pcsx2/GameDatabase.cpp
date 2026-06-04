@@ -12,6 +12,7 @@
 #include "common/Error.h"
 #include "common/FileSystem.h"
 #include "common/Path.h"
+#include "common/SettingsInterface.h"
 #include "common/StringUtil.h"
 #include "common/Timer.h"
 
@@ -443,6 +444,43 @@ bool GameDatabaseSchema::isUserHackHWFix(GSHWFixId id)
 }
 
 #if defined(__APPLE__) && TARGET_OS_IPHONE
+static bool IsIOSBurnoutRevengeGame(const std::string& name)
+{
+	return name.find("Burnout Revenge") != std::string::npos;
+}
+
+static std::string GetIOSCompatibilityLabProfileForGSPolicy()
+{
+	SettingsInterface* si = Host::GetSettingsInterface();
+	if (!si)
+		return "unknown";
+
+	std::string profile = si->GetStringValue("ARMSX2/JITBisect", "Profile", "off");
+	if (!profile.empty() && !StringUtil::compareNoCase(profile, "off") && !StringUtil::compareNoCase(profile, "custom"))
+		return profile;
+
+	static constexpr const char* flag_keys[] = {
+		"COP1EverythingOnly",
+		"COP1EverythingPlusLoadStore",
+		"COP1EverythingPlusMMI",
+		"COP1EverythingPlusCOP2VU",
+		"COP1EverythingPlusMultDiv",
+		"COP1EverythingPlusShifts",
+		"COP1EverythingPlusMoves",
+		"COP1EverythingPlusIntegerALU",
+		"COP1EverythingPlusBranches",
+	};
+
+	int active_flags = 0;
+	for (const char* key : flag_keys)
+		active_flags += si->GetBoolValue("ARMSX2/JITBisect", key, false) ? 1 : 0;
+
+	if (active_flags == 0)
+		return "off";
+
+	return (active_flags == 1) ? "single-flag" : "custom";
+}
+
 static void ClearIOSMetalCompatLabOffGSHWFixes(Pcsx2Config::GSOptions& config)
 {
 	auto clear_int = [](auto& field, auto default_value, const char* name) {
@@ -502,8 +540,9 @@ static bool ShouldBlockIOSMetalGSHardwareFixes(const Pcsx2Config::GSOptions& con
 
 	// ARMSX2 iOS exposes GameDB Core Fixes and Graphics Fixes separately. When either
 	// compatibility path is off, do not allow GameDB/manual hardware hacks to survive
-	// and break strict Metal rendering.
-	return !EmuConfig.EnableGameFixes || config.ManualUserHacks;
+	// the ELF CRC settings reload and break strict Metal rendering.
+	const std::string compat_profile = GetIOSCompatibilityLabProfileForGSPolicy();
+	return StringUtil::compareNoCase(compat_profile, "off") || !EmuConfig.EnableGameFixes || config.ManualUserHacks;
 }
 
 static bool IsIOSMetalHighRiskAutoGSHWFix(GameDatabaseSchema::GSHWFixId id)
@@ -514,6 +553,55 @@ static bool IsIOSMetalHighRiskAutoGSHWFix(GameDatabaseSchema::GSHWFixId id)
 		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
 		case GameDatabaseSchema::GSHWFixId::MoveHandler:
 			return true;
+		default:
+			return false;
+	}
+}
+
+static bool IsIOSMetalAllowedAutoGSHWCallback(GameDatabaseSchema::GSHWFixId id, int value)
+{
+	switch (id)
+	{
+		case GameDatabaseSchema::GSHWFixId::GetSkipCount:
+		{
+			static const s16 burnout_games = GSLookupGetSkipCountFunctionId("GSC_BurnoutGames");
+			static const s16 burnout_sky = GSLookupGetSkipCountFunctionId("GSC_BlackAndBurnoutSky");
+			return value == burnout_games || value == burnout_sky;
+		}
+
+		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
+		{
+			static const s16 burnout_games = GSLookupBeforeDrawFunctionId("OI_BurnoutGames");
+			return value == burnout_games;
+		}
+
+		default:
+			return false;
+	}
+}
+
+static bool IsIOSMetalAllowedCompatLabOffGSHWFix(const GameDatabaseSchema::GameEntry& entry, GameDatabaseSchema::GSHWFixId id, int value)
+{
+	if (!IsIOSMetalHighRiskAutoGSHWFix(id))
+		return true;
+
+	if (!IsIOSBurnoutRevengeGame(entry.name))
+		return false;
+
+	switch (id)
+	{
+		case GameDatabaseSchema::GSHWFixId::GetSkipCount:
+		{
+			static const s16 burnout_games = GSLookupGetSkipCountFunctionId("GSC_BurnoutGames");
+			return value == burnout_games;
+		}
+
+		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
+		{
+			static const s16 burnout_games = GSLookupBeforeDrawFunctionId("OI_BurnoutGames");
+			return value == burnout_games;
+		}
+
 		default:
 			return false;
 	}
@@ -593,11 +681,12 @@ static void LogIOSGameFixSnapshot(
 		static_cast<unsigned>(EmuConfig.Cpu.FPUDivFPCR.GetRoundMode()), static_cast<unsigned>(EmuConfig.Cpu.VU0FPCR.GetRoundMode()),
 		static_cast<unsigned>(EmuConfig.Cpu.VU1FPCR.GetRoundMode()), EmuConfig.Cpu.Recompiler.GetEEClampMode(),
 		EmuConfig.Cpu.Recompiler.GetVUClampMode());
-	Console.WriteLn("@@IOS_GAMEFIX_SPEED@@ nominal=%.3f turbo=%.3f slomo=%.3f ntsc=%.3f pal=%.3f mtvu=%s instantVU1=%s eeCycleRate=%d eeCycleSkip=%u vsyncQueue=%d",
+	Console.WriteLn("@@IOS_GAMEFIX_SPEED@@ nominal=%.3f turbo=%.3f slomo=%.3f ntsc=%.3f pal=%.3f mtvu=%s mvuFlag=%s instantVU1=%s eeCycleRate=%d eeCycleSkip=%u vsyncQueue=%d",
 		EmuConfig.EmulationSpeed.NominalScalar, EmuConfig.EmulationSpeed.TurboScalar, EmuConfig.EmulationSpeed.SlomoScalar,
 		gs_config.FramerateNTSC, gs_config.FrameratePAL, IOSBool(EmuConfig.Speedhacks.vuThread),
-		IOSBool(EmuConfig.Speedhacks.vu1Instant), static_cast<int>(EmuConfig.Speedhacks.EECycleRate),
-		static_cast<unsigned>(EmuConfig.Speedhacks.EECycleSkip), gs_config.VsyncQueueSize);
+		IOSBool(EmuConfig.Speedhacks.vuFlagHack), IOSBool(EmuConfig.Speedhacks.vu1Instant),
+		static_cast<int>(EmuConfig.Speedhacks.EECycleRate), static_cast<unsigned>(EmuConfig.Speedhacks.EECycleSkip),
+		gs_config.VsyncQueueSize);
 	Console.WriteLn("@@IOS_GAMEFIX_PATCHES@@ GameFixes=%s PNACH=%s Cheats=%s Widescreen=%s NoInterlace=%s RetroAchievements=%s",
 		IOSBool(EmuConfig.EnableGameFixes), IOSBool(EmuConfig.EnablePatches), IOSBool(EmuConfig.EnableCheats),
 		IOSBool(EmuConfig.EnableWideScreenPatches), IOSBool(EmuConfig.EnableNoInterlacingPatches),
@@ -868,45 +957,71 @@ bool GameDatabaseSchema::GameEntry::configMatchesHWFix(const Pcsx2Config::GSOpti
 void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions& config) const
 {
 	std::string disabled_fixes;
-	const bool apply_auto_fixes = !config.ManualUserHacks;
+	bool apply_auto_fixes = !config.ManualUserHacks;
 
 #if defined(__APPLE__) && TARGET_OS_IPHONE
-	if (ShouldBlockIOSMetalGSHardwareFixes(config))
+	const bool block_ios_metal_gs_fixes = ShouldBlockIOSMetalGSHardwareFixes(config);
+	if (block_ios_metal_gs_fixes)
 	{
-		Console.Warning("iOS Metal CompatLabOff: ignoring GameDB/manual GS HW fixes");
-		for (const auto& [id, value] : gsHWFixes)
-		{
-			Console.Warning("iOS Metal CompatLabOff: ignoring GameDB/manual GS HW fix %s to [mode=%d]",
-				getHWFixName(id), value);
-		}
+		const std::string compat_profile = GetIOSCompatibilityLabProfileForGSPolicy();
+		Console.Warning("@@IOS_METAL_GS_POLICY@@ compat_lab=%s game=\"%s\" renderer=%s enable_game_fixes=%d manual_user_hacks=%d action=sanitize_high_risk_callbacks",
+			compat_profile.c_str(), name.c_str(), Pcsx2Config::GSOptions::GetRendererName(config.Renderer),
+			EmuConfig.EnableGameFixes ? 1 : 0, config.ManualUserHacks ? 1 : 0);
+		Console.Warning("iOS Metal CompatLabOff: allowing GameDB GS HW fixes; high-risk callbacks require the iOS Metal allowlist");
 		ClearIOSMetalCompatLabOffGSHWFixes(config);
-		LogIOSGameFixSnapshot(*this, config, "blocked-ios-metal-compat-off");
-		Host::RemoveKeyedOSDMessage("HWFixesWarning");
-		return;
+		apply_auto_fixes = false;
 	}
 
-	if (config.Renderer == GSRendererType::Metal && apply_auto_fixes)
+	if (!block_ios_metal_gs_fixes && config.Renderer == GSRendererType::Metal && apply_auto_fixes)
 		ClearIOSMetalHighRiskCallbacks(config, "pre-auto-apply");
+#else
+	constexpr bool block_ios_metal_gs_fixes = false;
 #endif
 
 	// Only apply GS HW fixes if the user hasn't manually enabled HW fixes.
 	const bool is_sw_renderer = EmuConfig.GS.Renderer == GSRendererType::SW;
-	if (!apply_auto_fixes)
+	if (!apply_auto_fixes && !block_ios_metal_gs_fixes)
 		Console.Warning("GameDB: Manual GS hardware renderer fixes are enabled, not using automatic hardware renderer fixes from GameDB.");
 
 	for (const auto& [id, value] : gsHWFixes)
 	{
+		bool force_apply_ios_metal_fix = false;
 #if defined(__APPLE__) && TARGET_OS_IPHONE
-		if (config.Renderer == GSRendererType::Metal && apply_auto_fixes && IsIOSMetalHighRiskAutoGSHWFix(id))
+		if (block_ios_metal_gs_fixes)
 		{
-			Console.Warning("@@IOS_METAL_GS_SKIP@@ game=\"%s\" fix=%s requested=%d reason=callback_fix_not_safe_on_metal",
-				name.c_str(), getHWFixName(id), value);
-			ClearIOSMetalHighRiskCallbacks(config, getHWFixName(id));
-			continue;
+			if (IsIOSMetalAllowedCompatLabOffGSHWFix(*this, id, value))
+			{
+				Console.Warning("@@IOS_METAL_GS_FIX_ALLOW@@ game=\"%s\" fix=%s requested=%d reason=%s",
+					name.c_str(), getHWFixName(id), value,
+					IsIOSMetalHighRiskAutoGSHWFix(id) ? "callback_allowlist" : "safe_gamedb_fix");
+				force_apply_ios_metal_fix = true;
+			}
+			else
+			{
+				Console.Warning("@@IOS_METAL_GS_SKIP@@ game=\"%s\" fix=%s requested=%d reason=callback_fix_not_safe_on_metal",
+					name.c_str(), getHWFixName(id), value);
+				continue;
+			}
+		}
+
+		if (!block_ios_metal_gs_fixes && config.Renderer == GSRendererType::Metal && apply_auto_fixes && IsIOSMetalHighRiskAutoGSHWFix(id))
+		{
+			if (IsIOSMetalAllowedAutoGSHWCallback(id, value))
+			{
+				Console.Warning("@@IOS_METAL_GS_CALLBACK_ALLOW@@ game=\"%s\" fix=%s requested=%d reason=burnout_callback_allowlist",
+					name.c_str(), getHWFixName(id), value);
+			}
+			else
+			{
+				Console.Warning("@@IOS_METAL_GS_SKIP@@ game=\"%s\" fix=%s requested=%d reason=callback_fix_not_safe_on_metal",
+					name.c_str(), getHWFixName(id), value);
+				ClearIOSMetalHighRiskCallbacks(config, getHWFixName(id));
+				continue;
+			}
 		}
 #endif
 
-		if (isUserHackHWFix(id) && !apply_auto_fixes)
+		if (isUserHackHWFix(id) && !apply_auto_fixes && !force_apply_ios_metal_fix)
 		{
 			if (configMatchesHWFix(config, id, value))
 				continue;
@@ -916,12 +1031,26 @@ void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions&
 			continue;
 		}
 
+		int applied_log_value = value;
+
 		switch (id)
 		{
 			case GSHWFixId::AutoFlush:
 			{
-				if (value >= 0 && value <= static_cast<int>(GSHWAutoFlushLevel::Enabled))
-					config.UserHacks_AutoFlush = static_cast<GSHWAutoFlushLevel>(value);
+				int applied_value = value;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+				if (IsIOSBurnoutRevengeGame(name) && applied_value == static_cast<int>(GSHWAutoFlushLevel::Enabled))
+				{
+					Console.Warning("@@IOS_BURNOUT_AUTOFLUSH_CLAMP@@ game=\"%s\" requested=%d applied=%d reason=metal_glow_probe",
+						name.c_str(), applied_value, static_cast<int>(GSHWAutoFlushLevel::SpritesOnly));
+					applied_value = static_cast<int>(GSHWAutoFlushLevel::SpritesOnly);
+				}
+#endif
+				if (applied_value >= 0 && applied_value <= static_cast<int>(GSHWAutoFlushLevel::Enabled))
+				{
+					config.UserHacks_AutoFlush = static_cast<GSHWAutoFlushLevel>(applied_value);
+					applied_log_value = applied_value;
+				}
 			}
 			break;
 
@@ -1139,7 +1268,11 @@ void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions&
 				break;
 		}
 
-		Console.WriteLn("GameDB: Enabled GS Hardware Fix: %s to [mode=%d]", getHWFixName(id), value);
+		if (applied_log_value != value)
+			Console.WriteLn("GameDB: Enabled GS Hardware Fix: %s requested [mode=%d] applied [mode=%d]",
+				getHWFixName(id), value, applied_log_value);
+		else
+			Console.WriteLn("GameDB: Enabled GS Hardware Fix: %s to [mode=%d]", getHWFixName(id), value);
 	}
 
 	// fixup skipdraw range just in case the db has a bad range (but the linter should catch this)
@@ -1160,7 +1293,8 @@ void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions&
 
 #if defined(__APPLE__) && TARGET_OS_IPHONE
 	if (config.Renderer == GSRendererType::Metal)
-		LogIOSGameFixSnapshot(*this, config, apply_auto_fixes ? "applied-ios-metal" : "manual-ios-metal");
+		LogIOSGameFixSnapshot(*this, config,
+			block_ios_metal_gs_fixes ? "blocked-ios-metal" : (apply_auto_fixes ? "applied-ios-metal" : "manual-ios-metal"));
 #endif
 }
 

@@ -1733,7 +1733,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableArray<ARMSX2BIOSInfo *> *bioses = [NSMutableArray array];
 
-    // Helper block: scan directory for BIOS files (>= 1MB .bin/.rom)
+    // Helper block: list all imported BIOS candidates, including small companion ROMs.
     void (^scanDir)(NSString *) = ^(NSString *dir) {
         NSArray *files = [fm contentsOfDirectoryAtPath:dir error:nil];
         for (NSString *file in files) {
@@ -1742,9 +1742,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
             if ([ext isEqualToString:@"bin"] || [ext isEqualToString:@"rom"]) {
                 NSString *fullPath = [dir stringByAppendingPathComponent:file];
                 NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
-// BIOS files are >= 1MB and <= 50MB
                 unsigned long long sz = [attrs fileSize];
-                if (sz >= 1024 * 1024 && sz <= 50 * 1024 * 1024) {
+                if (sz > 0 && sz <= 50 * 1024 * 1024) {
                     [bioses addObject:ARMSX2MakeBIOSInfo(file, dir)];
                     [seen addObject:file];
                 }
@@ -1754,6 +1753,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 
     scanDir([self biosDirectory]);
     [bioses sortUsingComparator:^NSComparisonResult(ARMSX2BIOSInfo *lhs, ARMSX2BIOSInfo *rhs) {
+        if (lhs.valid != rhs.valid)
+            return lhs.valid ? NSOrderedAscending : NSOrderedDescending;
         return [lhs.fileName localizedCaseInsensitiveCompare:rhs.fileName];
     }];
     return bioses;

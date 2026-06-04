@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "GS/Renderers/HW/GSRendererHW.h"
+#include "GS/Renderers/HW/GSHwHack.h"
 #include "GS/Renderers/HW/GSTextureReplacements.h"
 #include "GS/GSGL.h"
 #include "GS/GSPerfMon.h"
@@ -11,6 +12,10 @@
 #include "common/BitUtils.h"
 #include "common/StringUtil.h"
 #include <bit>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 GSRendererHW::GSRendererHW()
 	: GSRenderer()
@@ -4555,6 +4560,10 @@ void GSRendererHW::Draw()
 	if (!skip_draw)
 		DrawPrims(rt, ds, src, tmm);
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	if (!skip_draw && GSConfig.Renderer == GSRendererType::Metal && m_oi == &GSHwHack::OI_BurnoutGames)
+		GSHwHack::OO_BurnoutGames(*this);
+#endif
 
 	// Temporary source *must* be invalidated before normal, because otherwise it'll be double freed.
 	g_texture_cache->InvalidateTemporarySource();

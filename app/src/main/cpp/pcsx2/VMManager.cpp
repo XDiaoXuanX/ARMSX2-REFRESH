@@ -1073,6 +1073,46 @@ void VMManager::ApplyGameFixes()
 	EmuConfig.GS.MaskUpscalingHacks();
 }
 
+static bool ARMSX2IsBurnoutRevengeUS()
+{
+#if defined(__APPLE__)
+	const bool serial_match = (s_disc_serial == "SLUS-21242" || s_disc_serial == "SLUS_21242");
+	const bool crc_match = (s_disc_crc == 0xD224D348 || s_current_crc == 0xD224D348);
+	return serial_match && crc_match;
+#else
+	return false;
+#endif
+}
+
+static void ARMSX2ApplyBurnoutVU1JITPolicy(const char* reason)
+{
+#if defined(__APPLE__)
+	if (!ARMSX2IsBurnoutRevengeUS())
+		return;
+
+	const int old_core_type = EmuConfig.Cpu.CoreType;
+	const bool old_enable_ee = EmuConfig.Cpu.Recompiler.EnableEE;
+	const bool old_enable_iop = EmuConfig.Cpu.Recompiler.EnableIOP;
+	const bool old_enable_vu0 = EmuConfig.Cpu.Recompiler.EnableVU0;
+	const bool old_enable_vu1 = EmuConfig.Cpu.Recompiler.EnableVU1;
+
+	// Keep the proven GS policy intact while profiling the VU1 JIT start PCs.
+	EmuConfig.Cpu.CoreType = 0;
+	EmuConfig.Cpu.Recompiler.EnableEE = true;
+	EmuConfig.Cpu.Recompiler.EnableIOP = true;
+	EmuConfig.Cpu.Recompiler.EnableVU0 = true;
+	EmuConfig.Cpu.Recompiler.EnableVU1 = true;
+
+	static bool s_logged = false;
+	if (!std::exchange(s_logged, true) || old_core_type == 1 || !old_enable_ee || !old_enable_iop || !old_enable_vu0 || !old_enable_vu1)
+	{
+		Console.Warning("@@IOS_BURNOUT_VU1_JIT_DIAG@@ build=132 reason=%s serial=%s disc_crc=%08X elf_crc=%08X coreType=%d->0 enableEE=%d->1 enableIOP=%d->1 enableVU0=%d->1 enableVU1=%d->1 opm_xyz=0 ftoi_sat=0 fmac_denorm=0 vu1_regalloc_flush=0 movsszx_zero=1 vu1_pc_profile=1",
+			reason ? reason : "unknown", s_disc_serial.c_str(), s_disc_crc, s_current_crc,
+			old_core_type, old_enable_ee ? 1 : 0, old_enable_iop ? 1 : 0, old_enable_vu0 ? 1 : 0, old_enable_vu1 ? 1 : 0);
+	}
+#endif
+}
+
 void VMManager::ApplySettings()
 {
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Applying settings...");
@@ -1091,6 +1131,7 @@ void VMManager::ApplySettings()
 	EmuConfig = Pcsx2Config();
 	EmuConfig.CopyRuntimeConfig(old_config);
 	LoadSettings();
+	ARMSX2ApplyBurnoutVU1JITPolicy("apply-settings");
 	CheckForConfigChanges(old_config);
 }
 
@@ -1120,6 +1161,7 @@ void VMManager::ApplyCoreSettings()
 		LoadCoreSettings(*Host::GetSettingsInterface());
 		WarnAboutUnsafeSettings();
 		ApplyGameFixes();
+		ARMSX2ApplyBurnoutVU1JITPolicy("apply-core-settings");
 	}
 
 	CheckForConfigChanges(old_config);
@@ -3133,6 +3175,8 @@ void VMManager::UpdateCPUImplementations()
         EmuConfig.Cpu.Recompiler.EnableEE = true;
         if (EmuConfig.Cpu.CoreType == 1) EmuConfig.Cpu.CoreType = 0;
     }
+
+    ARMSX2ApplyBurnoutVU1JITPolicy("cpu-select");
 
     const s32 core_type = EmuConfig.Cpu.CoreType;
 

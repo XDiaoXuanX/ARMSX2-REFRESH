@@ -5,6 +5,12 @@
 #include "GS/Renderers/HW/GSHwHack.h"
 #include "GS/GSGL.h"
 #include "GS/GSUtil.h"
+#include "PerformanceMetrics.h"
+#include "common/Console.h"
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <cmath>
 
@@ -238,6 +244,35 @@ bool GSHwHack::GSC_BurnoutGames(GSRendererHW& r, int& skip)
 	static GSVector2i main_fb_size;
 	static GIFRegTEX0 downsample_fb;
 	static GIFRegTEX0 bloom_fb;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	static u64 state_frame = 0;
+	static u32 state_draws = 0;
+	static u32 call_log_budget = 0;
+	const u64 current_frame = PerformanceMetrics::GetFrameNumber();
+	const unsigned long long current_frame_log = static_cast<unsigned long long>(current_frame);
+
+	auto reset_state = [&](const char* reason) {
+		Console.Warning("@@IOS_BURNOUT_GSC_RESET@@ reason=%s frame=%llu state=%u draws=%u skip=%d rtme=%d frame_fbp=0x%04x frame_fbw=%u tex_tbp=0x%04x expected_downsample=0x%04x",
+			reason, current_frame_log, state, state_draws, skip, RTME ? 1 : 0, RFBP, RFBW, RTBP0, downsample_fb.TBP0);
+		state = 0;
+		state_draws = 0;
+		state_frame = current_frame;
+		skip = 0;
+	};
+
+	if (call_log_budget < 16)
+	{
+		Console.Warning("@@IOS_BURNOUT_GSC_CALL@@ frame=%llu state=%u skip=%d rtme=%d frame_fbp=0x%04x frame_fbw=%u zbp=0x%04x tex_tbp=0x%04x tex_psm=%u",
+			current_frame_log, state, skip, RTME ? 1 : 0, RFBP, RFBW, RZBP, RTBP0, RTPSM);
+		call_log_budget++;
+	}
+
+	if (state != 0 && current_frame != state_frame)
+		reset_state("frame_advanced_mid_sequence");
+
+	if (state != 0)
+		state_draws++;
+#endif
 	switch (state)
 	{
 		case 0: // waiting for double striped clear
@@ -263,7 +298,15 @@ bool GSHwHack::GSC_BurnoutGames(GSRendererHW& r, int& skip)
 			r.ReplaceVerticesWithSprite(GSVector4i::loadh(main_fb_size), main_fb_size);
 			bloom_fb = GIFRegTEX0::Create(RFBP, RFBW, RFPSM);
 			state = 1;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			state_frame = current_frame;
+			state_draws = 0;
+#endif
 			GL_INS("GSC_BurnoutGames(): Initial double-striped clear.");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			Console.Warning("@@IOS_BURNOUT_GSC_BLOOM@@ state=initial_clear frame=%llu main_tbp=0x%04x bloom_tbp=0x%04x size=%dx%d",
+				current_frame_log, main_fb.TBP0, bloom_fb.TBP0, main_fb_size.x, main_fb_size.y);
+#endif
 			return true;
 		}
 
@@ -273,6 +316,10 @@ bool GSHwHack::GSC_BurnoutGames(GSRendererHW& r, int& skip)
 			r.m_cached_ctx.ZBUF.ZMSK = true;
 			state = 2;
 			GL_INS("GSC_BurnoutGames(): Extract Bright Pixels.");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			Console.Warning("@@IOS_BURNOUT_GSC_BLOOM@@ state=extract_bright frame=%llu size=%dx%d",
+				current_frame_log, main_fb_size.x, main_fb_size.y);
+#endif
 			return true;
 		}
 
@@ -284,6 +331,10 @@ bool GSHwHack::GSC_BurnoutGames(GSRendererHW& r, int& skip)
 			downsample_fb = GIFRegTEX0::Create(RFBP, RFBW, RFPSM);
 			state = 3;
 			GL_INS("GSC_BurnoutGames(): Downsampling.");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			Console.Warning("@@IOS_BURNOUT_GSC_BLOOM@@ state=downsample frame=%llu downsample_tbp=0x%04x rect=%d,%d,%d,%d",
+				current_frame_log, downsample_fb.TBP0, downsample_rect.x, downsample_rect.y, downsample_rect.z, downsample_rect.w);
+#endif
 			// Fix up the texture width so the native scaling code can properly detect it as a downscale.
 			RTBW = RFBW * 2;
 			return true;
@@ -303,19 +354,32 @@ bool GSHwHack::GSC_BurnoutGames(GSRendererHW& r, int& skip)
 			if (!RTME || RTBP0 != downsample_fb.TBP0)
 			{
 				GL_INS("GSC_BurnoutGames(): Skipping extra pass.");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+				Console.Warning("@@IOS_BURNOUT_GSC_BLOOM@@ state=skip_extra frame=%llu rtme=%d tex_tbp=0x%04x expected_tbp=0x%04x",
+					current_frame_log, RTME ? 1 : 0, RTBP0, downsample_fb.TBP0);
+#endif
 				skip = 1;
 				return true;
 			}
 
 			// Finally, we're done, let the game take over.
 			GL_INS("GSC_BurnoutGames(): Bloom effect done.");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			Console.Warning("@@IOS_BURNOUT_GSC_BLOOM@@ state=done frame=%llu tex_tbp=0x%04x",
+				current_frame_log, RTBP0);
+			state_draws = 0;
+#endif
 			skip = 0;
 			state = 0;
 			return true;
 		}
 	}
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	return true;
+#else
 	return GSC_BlackAndBurnoutSky(r, skip);
+#endif
 }
 
 bool GSHwHack::GSC_BlackAndBurnoutSky(GSRendererHW& r, int& skip)
@@ -337,6 +401,10 @@ bool GSHwHack::GSC_BlackAndBurnoutSky(GSRendererHW& r, int& skip)
 			// the clouds on top of the sky at each frame.
 			// Burnout 3 PAL 50Hz: 0x3ba0 => 0x1e80.
 			GL_INS("OO_BurnoutGames - Readback clouds renderered from TEX0.TBP0 = 0x%04x (TEX0.CBP = 0x%04x) to FBP = 0x%04x", TEX0.TBP0, TEX0.CBP, FRAME.Block());
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			Console.Warning("@@IOS_BURNOUT_SKY_READBACK@@ tex_tbp=0x%04x tex_cbp=0x%04x frame_fbp=0x%04x frame_fbw=%u tex_tbw=%u tex_tw=%u tex_th=%u tex_psm=%u skip=1",
+				TEX0.TBP0, TEX0.CBP, FRAME.Block(), FRAME.FBW, TEX0.TBW, TEX0.TW, TEX0.TH, TEX0.PSM);
+#endif
 			r.SwPrimRender(r, true, false);
 			skip = 1;
 		}
@@ -345,6 +413,10 @@ bool GSHwHack::GSC_BlackAndBurnoutSky(GSRendererHW& r, int& skip)
 			// Rendering of the glass smashing effect and some chassis decal in to the alpha channel of the FRAME on boot (before the menu).
 			// This gets ejected from the texture cache due to old age, but never gets written back.
 			GL_INS("OO_BurnoutGames - Render glass smash from TEX0.TBP0 = 0x%04x (TEX0.CBP = 0x%04x) to FBP = 0x%04x", TEX0.TBP0, TEX0.CBP, FRAME.Block());
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			Console.Warning("@@IOS_BURNOUT_GLASS_READBACK@@ tex_tbp=0x%04x tex_cbp=0x%04x frame_fbp=0x%04x frame_fbw=%u tex_tbw=%u tex_tw=%u tex_th=%u tex_psm=%u skip=1",
+				TEX0.TBP0, TEX0.CBP, FRAME.Block(), FRAME.FBW, TEX0.TBW, TEX0.TW, TEX0.TH, TEX0.PSM);
+#endif
 			r.SwPrimRender(r, true, false);
 			skip = 1;
 		}
@@ -1089,7 +1161,14 @@ bool GSHwHack::OI_BurnoutGames(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GS
 		return false; // Render point list palette.
 
 	if (t && t->m_from_target) // Avoid slow framebuffer readback
+	{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		Console.Warning("@@IOS_BURNOUT_OI_FROM_TARGET@@ tex_tbp=0x%04x tex_psm=%u tex_target=1 continuing_to_sw_sprite=1",
+			t->m_TEX0.TBP0, t->m_TEX0.PSM);
+#else
 		return true;
+#endif
+	}
 
 	if (!r.CanUseSwSpriteRender())
 		return true;
@@ -1097,9 +1176,48 @@ bool GSHwHack::OI_BurnoutGames(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GS
 	if (!r.PRIM->TME)
 		return true;
 	// Render palette via CPU.
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	Console.Warning("@@IOS_BURNOUT_OI_SWSPRITE@@ tex_tbp=0x%04x frame_fbp=0x%04x rect=%d,%d,%d,%d",
+		r.m_cached_ctx.TEX0.TBP0, r.m_cached_ctx.FRAME.Block(), r.m_r.x, r.m_r.y, r.m_r.z, r.m_r.w);
+#endif
 	r.SwSpriteRender();
 
 	return false;
+}
+
+void GSHwHack::OO_BurnoutGames(GSRendererHW& r)
+{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	const GIFRegTEX0& TEX0 = r.m_cached_ctx.TEX0;
+	const GIFRegALPHA& ALPHA = r.m_context->ALPHA;
+	const GIFRegFRAME& FRAME = r.m_cached_ctx.FRAME;
+
+	if (r.PRIM->PRIM == GS_SPRITE &&
+		!r.PRIM->IIP &&
+		r.PRIM->TME &&
+		!r.PRIM->FGE &&
+		r.PRIM->ABE &&
+		!r.PRIM->AA1 &&
+		!r.PRIM->FST &&
+		!r.PRIM->FIX &&
+		TEX0.TBW == 16 &&
+		TEX0.TW == 10 &&
+		TEX0.TCC &&
+		!TEX0.TFX &&
+		TEX0.PSM == PSMT8 &&
+		TEX0.CPSM == PSMCT32 &&
+		!TEX0.CSM &&
+		TEX0.TH >= 7 &&
+		ALPHA.A == ALPHA.B &&
+		ALPHA.D == 0 &&
+		FRAME.FBW == 16 &&
+		FRAME.PSM == PSMCT32)
+	{
+		Console.Warning("@@IOS_BURNOUT_OO_READBACK@@ tex_tbp=0x%04x tex_cbp=0x%04x frame_fbp=0x%04x rect=%d,%d,%d,%d",
+			TEX0.TBP0, TEX0.CBP, FRAME.Block(), r.m_r.x, r.m_r.y, r.m_r.z, r.m_r.w);
+		g_texture_cache->InvalidateLocalMem(r.m_context->offset.fb, r.m_r);
+	}
+#endif
 }
 
 #undef RPRIM

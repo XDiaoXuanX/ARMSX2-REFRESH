@@ -16,6 +16,62 @@
 // Removal condition: BIOS browserafter confirmed
 extern std::atomic<uint32_t> g_vu1_kick_count;
 
+#if defined(__APPLE__)
+namespace
+{
+struct ARMSX2VU1KickProfileEntry
+{
+	u32 pc = 0;
+	u32 count = 0;
+};
+
+static constexpr u32 ARMSX2_VU1_KICK_PC_CAPACITY = 256;
+static ARMSX2VU1KickProfileEntry s_armsx2_vu1_kick_pcs[ARMSX2_VU1_KICK_PC_CAPACITY];
+static u32 s_armsx2_vu1_kick_pc_count = 0;
+static bool s_armsx2_vu1_kick_overflow_logged = false;
+
+static void ARMSX2LogVU1Kick(u32 addr)
+{
+	const u32 raw_tpc = VU1.VI[REG_TPC].UL;
+	const u32 pc = (raw_tpc << 3) & VU1_PROGMASK;
+
+	for (u32 i = 0; i < s_armsx2_vu1_kick_pc_count; i++)
+	{
+		ARMSX2VU1KickProfileEntry& entry = s_armsx2_vu1_kick_pcs[i];
+		if (entry.pc != pc)
+			continue;
+
+		entry.count++;
+		if (entry.count <= 4 || (entry.count % 512) == 0)
+		{
+			Console.Warning("@@IOS_VU1_KICK@@ build=132 source=vu1ExecMicro pc=%04X raw_tpc=%08X addr=%08X count=%u cpu=%s vpu=%08X vu1_cycle=%u ee_cycle=%u",
+				pc, raw_tpc, addr, entry.count, CpuVU1 ? CpuVU1->GetShortName() : "null",
+				VU0.VI[REG_VPU_STAT].UL, VU1.cycle, cpuRegs.cycle);
+		}
+		return;
+	}
+
+	if (s_armsx2_vu1_kick_pc_count >= ARMSX2_VU1_KICK_PC_CAPACITY)
+	{
+		if (!s_armsx2_vu1_kick_overflow_logged)
+		{
+			s_armsx2_vu1_kick_overflow_logged = true;
+			Console.Warning("@@IOS_VU1_KICK_OVERFLOW@@ build=132 pc=%04X capacity=%zu",
+				pc, static_cast<size_t>(ARMSX2_VU1_KICK_PC_CAPACITY));
+		}
+		return;
+	}
+
+	ARMSX2VU1KickProfileEntry& entry = s_armsx2_vu1_kick_pcs[s_armsx2_vu1_kick_pc_count++];
+	entry.pc = pc;
+	entry.count = 1;
+	Console.Warning("@@IOS_VU1_KICK@@ build=132 source=vu1ExecMicro pc=%04X raw_tpc=%08X addr=%08X count=%u unique=%u cpu=%s vpu=%08X vu1_cycle=%u ee_cycle=%u",
+		pc, raw_tpc, addr, entry.count, s_armsx2_vu1_kick_pc_count,
+		CpuVU1 ? CpuVU1->GetShortName() : "null", VU0.VI[REG_VPU_STAT].UL, VU1.cycle, cpuRegs.cycle);
+}
+} // namespace
+#endif
+
 #ifdef PCSX2_DEBUG
 u32 vudump = 0;
 #endif
@@ -94,6 +150,9 @@ void vu1ExecMicro(u32 addr)
 	VU0.VI[REG_VPU_STAT].UL |=  0x0100;
 	if ((s32)addr != -1) VU1.VI[REG_TPC].UL = addr & 0x7FF;
 
+#if defined(__APPLE__)
+	ARMSX2LogVU1Kick(addr);
+#endif
 	CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
 	_vuExecMicroDebug(VU1);
 	if(!INSTANT_VU1)

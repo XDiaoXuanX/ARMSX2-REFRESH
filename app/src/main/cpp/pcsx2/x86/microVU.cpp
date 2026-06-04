@@ -3,6 +3,8 @@
 
 #include "microVU.h"
 
+#include "VMManager.h"
+
 #include "common/AlignedMalloc.h"
 #include "common/Perf.h"
 #include "common/StringUtil.h"
@@ -10,6 +12,88 @@
 // [iPSX2] iOS: 128-byte alignment for ARM64 SIMD/cache line safety
 alignas(128) vuRegistersPack g_vuRegistersPack;
 VU_Thread& vu1Thread = g_vuRegistersPack.vu1Thread;
+
+#if defined(__APPLE__)
+namespace
+{
+struct ARMSX2VU1PCProfileEntry
+{
+	u32 pc = 0;
+	u32 count = 0;
+	u64 total_cycles = 0;
+};
+
+static constexpr u32 ARMSX2_BURNOUT_VU1_PC_CAPACITY = 256;
+static ARMSX2VU1PCProfileEntry s_armsx2_burnout_vu1_pcs[ARMSX2_BURNOUT_VU1_PC_CAPACITY];
+static u32 s_armsx2_burnout_vu1_pc_count = 0;
+static bool s_armsx2_burnout_vu1_pc_overflow_logged = false;
+
+static bool ARMSX2BurnoutVU1PCProfileEnabled()
+{
+	static bool s_enabled = false;
+
+	if (s_enabled)
+		return s_enabled;
+
+	const std::string serial = VMManager::GetDiscSerial();
+	const u32 disc_crc = VMManager::GetDiscCRC();
+	const u32 elf_crc = VMManager::GetCurrentCRC();
+
+	const bool serial_match = (serial == "SLUS-21242" || serial == "SLUS_21242");
+	const bool crc_match = (disc_crc == 0xD224D348 || elf_crc == 0xD224D348);
+	s_enabled = serial_match && crc_match;
+
+	if (s_enabled)
+	{
+		Console.Warning("@@IOS_BURNOUT_VU1_PROFILE@@ build=132 mode=start_pc serial=%s disc_crc=%08X elf_crc=%08X",
+			serial.c_str(), disc_crc, elf_crc);
+	}
+
+	return s_enabled;
+}
+
+static void ARMSX2ProfileBurnoutVU1PC(const char* source, u32 pc, u32 raw_tpc, u32 cycles)
+{
+	const bool burnout = ARMSX2BurnoutVU1PCProfileEnabled();
+
+	for (u32 i = 0; i < s_armsx2_burnout_vu1_pc_count; i++)
+	{
+		ARMSX2VU1PCProfileEntry& entry = s_armsx2_burnout_vu1_pcs[i];
+		if (entry.pc != pc)
+			continue;
+
+		entry.count++;
+		entry.total_cycles += cycles;
+		if (entry.count <= 4 || (entry.count % 512) == 0)
+		{
+			Console.Warning("@@IOS_BURNOUT_VU1_PC@@ build=132 source=%s burnout=%d pc=%04X raw_tpc=%08X cycles=%u count=%u total_cycles=%llu vpu=%08X vu1_cycle=%u ee_cycle=%u",
+				source, burnout ? 1 : 0, pc, raw_tpc, cycles, entry.count, static_cast<unsigned long long>(entry.total_cycles),
+				VU0.VI[REG_VPU_STAT].UL, VU1.cycle, cpuRegs.cycle);
+		}
+		return;
+	}
+
+	if (s_armsx2_burnout_vu1_pc_count >= ARMSX2_BURNOUT_VU1_PC_CAPACITY)
+	{
+		if (!s_armsx2_burnout_vu1_pc_overflow_logged)
+		{
+			s_armsx2_burnout_vu1_pc_overflow_logged = true;
+			Console.Warning("@@IOS_BURNOUT_VU1_PC_OVERFLOW@@ build=132 pc=%04X capacity=%zu",
+				pc, static_cast<size_t>(ARMSX2_BURNOUT_VU1_PC_CAPACITY));
+		}
+		return;
+	}
+
+	ARMSX2VU1PCProfileEntry& entry = s_armsx2_burnout_vu1_pcs[s_armsx2_burnout_vu1_pc_count++];
+	entry.pc = pc;
+	entry.count = 1;
+	entry.total_cycles = cycles;
+	Console.Warning("@@IOS_BURNOUT_VU1_PC@@ build=132 source=%s burnout=%d pc=%04X raw_tpc=%08X cycles=%u count=%u total_cycles=%llu unique=%u vpu=%08X vu1_cycle=%u ee_cycle=%u",
+		source, burnout ? 1 : 0, pc, raw_tpc, cycles, entry.count, static_cast<unsigned long long>(entry.total_cycles),
+		s_armsx2_burnout_vu1_pc_count, VU0.VI[REG_VPU_STAT].UL, VU1.cycle, cpuRegs.cycle);
+}
+} // namespace
+#endif
 
 //------------------------------------------------------------------
 // Micro VU - Main Functions
@@ -384,6 +468,9 @@ void recMicroVU0::Execute(u32 cycles)
 void recMicroVU1::SetStartPC(u32 startPC)
 {
 	VU1.start_pc = startPC;
+#if defined(__APPLE__)
+	ARMSX2ProfileBurnoutVU1PC("setpc", startPC & VU1_PROGMASK, startPC >> 3, 0);
+#endif
 }
 
 void recMicroVU1::Step()
@@ -397,6 +484,9 @@ void recMicroVU1::Execute(u32 cycles)
 		if (!(VU0.VI[REG_VPU_STAT].UL & 0x100))
 			return;
 	}
+#if defined(__APPLE__)
+	ARMSX2ProfileBurnoutVU1PC("exec", (VU1.VI[REG_TPC].UL << 3) & VU1_PROGMASK, VU1.VI[REG_TPC].UL, cycles);
+#endif
 	VU1.VI[REG_TPC].UL <<= 3;
 	((mVUrecCall)microVU1.startFunct)(VU1.VI[REG_TPC].UL, cycles);
 	VU1.VI[REG_TPC].UL >>= 3;

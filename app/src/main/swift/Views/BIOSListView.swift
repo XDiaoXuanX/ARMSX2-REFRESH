@@ -86,8 +86,13 @@ struct BIOSListView: View {
 
     private func biosRow(_ bios: ARMSX2BIOSInfo) -> some View {
         Button {
-            ARMSX2Bridge.setDefaultBIOS(bios.fileName)
-            defaultBIOS = bios.fileName
+            if bios.valid {
+                ARMSX2Bridge.setDefaultBIOS(bios.fileName)
+                defaultBIOS = bios.fileName
+            } else {
+                fileImporter.lastImportMessage = "\(bios.fileName) is visible in your BIOS folder, but it is not a bootable PS2 BIOS. Keep it if it is a companion ROM, and select a valid boot BIOS as default."
+                fileImporter.showImportAlert = true
+            }
         } label: {
             HStack(spacing: 12) {
                 regionBadge(for: bios)
@@ -96,11 +101,16 @@ struct BIOSListView: View {
                     Text(bios.fileName)
                         .font(.body)
                         .foregroundStyle(.primary)
-                    Text(bios.valid ? "\(bios.regionName) BIOS" : settings.localized("Unknown BIOS Region"))
+                    Text(bios.valid ? "\(bios.regionName) BIOS" : settings.localized("Not a boot BIOS"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if bios.valid && !bios.descriptionText.isEmpty {
                         Text(bios.descriptionText)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    } else if !bios.valid {
+                        Text(settings.localized("Companion ROM or unsupported BIOS dump"))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
@@ -114,6 +124,7 @@ struct BIOSListView: View {
             }
         }
         .foregroundStyle(.primary)
+        .opacity(bios.valid ? 1 : 0.65)
     }
 
     private var emptyState: some View {
@@ -157,14 +168,14 @@ struct BIOSListView: View {
             NSLog("[ARMSX2 iOS BIOS] %@ picker completed with %d URL(s)", source, urls.count)
             fileImporter.handleURLs(urls, preferredDestination: .bios)
             loadBIOSes()
-            if defaultBIOS.isEmpty, let firstBIOS = bioses.first?.fileName {
+            if defaultBIOS.isEmpty, let firstBIOS = bioses.first(where: { $0.valid })?.fileName {
                 ARMSX2Bridge.setDefaultBIOS(firstBIOS)
                 defaultBIOS = firstBIOS
             }
-            if bioses.isEmpty, !urls.isEmpty {
+            if !bioses.contains(where: { $0.valid }), !urls.isEmpty {
                 fileImporter.lastImportMessage = [
                     fileImporter.lastImportMessage,
-                    "No usable PS2 BIOS was found after import. Use a 1-50 MB .bin or .rom BIOS dump."
+                    "No bootable PS2 BIOS was found after import. Companion ROMs may be listed, but select a valid boot BIOS dump."
                 ]
                 .compactMap { $0 }
                 .joined(separator: "\n")

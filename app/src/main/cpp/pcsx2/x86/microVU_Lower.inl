@@ -122,7 +122,7 @@ mVUop(mVU_SQRT)
 
 		if (CHECK_VU_OVERFLOW(mVU.index)) { // Clamp infinities (only need to do positive clamp since xmmFt is positive)
 //            xMIN.SS(Ft, ptr32[mVUglob.maxvals]);
-            armAsm->Umin(Ft.V4S(), Ft.V4S(), armLoadPtrV(PTR_CPU(mVUglob.maxvals)).V4S());
+            armAsm->Fminnm(Ft.S(), Ft.S(), armLoadPtrV(PTR_CPU(mVUglob.maxvals)).S());
         }
 //		xSQRT.SS(Ft, Ft);
         armAsm->Fsqrt(Ft.S(), Ft.S());
@@ -398,7 +398,7 @@ mVUop(mVU_EEXP)
 		SSE_MULSS(mVU, xmmPQ, xmmPQ);
 		SSE_MULSS(mVU, xmmPQ, xmmPQ);
 //		xMOVSSZX(t2, ptr32[mVUglob.one]);
-        armAsm->Ldr(t2, PTR_CPU(mVUglob.one));
+        mVUloadSSZX(t2, PTR_CPU(mVUglob.one));
 		SSE_DIVSS(mVU, t2, xmmPQ);
 //		xMOVSS(xmmPQ, t2);
         armAsm->Mov(xmmPQ.S(), 0, t2.S(), 0);
@@ -418,9 +418,13 @@ static __fi void mVU_sumXYZ(mV, const xmm& PQ, const xmm& Fs)
 //	xDP.PS(Fs, Fs, 0x71);
 //	xMOVSS(PQ, Fs);
 
-    armAsm->Fmul(PQ.V4S(), Fs.V4S(), Fs.V4S());
-    armAsm->Faddp(PQ.V4S(), PQ.V4S(), PQ.V4S());
-    armAsm->Faddp(PQ.S(), PQ.V2S());
+	armAsm->Fmul(PQ.V4S(), Fs.V4S(), Fs.V4S());
+	// Match the x86 DP.PS mask: sum X/Y/Z only, never the W lane.
+	armAsm->Ins(PQ.V4S(), 3, a64::wzr);
+	armAsm->Faddp(PQ.V4S(), PQ.V4S(), PQ.V4S());
+	armAsm->Faddp(PQ.S(), PQ.V2S());
+	armAsm->Fmov(EAX, PQ.S());
+	armAsm->Fmov(PQ.S(), EAX);
 }
 
 mVUop(mVU_ELENG)
@@ -470,7 +474,7 @@ mVUop(mVU_ERCPR)
 //		xMOVSS        (xmmPQ, Fs);
         armAsm->Mov(xmmPQ.S(), 0, Fs.S(), 0);
 //		xMOVSSZX      (Fs, ptr32[mVUglob.one]);
-        armAsm->Ldr(Fs, PTR_CPU(mVUglob.one));
+        mVUloadSSZX(Fs, PTR_CPU(mVUglob.one));
 		SSE_DIVSS(mVU, Fs, xmmPQ);
 //		xMOVSS        (xmmPQ, Fs);
         armAsm->Mov(xmmPQ.S(), 0, Fs.S(), 0);
@@ -503,7 +507,7 @@ mVUop(mVU_ERLENG)
         armAsm->Fsqrt(RQSCRATCH.S(), RQSCRATCH.S());
         armAsm->Mov(xmmPQ.S(), 0, RQSCRATCH.S(), 0);
 //		xMOVSSZX       (Fs, ptr32[mVUglob.one]);
-        armAsm->Ldr(Fs, PTR_CPU(mVUglob.one));
+        mVUloadSSZX(Fs, PTR_CPU(mVUglob.one));
 		SSE_DIVSS (mVU, Fs, xmmPQ);
 //		xMOVSS         (xmmPQ, Fs);
         armAsm->Mov(xmmPQ.S(), 0, Fs.S(), 0);
@@ -533,7 +537,7 @@ mVUop(mVU_ERSADD)
         armPSHUFD(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6);
 		mVU_sumXYZ(mVU, xmmPQ, Fs);
 //		xMOVSSZX       (Fs, ptr32[mVUglob.one]);
-        armAsm->Ldr(Fs, PTR_CPU(mVUglob.one));
+        mVUloadSSZX(Fs, PTR_CPU(mVUglob.one));
 		SSE_DIVSS (mVU, Fs, xmmPQ);
 //		xMOVSS         (xmmPQ, Fs);
         armAsm->Mov(xmmPQ.S(), 0, Fs.S(), 0);
@@ -564,9 +568,10 @@ mVUop(mVU_ERSQRT)
 //		xAND.PS       (Fs, ptr128[mVUglob.absclip]);
         armAsm->And(Fs.V16B(), Fs.V16B(), armLoadPtrV(PTR_CPU(mVUglob.absclip)).V16B());
 //		xSQRT.SS      (xmmPQ, Fs);
-        armAsm->Fsqrt(xmmPQ.S(), Fs.S());
+        armAsm->Fsqrt(RQSCRATCH.S(), Fs.S());
+        armAsm->Mov(xmmPQ.S(), 0, RQSCRATCH.S(), 0);
 //		xMOVSSZX      (Fs, ptr32[mVUglob.one]);
-        armAsm->Ldr(Fs, PTR_CPU(mVUglob.one));
+        mVUloadSSZX(Fs, PTR_CPU(mVUglob.one));
 		SSE_DIVSS(mVU, Fs, xmmPQ);
 //		xMOVSS        (xmmPQ, Fs);
         armAsm->Mov(xmmPQ.S(), 0, Fs.S(), 0);
@@ -680,7 +685,8 @@ mVUop(mVU_ESQRT)
 //		xAND.PS (Fs, ptr128[mVUglob.absclip]);
         armAsm->And(Fs.V16B(), Fs.V16B(), armLoadPtrV(PTR_CPU(mVUglob.absclip)).V16B());
 //		xSQRT.SS(xmmPQ, Fs);
-        armAsm->Fsqrt(xmmPQ.S(), Fs.S());
+        armAsm->Fsqrt(RQSCRATCH.S(), Fs.S());
+        armAsm->Mov(xmmPQ.S(), 0, RQSCRATCH.S(), 0);
 //		xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
         armPSHUFD(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6);
 		mVU.regAlloc->clearNeeded(Fs);

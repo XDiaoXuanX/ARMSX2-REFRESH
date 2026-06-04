@@ -29,6 +29,10 @@
 #include <sstream>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 namespace Patch
 {
 	enum patch_cpu_type : u8
@@ -146,6 +150,9 @@ namespace Patch
 		const std::string_view serial, u32 crc, bool include_serial, bool add_wildcard, bool all_crcs);
 	static std::vector<std::string> FindPatchFilesOnDisk(
 		const std::string_view serial, u32 crc, bool cheats, bool all_crcs);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	static bool ShouldQuarantineBurnoutRevengePnach(const std::string_view serial, u32 crc);
+#endif
 
 	static bool ContainsPatchName(const PatchInfoList& patches, const std::string_view patchName);
 	static bool ContainsPatchName(const PatchList& patches, const std::string_view patchName);
@@ -403,6 +410,16 @@ std::vector<std::string> Patch::FindPatchFilesOnDisk(const std::string_view seri
 	return ret;
 }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+bool Patch::ShouldQuarantineBurnoutRevengePnach(const std::string_view serial, u32 crc)
+{
+	// Diagnostic quarantine: normal boot loads this PNACH before crashing, while save-state
+	// entry bypasses that path. Keep it scoped to Burnout Revenge iOS test builds.
+	return (serial == "SLUS-21242" && (crc == 0 || crc == 0xD224D348)) ||
+		   (serial == "SLES-53506" && (crc == 0 || crc == 0x2CAC3DBC));
+}
+#endif
+
 bool Patch::ContainsPatchName(const PatchInfoList& patches, const std::string_view patchName)
 {
 	return std::find_if(patches.begin(), patches.end(), [&patchName](const PatchInfo& patch) {
@@ -413,6 +430,15 @@ bool Patch::ContainsPatchName(const PatchInfoList& patches, const std::string_vi
 template <typename F>
 void Patch::EnumeratePnachFiles(const std::string_view serial, u32 crc, bool cheats, bool for_ui, const F& f)
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	if (!for_ui && ShouldQuarantineBurnoutRevengePnach(serial, crc))
+	{
+		Console.Warning("@@IOS_BURNOUT_PNACH_SKIP@@ serial=%s crc=%08X cheats=%d reason=diagnostic_startup_crash",
+			std::string(serial).c_str(), crc, cheats ? 1 : 0);
+		return;
+	}
+#endif
+
 	// Prefer files on disk over the zip.
 	std::vector<std::string> disk_patch_files;
 	if (for_ui || !Achievements::IsHardcoreModeActive())

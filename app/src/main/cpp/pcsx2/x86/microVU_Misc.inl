@@ -24,31 +24,37 @@ void mVUunpack_xyzw(const xmm& dstreg, const xmm& srcreg, int xyzw)
     }
 }
 
+static __fi void mVUloadSSZX(const xmm& reg, const a64::MemOperand& ptr)
+{
+	armAsm->Eor(reg.V16B(), reg.V16B(), reg.V16B());
+	armAsm->Ldr(reg.S(), ptr);
+}
+
 void mVUloadReg(const xmm& reg, const a64::MemOperand& ptr, int xyzw)
 {
     switch (xyzw)
     {
         case 8: {
 //            xMOVSSZX(reg, ptr32[ptr]);
-            armAsm->Ldr(reg.S(), ptr);
+            mVUloadSSZX(reg, ptr);
             break; // X
         }
         case 4: {
 //            xMOVSSZX(reg, ptr32[ptr + 4]);
             armGetMemOperandInRegister(RXVIXLSCRATCH, ptr, 4);
-            armAsm->Ldr(reg.S(), a64::MemOperand(RXVIXLSCRATCH));
+            mVUloadSSZX(reg, a64::MemOperand(RXVIXLSCRATCH));
             break; // Y
         }
         case 2: {
 //            xMOVSSZX(reg, ptr32[ptr + 8]);
             armGetMemOperandInRegister(RXVIXLSCRATCH, ptr, 8);
-            armAsm->Ldr(reg.S(), a64::MemOperand(RXVIXLSCRATCH));
+            mVUloadSSZX(reg, a64::MemOperand(RXVIXLSCRATCH));
             break; // Z
         }
         case 1: {
 //            xMOVSSZX(reg, ptr32[ptr + 12]);
             armGetMemOperandInRegister(RXVIXLSCRATCH, ptr, 12);
-            armAsm->Ldr(reg.S(), a64::MemOperand(RXVIXLSCRATCH));
+            mVUloadSSZX(reg, a64::MemOperand(RXVIXLSCRATCH));
             break; // W
         }
         default: {
@@ -62,7 +68,7 @@ void mVUloadReg(const xmm& reg, const a64::MemOperand& ptr, int xyzw)
 void mVUloadIreg(const xmm& reg, int xyzw, VURegs* vuRegs)
 {
 //	xMOVSSZX(reg, ptr32[&vuRegs->VI[REG_I].UL]);
-    armAsm->Ldr(reg, PTR_CPU(vuRegs[g_cpuRegistersPack.vuRegs->idx].VI[REG_I].UL));
+    mVUloadSSZX(reg, PTR_CPU(vuRegs[g_cpuRegistersPack.vuRegs->idx].VI[REG_I].UL));
 	if (!_XYZWss(xyzw)) {
 //        xSHUF.PS(reg, reg, 0);
         armSHUFPS(reg, reg, 0);
