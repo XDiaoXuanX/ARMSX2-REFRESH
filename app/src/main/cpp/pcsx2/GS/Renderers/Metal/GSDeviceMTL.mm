@@ -1819,7 +1819,7 @@ static MTLBlendFactor ConvertBlendFactor(GSDevice::BlendFactor generic)
 		case GSDevice::SRC_COLOR:       return MTLBlendFactorSourceColor;
 		case GSDevice::INV_SRC_COLOR:   return MTLBlendFactorOneMinusSourceColor;
 		case GSDevice::DST_COLOR:       return MTLBlendFactorDestinationColor;
-		case GSDevice::INV_DST_COLOR:   return MTLBlendFactorOneMinusBlendColor;
+		case GSDevice::INV_DST_COLOR:   return MTLBlendFactorOneMinusDestinationColor;
 		case GSDevice::SRC1_COLOR:      return MTLBlendFactorSource1Color;
 		case GSDevice::INV_SRC1_COLOR:  return MTLBlendFactorOneMinusSource1Color;
 		case GSDevice::SRC_ALPHA:       return MTLBlendFactorSourceAlpha;
