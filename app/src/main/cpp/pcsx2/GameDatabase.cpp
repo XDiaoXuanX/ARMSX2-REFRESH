@@ -449,6 +449,16 @@ static bool IsIOSBurnoutRevengeGame(const std::string& name)
 	return name.find("Burnout Revenge") != std::string::npos;
 }
 
+static bool IsIOSBurnout3Game(const std::string& name)
+{
+	return name.find("Burnout 3") != std::string::npos;
+}
+
+static bool IsIOSBurnoutMetalCallbackGame(const std::string& name)
+{
+	return IsIOSBurnoutRevengeGame(name) || IsIOSBurnout3Game(name);
+}
+
 static std::string GetIOSCompatibilityLabProfileForGSPolicy()
 {
 	SettingsInterface* si = Host::GetSettingsInterface();
@@ -585,7 +595,7 @@ static bool IsIOSMetalAllowedCompatLabOffGSHWFix(const GameDatabaseSchema::GameE
 	if (!IsIOSMetalHighRiskAutoGSHWFix(id))
 		return true;
 
-	if (!IsIOSBurnoutRevengeGame(entry.name))
+	if (!IsIOSBurnoutMetalCallbackGame(entry.name))
 		return false;
 
 	switch (id)

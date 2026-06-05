@@ -248,7 +248,26 @@ enum EE_EventType
 	VU_MTVU_BUSY
 };
 
-extern void CPU_INT( EE_EventType n, s32 ecycle );
+enum EEVIF1ScheduleSource : u8
+{
+	EE_VIF1_SRC_GENERIC = 0,
+	EE_VIF1_SRC_BUSERR,
+	EE_VIF1_SRC_PATH2_WAIT,
+	EE_VIF1_SRC_INPROGRESS_WAITVU,
+	EE_VIF1_SRC_INPROGRESS_CYCLES,
+	EE_VIF1_SRC_SETUP_WAITVU,
+	EE_VIF1_SRC_SETUP_CYCLES,
+	EE_VIF1_SRC_STALL_END,
+	EE_VIF1_SRC_DMA_START,
+	EE_VIF1_SRC_VIF_FBRST,
+	EE_VIF1_SRC_VIF_STAT,
+	EE_VIF1_SRC_GIF_PATH3,
+	EE_VIF1_SRC_GIF_UNIT,
+	EE_VIF1_SRC_XGKICK,
+	EE_VIF1_SRC_COUNT
+};
+
+extern void CPU_INT( EE_EventType n, s32 ecycle, u8 source = EE_VIF1_SRC_GENERIC );
 extern void CPU_SET_DMASTALL(EE_EventType n, bool set);
 extern uint intcInterrupt();
 extern uint dmacInterrupt();

@@ -5,7 +5,6 @@
 #include "VUops.h"
 #include "GS.h"
 #include "Gif_Unit.h"
-#include <sys/time.h> // [CLIFF_DIAG]
 #include "MTVU.h"
 
 #include <cmath>
@@ -1831,11 +1830,6 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 	if (!VU1.xgkickenable)
 		return;
 
-	CliffDiag::xgkickXfer.fetch_add(1, std::memory_order_relaxed); // [CLIFF_DIAG]
-	// [CLIFF_DIAG] Time XGKICK transfer
-	struct timeval _xgk_tv0;
-	gettimeofday(&_xgk_tv0, nullptr);
-
 	VU1.xgkickcyclecount += cycles;
 	VU1.xgkicklastcycle += cycles;
 
@@ -1898,7 +1892,7 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 			if (vif1Regs.stat.VGW)
 			{
 				vif1Regs.stat.VGW = false;
-				CPU_INT(DMAC_VIF1, 8);
+				CPU_INT(DMAC_VIF1, 8, EE_VIF1_SRC_XGKICK);
 			}
 		}
 	}
@@ -1908,14 +1902,6 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 		_vuTestPipes(&VU1);
 	}
 	VUM_LOG("XGKick run complete Enabled %d", VU1.xgkickenable);
-
-	// [CLIFF_DIAG] End XGKICK timing
-	{
-		struct timeval _xgk_tv1;
-		gettimeofday(&_xgk_tv1, nullptr);
-		uint32_t dt = (uint32_t)((_xgk_tv1.tv_sec - _xgk_tv0.tv_sec) * 1000000 + (_xgk_tv1.tv_usec - _xgk_tv0.tv_usec));
-		CliffDiag::xgkickUs.fetch_add(dt, std::memory_order_relaxed);
-	}
 }
 
 static __ri void _vuXGKICK(VURegs* VU)

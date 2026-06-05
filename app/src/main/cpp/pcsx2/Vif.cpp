@@ -198,7 +198,7 @@ __fi void vif1FBRST(u32 value)
 			case MFD_GIF: // Wonder if this should be with VIF?
 				// Gets the timing right - Flatout
 				if (vif1ch.chcr.STR && !vif1Regs.stat.test(VIF1_STAT_FDR))
-					CPU_INT(DMAC_VIF1, 0);
+					CPU_INT(DMAC_VIF1, 0, EE_VIF1_SRC_VIF_FBRST);
 				break;
 			}
 
@@ -288,7 +288,7 @@ __fi void vif1STAT(u32 value)
 		//Other times it can read it off ;)
 		vif1Regs.stat.FQC = 0;
 		if (vif1ch.chcr.STR)
-			CPU_INT(DMAC_VIF1, 0);
+			CPU_INT(DMAC_VIF1, 0, EE_VIF1_SRC_VIF_STAT);
 	}
 }
 

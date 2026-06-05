@@ -11,18 +11,12 @@
 
 using namespace R5900;
 
-// [TEMP_DIAG] @@INTCHACK@@ counter — Removal condition: VIF1 gap root causeafter identified
-u32 g_intchack_fire_cnt = 0;
-u32 g_intchack_call_cnt = 0;
-
 static __fi void IntCHackCheck()
 {
-	g_intchack_call_cnt++;
 	// Sanity check: To protect from accidentally "rewinding" the cyclecount
 	// on the few times nextBranchCycle can be behind our current cycle.
 	s32 diff = cpuRegs.nextEventCycle - cpuRegs.cycle;
 	if (diff > 0 && (cpuRegs.cycle - cpuRegs.lastEventCycle) > 8) {
-		g_intchack_fire_cnt++;
 		cpuRegs.cycle = cpuRegs.nextEventCycle;
 	}
 }

@@ -159,6 +159,29 @@ bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTe
     // ... (existing code)
 }
 #else
+static void UnpremultiplyAlpha(u32 width, u32 height, std::vector<u8>& data, u32 pitch)
+{
+	for (u32 row = 0; row < height; row++)
+	{
+		u8* pixel = data.data() + (static_cast<size_t>(row) * pitch);
+
+		for (u32 col = 0; col < width; col++)
+		{
+			const u8 alpha = pixel[3];
+			if (alpha != 0 && alpha != 255)
+			{
+				for (u32 channel = 0; channel < 3; channel++)
+				{
+					const u32 straight = (static_cast<u32>(pixel[channel]) * 255u + (alpha / 2u)) / alpha;
+					pixel[channel] = static_cast<u8>((straight > 255u) ? 255u : straight);
+				}
+			}
+
+			pixel += sizeof(u32);
+		}
+	}
+}
+
 bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTexture* tex, bool only_base_image)
 {
 	if (filename.empty())
@@ -203,6 +226,10 @@ bool PNGLoader(const std::string& filename, GSTextureReplacements::ReplacementTe
 	CGContextDrawImage(context, CGRectMake(0, 0, static_cast<CGFloat>(width), static_cast<CGFloat>(height)), image);
 	CGContextRelease(context);
 	CGImageRelease(image);
+
+	// CoreGraphics requires premultiplied alpha for this context; texture
+	// replacement rendering expects straight RGBA.
+	UnpremultiplyAlpha(static_cast<u32>(width), static_cast<u32>(height), data, static_cast<u32>(bytes_per_row));
 
 	tex->width = static_cast<u32>(width);
 	tex->height = static_cast<u32>(height);

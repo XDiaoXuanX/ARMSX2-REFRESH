@@ -8,30 +8,7 @@
 #include "GS.h"
 #include "GS/GSRegs.h"
 #include "MTGS.h"
-#include "QAProbe.h" // [V34]
 #include <atomic>
-// [CLIFF_DIAG] extern counters (defined in Counters.cpp)
-namespace CliffDiag {
-	extern std::atomic<uint32_t> copyGSPkt;
-	extern std::atomic<uint32_t> realignPkt;
-	extern std::atomic<uint32_t> xgkickXfer;
-	extern std::atomic<uint32_t> mtgsWaitCalls;
-	extern std::atomic<uint32_t> path1Bytes;
-	extern std::atomic<uint32_t> path2Bytes;
-	extern std::atomic<uint32_t> path3Bytes;
-	extern std::atomic<int32_t>  readAmountMax;
-	extern std::atomic<uint32_t> gsXferUs;
-	extern std::atomic<uint32_t> gsXferCalls;
-	extern std::atomic<uint32_t> vu1Ebit;
-	extern std::atomic<uint32_t> vu1ExecUs;
-	extern std::atomic<uint32_t> vu1Kicks;
-	extern std::atomic<uint32_t> xgkickUs;
-	extern std::atomic<uint32_t> frameKickNum;
-	extern std::atomic<uint32_t> firstWaitKick;
-	extern std::atomic<uint32_t> firstRealignKick;
-	extern std::atomic<uint32_t> waitUsAccum;
-	extern uint32_t f2258_totalKicks;
-}
 
 // FIXME common path ?
 #include "common/boost_spsc_queue.hpp"
@@ -294,13 +271,6 @@ struct Gif_Path
 	// causes busy-wait (82% of freeze time) without giving MTGS CPU time.
 	void mtgsReadWait()
 	{
-		CliffDiag::mtgsWaitCalls.fetch_add(1, std::memory_order_relaxed); // [CLIFF_DIAG]
-		// Track readAmount max
-		{
-			s32 ra = getReadAmount();
-			s32 cur = CliffDiag::readAmountMax.load(std::memory_order_relaxed);
-			while (ra > cur && !CliffDiag::readAmountMax.compare_exchange_weak(cur, ra, std::memory_order_relaxed)) {}
-		}
 		if (IsDevBuild)
 		{
 			DevCon.WriteLn(Color_Red, "Gif Path[%d] - MTGS Wait! [r=0x%x]", idx + 1, getReadAmount());
@@ -314,7 +284,6 @@ struct Gif_Path
 	// Moves packet data to start of buffer
 	void RealignPacket()
 	{
-		CliffDiag::realignPkt.fetch_add(1, std::memory_order_relaxed); // [CLIFF_DIAG]
 		GUNIT_LOG("Path Buffer: Realigning packet!");
 		s32 offset = curOffset - gsPack.size;
 		s32 sizeToAdd = curSize - offset;
@@ -347,7 +316,6 @@ struct Gif_Path
 
 	void CopyGSPacketData(u8* pMem, u32 size, bool aligned = false)
 	{
-		CliffDiag::copyGSPkt.fetch_add(1, std::memory_order_relaxed); // [CLIFF_DIAG]
 		if (curSize + size > buffSize)
 		{ // Move gsPack to front of buffer
 			GUNIT_LOG("CopyGSPacketData: Realigning packet!");
@@ -597,7 +565,7 @@ struct Gif_Unit
 		if (vif1Regs.stat.VGW)
 		{
 			if (!(cpuRegs.interrupt & (1 << DMAC_VIF1)))
-				CPU_INT(DMAC_VIF1, 1);
+				CPU_INT(DMAC_VIF1, 1, EE_VIF1_SRC_GIF_UNIT);
 		}
 	}
 
@@ -678,15 +646,6 @@ struct Gif_Unit
 				return 0;
 			}
 		}
-
-		// [CLIFF_DIAG] Track per-path byte counts + [P48-2] data checksum
-		{
-			int p = tranType & 3;
-			if (p == GIF_PATH_1) CliffDiag::path1Bytes.fetch_add(size, std::memory_order_relaxed);
-			else if (p == GIF_PATH_2) CliffDiag::path2Bytes.fetch_add(size, std::memory_order_relaxed);
-			else if (p == GIF_PATH_3) CliffDiag::path3Bytes.fetch_add(size, std::memory_order_relaxed);
-		}
-		QAProbe::on_gif_transfer((u32)tranType, (u32)(tranType & 3), pMem, size); // [V34]
 
 		GUNIT_LOG("%s - [path=%d][size=%d]", Gif_TransferStr[(tranType >> 8) & 0xf], (tranType & 3) + 1, size);
 		if (size == 0)
@@ -876,7 +835,7 @@ struct Gif_Unit
 					{
 						// Check if VIF is in a cycle or is currently "idle" waiting for GIF to come back.
 						if (!(cpuRegs.interrupt & (1 << DMAC_VIF1)))
-							CPU_INT(DMAC_VIF1, 1);
+							CPU_INT(DMAC_VIF1, 1, EE_VIF1_SRC_GIF_UNIT);
 					}
 
 					stat.APATH = 0;

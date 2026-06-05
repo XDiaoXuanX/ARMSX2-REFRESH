@@ -356,43 +356,9 @@ void GSVertexSWInitStatic()
 
 MULTI_ISA_UNSHARED_END
 
-// [TEMP_DIAG] per-vsync draw counters — Removal condition: 青い靄のissue解決後
-extern std::atomic<uint32_t> g_sw_draw_count;
-extern std::atomic<uint32_t> g_sw_skip_count;
-
 void GSRendererSW::Draw()
 {
-	g_sw_draw_count.fetch_add(1, std::memory_order_relaxed);
 	const GSDrawingContext* context = m_context;
-
-	// [TEMP_DIAG] @@GS_DRAW_CTX@@ — FRAME/TEX0/vertex context at Draw() entry
-	// Removal condition: BIOS browser描画after confirmed
-	{
-		static u32 s_draw_ctx_n = 0;
-		const auto& tex0 = context->TEX0;
-		// Log first 30 draws AND any TME=1 tri-strip draws (n=60-300) for animation comparison
-		bool log_early = (s_draw_ctx_n < 30);
-		bool log_anim = (s_draw_ctx_n >= 60 && s_draw_ctx_n <= 300 && PRIM->TME && m_vt.m_primclass != 3 /*GS_SPRITE_CLASS*/);
-		if (log_early || log_anim) {
-			const auto& frame = context->FRAME;
-			Console.WriteLn("@@GS_DRAW_CTX@@ n=%u FBP=%u FBW=%u PSM=%u prim=%u TME=%u FST=%u primclass=%d verts=%u",
-				s_draw_ctx_n, (u32)frame.FBP, (u32)frame.FBW, (u32)frame.PSM,
-				PRIM->PRIM, PRIM->TME, PRIM->FST, m_vt.m_primclass, m_vertex.next);
-			Console.WriteLn("@@GS_DRAW_TEX@@ n=%u TBP=%u TBW=%u PSM=%u TW=%u TH=%u TCC=%u TFX=%u CSA=%u CPSM=%u CLD=%u",
-				s_draw_ctx_n, (u32)tex0.TBP0, (u32)tex0.TBW, (u32)tex0.PSM,
-				(u32)tex0.TW, (u32)tex0.TH, (u32)tex0.TCC, (u32)tex0.TFX,
-				(u32)tex0.CSA, (u32)tex0.CPSM, (u32)tex0.CLD);
-			// Dump first vertex RGBAQ for color comparison
-			if (m_vertex.next > 0) {
-				const auto& v0 = m_vertex.buff[0];
-				Console.WriteLn("@@GS_DRAW_V0@@ n=%u RGBA=(%u,%u,%u,%u) STQ=(%.6f,%.6f,%.6f) XY=(%u,%u)",
-					s_draw_ctx_n, v0.RGBAQ.R, v0.RGBAQ.G, v0.RGBAQ.B, v0.RGBAQ.A,
-					v0.ST.S, v0.ST.T, v0.RGBAQ.Q,
-					v0.XYZ.X >> 4, v0.XYZ.Y >> 4);
-			}
-		}
-		s_draw_ctx_n++;
-	}
 
 	if (GSConfig.SaveInfo && GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()))
 	{
@@ -448,23 +414,6 @@ void GSRendererSW::Draw()
 
 	if (!GetScanlineGlobalData(sd))
 	{
-		// [TEMP_DIAG] @@GS_DRAW_SKIP@@ — GetScanlineGlobalData returned false
-		{
-			static u32 s_skip_n = 0, s_skip_total = 0;
-			s_skip_total++;
-			g_sw_skip_count.fetch_add(1, std::memory_order_relaxed);
-			if (s_skip_n < 20) {
-				const auto* ctx = m_context;
-				Console.WriteLn("@@GS_DRAW_SKIP@@ n=%u tot=%u fbmsk=%08x fpsm=%u fblk=%05x zpsm=%u zmsk=%u zte=%u ztst=%u ate=%u atst=%u aref=%u date=%u tme=%u bbox=[%d,%d,%d,%d]",
-					s_skip_n, s_skip_total,
-					ctx->FRAME.FBMSK, ctx->FRAME.PSM, ctx->FRAME.Block(),
-					ctx->ZBUF.PSM, ctx->ZBUF.ZMSK, ctx->TEST.ZTE, ctx->TEST.ZTST,
-					ctx->TEST.ATE, ctx->TEST.ATST, ctx->TEST.AREF, ctx->TEST.DATE,
-					PRIM->TME,
-					bbox.x, bbox.y, bbox.z, bbox.w);
-				s_skip_n++;
-			}
-		}
 		return;
 	}
 

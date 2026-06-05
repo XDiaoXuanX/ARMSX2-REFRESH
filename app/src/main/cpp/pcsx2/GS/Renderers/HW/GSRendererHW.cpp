@@ -2213,12 +2213,8 @@ void GSRendererHW::RoundSpriteOffset()
 	}
 }
 
-// [TEMP_DIAG] HW draw counter — Removal condition: draws=0 root causeafter identified
-extern std::atomic<uint32_t> g_hw_draw_count;
-
 void GSRendererHW::Draw()
 {
-	g_hw_draw_count.fetch_add(1, std::memory_order_relaxed);
 	if (GSConfig.SaveInfo && GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()))
 	{
 		std::string s;

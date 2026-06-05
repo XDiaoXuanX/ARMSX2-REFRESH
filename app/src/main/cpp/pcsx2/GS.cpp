@@ -17,6 +17,7 @@ extern "C" void LogUnified(const char* fmt, ...);
 
 alignas(16) u8 g_RealGSMem[Ps2MemSize::GSregs];
 static bool s_GSRegistersWritten = false;
+static constexpr bool kIOSLegacyGSWriteDiagnostics = false;
 
 // [R64 TEMP_DIAG] @@DISPFB2_COUNTER@@ globals
 // Removal condition: BIOS animationdisplayafter confirmed
@@ -171,8 +172,9 @@ __fi void gsWrite32(u32 mem, u32 value)
 	pxAssume( (mem & 3) == 0 );
 	GIF_LOG("GS write 32 at %8.8lx with data %8.8lx", mem, value);
 	// [iter101] catch 32-bit writes to key GS display registers
-	if (mem == GS_PMODE || mem == GS_DISPLAY1 || mem == GS_DISPLAY2 ||
-	    mem == GS_DISPFB1 || mem == GS_DISPFB2) {
+	if (kIOSLegacyGSWriteDiagnostics &&
+	    (mem == GS_PMODE || mem == GS_DISPLAY1 || mem == GS_DISPLAY2 ||
+	    mem == GS_DISPFB1 || mem == GS_DISPFB2)) {
 		static u32 s_gs32_n = 0;
 		if (s_gs32_n < 16) {
 			LogUnified("@@GS_WRITE32@@ n=%u mem=%08x val=%08x\n", s_gs32_n, mem, value);
@@ -193,6 +195,7 @@ __fi void gsWrite32(u32 mem, u32 value)
 
 	// [R61] @@GS_W32_LATE@@ — 32-bit GS display reg late write detection
 	// Removal condition: GS register破損のroot causeafter determined
+	if (kIOSLegacyGSWriteDiagnostics)
 	{
 		const bool is_disp = (mem >= 0x12000010u && mem <= 0x120000F0u);
 		if (is_disp && cpuRegs.cycle > 100000000u) {
@@ -217,10 +220,11 @@ void gsWrite64_generic( u32 mem, u64 value )
 }
 
 void gsWrite64_page_00( u32 mem, u64 value )
-{
-	// [iter101] @@GS_PAGE00_W64@@ – log first 20 unique GS page-00 64-bit writes
 	{
-		static u32 s_p00_n = 0;
+		// [iter101] @@GS_PAGE00_W64@@ – log first 20 unique GS page-00 64-bit writes
+		if (kIOSLegacyGSWriteDiagnostics)
+		{
+			static u32 s_p00_n = 0;
 		if (s_p00_n < 80) { // [iter244] expanded from 20 to catch LOGO writes
 			LogUnified("@@GS_PAGE00_W64@@ n=%u mem=%08x val=%016llx\n", s_p00_n, mem, value);
 			s_p00_n++;
@@ -229,6 +233,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 	// [P12] @@GS_PAGE00_W64_LOG@@ — Console.WriteLn版 (pcsx2_log.txt へ出力, cap=50)
 	// 目的: JIT vs Interpreter の GS page0 書き込みシーケンス比較
 	// Removal condition: Sony ロゴdisplayafter confirmed
+	if (kIOSLegacyGSWriteDiagnostics)
 	{
 		static int s_p00_log_n = 0;
 		if (s_p00_log_n < 50) {
@@ -240,6 +245,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 	// [R61] @@GS_DISP_CORRUPT_DETECT@@ — GS display reg 64-bit upper=lower 破損detect
 	// 目的: SMODE2/DISPFB/DISPLAY/BGCOLOR への破損書き込みをキャッチ
 	// Removal condition: GS register破損のroot causeafter determined
+	if (kIOSLegacyGSWriteDiagnostics)
 	{
 		const u32 lo = (u32)(value);
 		const u32 hi = (u32)(value >> 32);
@@ -263,7 +269,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 		}
 	}
 	// [iPSX2] One-Shot GS Register Logging
-	if (mem == GS_SMODE1) {
+	if (kIOSLegacyGSWriteDiagnostics && mem == GS_SMODE1) {
 		static bool s_log_smode1 = false;
 		if (!s_log_smode1) {
 			GSRegSMODE1 s;
@@ -281,7 +287,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 		// iter221 で導入したが、VRAM 未初期化データが青画面としてdisplayされるcause。
 		// LOGO が自然に GS registerをconfigするまで待つ。
 	}
-	if (mem == GS_PMODE) {
+	if (kIOSLegacyGSWriteDiagnostics && mem == GS_PMODE) {
 		static bool s_log_pmode = false;
 		if (!s_log_pmode) {
 			GSRegPMODE p;
@@ -302,7 +308,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 			}
 		}
 	}
-	if (mem == GS_DISPFB1) {
+	if (kIOSLegacyGSWriteDiagnostics && mem == GS_DISPFB1) {
 		 static bool s_log_dispfb1 = false;
 		 if (!s_log_dispfb1) {
 			 GSRegDISPFB d;
@@ -311,7 +317,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 			 s_log_dispfb1 = true;
 		 }
 	}
-	if (mem == GS_DISPFB2) {
+	if (kIOSLegacyGSWriteDiagnostics && mem == GS_DISPFB2) {
 		 static bool s_log_dispfb2 = false;
 		 if (!s_log_dispfb2) {
 			 GSRegDISPFB d;
@@ -321,7 +327,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 		 }
 	}
 	// [iter101] @@GS_DISPLAY1/2@@ – log first write to DISPLAY regs (64-bit path)
-	if (mem == GS_DISPLAY1) {
+	if (kIOSLegacyGSWriteDiagnostics && mem == GS_DISPLAY1) {
 		static bool s_log_disp1 = false;
 		if (!s_log_disp1) {
 			GSRegDISPLAY d; d.U64 = value;
@@ -330,7 +336,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 			s_log_disp1 = true;
 		}
 	}
-	if (mem == GS_DISPLAY2) {
+	if (kIOSLegacyGSWriteDiagnostics && mem == GS_DISPLAY2) {
 		static bool s_log_disp2 = false;
 		if (!s_log_disp2) {
 			GSRegDISPLAY d; d.U64 = value;
@@ -342,7 +348,7 @@ void gsWrite64_page_00( u32 mem, u64 value )
 
 	// [R64 TEMP_DIAG] @@DISPFB2_COUNTER@@ — track total DISPFB2 write count + last value + GPR snapshot
 	// Removal condition: BIOS animationdisplayafter confirmed
-	if (mem == GS_DISPFB2) {
+	if (kIOSLegacyGSWriteDiagnostics && mem == GS_DISPFB2) {
 		extern std::atomic<uint32_t> g_dispfb2_write_count;
 		extern std::atomic<uint64_t> g_dispfb2_last_value;
 		u32 cnt = g_dispfb2_write_count.fetch_add(1, std::memory_order_relaxed);
@@ -430,14 +436,15 @@ void TAKES_R128 gsWrite128_page_01( u32 mem, r128 value )
 }
 
 void TAKES_R128 gsWrite128_generic( u32 mem, r128 value )
-{
-	alignas(16) const u128 uvalue = r128_to_u128(value);
-	GIF_LOG("GS Write128 at %8.8lx with data %8.8x_%8.8x_%8.8x_%8.8x", mem,
-		uvalue._u32[3], uvalue._u32[2], uvalue._u32[1], uvalue._u32[0]);
-
-	// [R61] @@GS_W128_CORRUPT_DETECT@@ — 128-bit 書き込みで upper32==lower32 破損detect
-	// Removal condition: GS register破損のroot causeafter determined
 	{
+		alignas(16) const u128 uvalue = r128_to_u128(value);
+		GIF_LOG("GS Write128 at %8.8lx with data %8.8x_%8.8x_%8.8x_%8.8x", mem,
+			uvalue._u32[3], uvalue._u32[2], uvalue._u32[1], uvalue._u32[0]);
+
+		// [R61] @@GS_W128_CORRUPT_DETECT@@ — 128-bit 書き込みで upper32==lower32 破損detect
+		// Removal condition: GS register破損のroot causeafter determined
+		if (kIOSLegacyGSWriteDiagnostics)
+		{
 		const u32 lo = uvalue._u32[0];
 		const u32 hi = uvalue._u32[1];
 		const u32 u2 = uvalue._u32[2];
@@ -542,4 +549,3 @@ bool SaveStateBase::gsFreeze()
 	Freeze(gsVideoMode);
 	return IsOkay();
 }
-

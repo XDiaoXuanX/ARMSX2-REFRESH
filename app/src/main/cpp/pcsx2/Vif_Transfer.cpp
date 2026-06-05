@@ -4,27 +4,18 @@
 #include "Common.h"
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
-#include <atomic>
 
 //------------------------------------------------------------------
 // VifCode Transfer Interpreter (Vif0/Vif1)
 //------------------------------------------------------------------
 
-// [TEMP_DIAG] VIF1 transfer stats — Removal condition: draws=0 root causeafter identified
-static std::atomic<uint32_t> s_vif1_xfer_calls{0};
-static std::atomic<uint32_t> s_vif1_cmds_total{0};
-static std::atomic<uint32_t> s_vif1_cmd_nop{0};
-static std::atomic<uint32_t> s_vif1_cmd_unpack{0};
-static std::atomic<uint32_t> s_vif1_cmd_mscal{0};  // MSCAL+MSCNT+MSCALF
-static std::atomic<uint32_t> s_vif1_cmd_direct{0}; // DIRECT+DIRECTHL
-static std::atomic<uint32_t> s_vif1_cmd_other{0};
-uint32_t getVif1XferCalls() { return s_vif1_xfer_calls.load(); }
-uint32_t getVif1CmdsTotal() { return s_vif1_cmds_total.load(); }
-uint32_t getVif1CmdNop() { return s_vif1_cmd_nop.load(); }
-uint32_t getVif1CmdUnpack() { return s_vif1_cmd_unpack.load(); }
-uint32_t getVif1CmdMscal() { return s_vif1_cmd_mscal.load(); }
-uint32_t getVif1CmdDirect() { return s_vif1_cmd_direct.load(); }
-uint32_t getVif1CmdOther() { return s_vif1_cmd_other.load(); }
+uint32_t getVif1XferCalls() { return 0; }
+uint32_t getVif1CmdsTotal() { return 0; }
+uint32_t getVif1CmdNop() { return 0; }
+uint32_t getVif1CmdUnpack() { return 0; }
+uint32_t getVif1CmdMscal() { return 0; }
+uint32_t getVif1CmdDirect() { return 0; }
+uint32_t getVif1CmdOther() { return 0; }
 
 // Interprets packet
 _vifT void vifTransferLoop(u32* &data) {
@@ -51,24 +42,6 @@ _vifT void vifTransferLoop(u32* &data) {
 
 			vifXRegs.code = data[0];
 			vifX.cmd	  = data[0] >> 24;
-
-			// [TEMP_DIAG] VIF1 command classification
-			if (idx == 1) {
-				u8 c = vifX.cmd & 0x7f;
-				s_vif1_cmds_total.fetch_add(1, std::memory_order_relaxed);
-				if (c == 0) s_vif1_cmd_nop.fetch_add(1, std::memory_order_relaxed);
-				else if (c >= 0x60) s_vif1_cmd_unpack.fetch_add(1, std::memory_order_relaxed);
-				else if (c == 0x14 || c == 0x15 || c == 0x17) s_vif1_cmd_mscal.fetch_add(1, std::memory_order_relaxed);
-				else if (c == 0x50 || c == 0x51) s_vif1_cmd_direct.fetch_add(1, std::memory_order_relaxed);
-				else {
-					s_vif1_cmd_other.fetch_add(1, std::memory_order_relaxed);
-					static int s_other_log = 0;
-					if (s_other_log < 20) {
-						Console.WriteLn("@@VIF1_CMD@@ n=%d raw=%08x cmd=%02x", s_other_log, data[0], c);
-						s_other_log++;
-					}
-				}
-			}
 
 			VIF_LOG("New VifCMD %x tagsize %x irq %d", vifX.cmd, vifX.tag.size, vifX.irq);
 			if (IsDevBuild && TraceLogging.EE.VIFcode.IsActive()) {
@@ -148,6 +121,5 @@ bool VIF0transfer(u32 *data, int size, bool TTE) {
 	return vifTransfer<0>(data, size, TTE);
 }
 bool VIF1transfer(u32 *data, int size, bool TTE) {
-	s_vif1_xfer_calls.fetch_add(1, std::memory_order_relaxed);
 	return vifTransfer<1>(data, size, TTE);
 }

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
-#include <sys/time.h> // [CLIFF_DIAG]
 #include "GS.h"
 #include "Gif_Unit.h"
 #include "MTGS.h"
@@ -452,14 +451,7 @@ void MTGS::MainLoop()
 					u32 size = tag.data[1];
 					if (offset != ~0u)
 					{
-						// [CLIFF_DIAG] Time GSgifTransfer
-						struct timeval tv0, tv1;
-						gettimeofday(&tv0, nullptr);
 						GSgifTransfer((u8*)&path.buffer[offset], size / 16);
-						gettimeofday(&tv1, nullptr);
-						uint32_t dt = (uint32_t)((tv1.tv_sec - tv0.tv_sec) * 1000000 + (tv1.tv_usec - tv0.tv_usec));
-						CliffDiag::gsXferUs.fetch_add(dt, std::memory_order_relaxed);
-						CliffDiag::gsXferCalls.fetch_add(1, std::memory_order_relaxed);
 					}
 					path.readAmount.fetch_sub(size, std::memory_order_acq_rel);
 					break;

@@ -64,6 +64,8 @@ extern int g_iop3204_test_val; // Defined in IopHwRead.cpp
 // Direct Logging Helper
 extern "C" void LogUnified(const char* fmt, ...);
 
+static constexpr bool kIOSLegacyEEDiagnostics = false;
+
 #ifdef DUMP_BLOCKS
 #include "Zydis/Zydis.h"
 #include "Zycore/Format.h"
@@ -545,7 +547,6 @@ void recBranchCall(void (*func)())
 
 void recCall(void (*func)())
 {
-	s_jit_reccall_count.fetch_add(1, std::memory_order_relaxed); // [TEMP_DIAG] compile-time count
 	iFlushCall(FLUSH_INTERPRETER);
     armEmitCall(reinterpret_cast<void*>(func));
 }
@@ -731,6 +732,18 @@ static bool IsDispatchNegL1SlowpathEnabled()
 extern uint g_FrameCount; // forward decl for EVENTTEST_STUCK probe
 // [TEMP_DIAG] @@EVENTTEST_CNT@@ atomic counter to track recEventTest calls from watchdog
 static std::atomic<uint64_t> s_recEventTest_cnt{0};
+static u64 s_eeProfEventTests = 0;
+static u64 s_eeProfLastEventTests = 0;
+static u32 s_eeProfSampleCount = 0;
+static u32 s_eeProfExecuteEntries = 0;
+
+struct EEProfileHotPCSlot
+{
+	std::atomic<u32> pc{0};
+	std::atomic<u32> count{0};
+};
+
+static EEProfileHotPCSlot s_eeProfHotPCSlots[16];
 
 // [REMOVED] BlockWatchpoint220A8 — removed after SDL/SDR JIT bug confirmed as root cause
 // of "bd file open failed" corruption. See recSDL/recSDR interpreter fallback fix.
@@ -906,10 +919,44 @@ static void BlockWatchpoint220A8(u32 blockpc)
 }
 #endif // BlockWatchpoint220A8
 
+static void recRecordEEProfileSample(u32 pc)
+{
+	s_eeProfSampleCount++;
+
+	for (EEProfileHotPCSlot& slot : s_eeProfHotPCSlots)
+	{
+		if (slot.pc.load(std::memory_order_relaxed) == pc)
+		{
+			slot.count.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+	}
+
+	for (EEProfileHotPCSlot& slot : s_eeProfHotPCSlots)
+	{
+		u32 expected = 0;
+		if (slot.pc.compare_exchange_strong(expected, pc, std::memory_order_relaxed))
+		{
+			slot.count.store(1, std::memory_order_relaxed);
+			return;
+		}
+	}
+
+	// Misra-Gries style decay keeps recurring PCs visible without unbounded maps.
+	for (EEProfileHotPCSlot& slot : s_eeProfHotPCSlots)
+	{
+		const u32 count = slot.count.load(std::memory_order_relaxed);
+		if (count > 0)
+		{
+			const u32 old = slot.count.fetch_sub(1, std::memory_order_relaxed);
+			if (old == 1)
+				slot.pc.store(0, std::memory_order_relaxed);
+		}
+	}
+}
+
 static void recEventTest()
 {
-	s_recEventTest_cnt.fetch_add(1, std::memory_order_relaxed);
-
 	_cpuEventTest_Shared();
 
 	if (eeRecExitRequested)
@@ -1051,8 +1098,7 @@ static constexpr int SYSCALL_RING_SIZE = 32;
 
 extern "C" uint64_t recDispatchResolve(u32 pc)
 {
-	s_dispatchResolve_cnt.fetch_add(1, std::memory_order_relaxed);
-
+#if 0
 	// [R59] @@PC_HISTORY@@ ring buffer — dump last 16 dispatches when unmapped PC hit
 	// Removal condition: 0x22000000 ジャンプ元after identified
 	{
@@ -1189,8 +1235,9 @@ extern "C" uint64_t recDispatchResolve(u32 pc)
 					cpuRegs.GPR.r[31].UL[0], cpuRegs.GPR.r[29].UL[0],
 					cpuRegs.CP0.r[12], cpuRegs.cycle);
 			}
+			}
 		}
-	}
+#endif
 	const auto calc_slot = [](u32 curpc) -> u64 {
 		const uptr page = recLUT[curpc >> 16];
 		const u64 idx = ((u64)curpc >> 2);
@@ -1834,19 +1881,25 @@ static void eeWatchdogThread()
 
 static void recExecute()
 {
+	if (kIOSLegacyEEDiagnostics)
+	{
+		const u32 execute_entry = s_eeProfExecuteEntries++;
+		if (execute_entry < 2)
+		{
+			const ptrdiff_t cache_used = recPtr ? (recPtr - SysMemory::GetEERec()) : 0;
+			LogUnified("@@IOS_EE_PROF_BOOT@@ entry=%u frame=%u pc=%08x cycle=%u rec_cache=%tdKB/%dKB status=%08x cause=%08x\n",
+				execute_entry + 1, g_FrameCount, cpuRegs.pc, cpuRegs.cycle,
+				cache_used / 1024, static_cast<int>(HostMemoryMap::EErecSize / 1024),
+				cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause);
+		}
+	}
+
     // Task: Confirm Execution Start
     static bool s_exec_once = false;
-    if (!s_exec_once) {
+    if (kIOSLegacyEEDiagnostics && !s_exec_once) {
         s_exec_once = true;
         LogUnified("@@EXEC_START@@ R5900 Execution Started\n");
     }
-
-	// [TEMP_DIAG] Save EE thread's mach port for watchdog PC sampling
-	s_ee_thread_port = mach_thread_self();
-	// [TEMP_DIAG] Launch watchdog thread once
-	if (!s_watchdog_running.exchange(true)) {
-		std::thread(eeWatchdogThread).detach();
-	}
 
 	// Reset before we try to execute any code, if there's one pending.
 	// We need to do this here, because if we reset while we're executing, it sets the "needs reset"
@@ -2031,25 +2084,110 @@ namespace R5900 { namespace Dynarec { namespace OpcodeImpl { namespace COP1 {
 	uint32_t recMTC1_GetAndResetCount();
 } } } }
 using R5900::Dynarec::OpcodeImpl::COP1::recMTC1_GetAndResetCount;
+extern "C" void iPSX2_GetAndResetEEEventReasonCounters(u32* noop, u32* mask, u32* iop, u32* rcnt, u32* intr);
+extern "C" void iPSX2_GetAndResetEEInterruptDetailCounters(
+	u32* intr_low, u32* intr_high, u32* intr_after_low, u32* intr_after_high,
+	u32* intc_wake, u32* dmac_wake, u32* timr_wake,
+	u32* scheduled, u32* due, u32 count);
+extern "C" void iPSX2_GetAndResetEEVIF1ScheduleCounters(
+	u32* by_source, u32 source_count, u32* by_cycle, u32 cycle_count, u32* fast_loop);
 
 void recReportPerfCounters(int vsync)
 {
-	uint32_t compiles = s_jit_compile_count.exchange(0, std::memory_order_relaxed);
-	uint32_t reccalls = s_jit_reccall_count.exchange(0, std::memory_order_relaxed);
-	uint32_t clears   = s_jit_cache_clear_count.exchange(0, std::memory_order_relaxed);
-	ptrdiff_t cache_used = recPtr ? (recPtr - SysMemory::GetEERec()) : 0;
-	uint32_t sg_clears_perf = g_stub_guard_clear_count.exchange(0, std::memory_order_relaxed);
-	uint32_t rc_total_perf = s_recClear_total_count.exchange(0, std::memory_order_relaxed);
-	uint32_t rc_blocks_perf = s_recClear_total_blocks.exchange(0, std::memory_order_relaxed);
-	uint32_t rc_sz1 = s_recClear_sz1.exchange(0, std::memory_order_relaxed);
-	uint32_t rc_sz1024 = s_recClear_sz1024.exchange(0, std::memory_order_relaxed);
-	uint32_t rc_szlarge = s_recClear_szlarge.exchange(0, std::memory_order_relaxed);
-	uint32_t rc_szother = s_recClear_szother.exchange(0, std::memory_order_relaxed);
-	Console.WriteLn("@@JIT_PERF@@ vsync=%d compiles=%u reccalls=%u clears=%u cache=%tdKB/%dKB sg=%u rc=%u/%u sz1=%u pg=%u lg=%u ot=%u",
-		vsync, compiles, reccalls, clears,
-		cache_used / 1024, (int)(HostMemoryMap::EErecSize / 1024),
+	const u64 event_tests_total = s_eeProfEventTests;
+	const u64 event_tests_delta = event_tests_total - s_eeProfLastEventTests;
+	s_eeProfLastEventTests = event_tests_total;
+	const u32 samples = s_eeProfSampleCount;
+	s_eeProfSampleCount = 0;
+	const u32 compiles = s_jit_compile_count.exchange(0, std::memory_order_relaxed);
+	const u32 reccalls = s_jit_reccall_count.exchange(0, std::memory_order_relaxed);
+	const u32 clears = s_jit_cache_clear_count.exchange(0, std::memory_order_relaxed);
+	const ptrdiff_t cache_used = recPtr ? (recPtr - SysMemory::GetEERec()) : 0;
+	const u32 sg_clears_perf = g_stub_guard_clear_count.exchange(0, std::memory_order_relaxed);
+	const u32 rc_total_perf = s_recClear_total_count.exchange(0, std::memory_order_relaxed);
+	const u32 rc_blocks_perf = s_recClear_total_blocks.exchange(0, std::memory_order_relaxed);
+	const u32 rc_sz1 = s_recClear_sz1.exchange(0, std::memory_order_relaxed);
+	const u32 rc_sz1024 = s_recClear_sz1024.exchange(0, std::memory_order_relaxed);
+	const u32 rc_szlarge = s_recClear_szlarge.exchange(0, std::memory_order_relaxed);
+	const u32 rc_szother = s_recClear_szother.exchange(0, std::memory_order_relaxed);
+	const u32 mtc1_calls = recMTC1_GetAndResetCount();
+	u32 evt_noop = 0;
+	u32 evt_mask = 0;
+	u32 evt_iop = 0;
+	u32 evt_rcnt = 0;
+	u32 evt_intr = 0;
+	iPSX2_GetAndResetEEEventReasonCounters(&evt_noop, &evt_mask, &evt_iop, &evt_rcnt, &evt_intr);
+	u32 evt_intr_low = 0;
+	u32 evt_intr_high = 0;
+	u32 evt_intr_after_low = 0;
+	u32 evt_intr_after_high = 0;
+	u32 intc_wake = 0;
+	u32 dmac_wake = 0;
+	u32 timr_wake = 0;
+	u32 int_scheduled[21] = {};
+	u32 int_due[21] = {};
+	iPSX2_GetAndResetEEInterruptDetailCounters(
+		&evt_intr_low, &evt_intr_high, &evt_intr_after_low, &evt_intr_after_high,
+		&intc_wake, &dmac_wake, &timr_wake, int_scheduled, int_due, 21);
+	u32 vif1_source[EE_VIF1_SRC_COUNT] = {};
+	u32 vif1_cycles[9] = {};
+	u32 vif1_fast = 0;
+	iPSX2_GetAndResetEEVIF1ScheduleCounters(vif1_source, EE_VIF1_SRC_COUNT, vif1_cycles, 9, &vif1_fast);
+
+	struct TopEntry
+	{
+		u32 pc;
+		u32 count;
+	};
+	TopEntry top[5] = {};
+
+	for (EEProfileHotPCSlot& slot : s_eeProfHotPCSlots)
+	{
+		const u32 pc = slot.pc.exchange(0, std::memory_order_relaxed);
+		const u32 count = slot.count.exchange(0, std::memory_order_relaxed);
+		if (!pc || !count)
+			continue;
+
+		for (int i = 0; i < 5; i++)
+		{
+			if (count > top[i].count)
+			{
+				for (int j = 4; j > i; j--)
+					top[j] = top[j - 1];
+				top[i] = {pc, count};
+				break;
+			}
+		}
+	}
+
+	LogUnified("@@IOS_EE_PROF_SUMMARY@@ vsync=%d frame=%u pc=%08x cycle=%u next=%u event_tests=%llu evt_noop=%u evt_mask=%u evt_iop=%u evt_rcnt=%u evt_intr=%u evt_ilow=%u evt_ihi=%u evt_after_low=%u evt_after_hi=%u wake_i=%u wake_d=%u wake_t=%u int_s=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u int_d=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u vif1_src=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u vif1_cyc=%u,%u,%u,%u,%u,%u,%u,%u,%u vif1_fast=%u samples=%u compiles=%u helpers=%u cache_clears=%u rec_cache=%tdKB/%dKB sg=%u rc=%u/%u sz1=%u pg=%u lg=%u ot=%u mtc1=%u top=%08x:%u,%08x:%u,%08x:%u,%08x:%u,%08x:%u status=%08x cause=%08x count=%08x compare=%08x lastcop0=%u\n",
+		vsync, g_FrameCount, cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle,
+		static_cast<unsigned long long>(event_tests_delta), evt_noop, evt_mask, evt_iop, evt_rcnt, evt_intr,
+		evt_intr_low, evt_intr_high, evt_intr_after_low, evt_intr_after_high,
+		intc_wake, dmac_wake, timr_wake,
+		int_scheduled[0], int_scheduled[1], int_scheduled[2], int_scheduled[3], int_scheduled[4],
+		int_scheduled[5], int_scheduled[6], int_scheduled[7], int_scheduled[8], int_scheduled[9],
+		int_scheduled[10], int_scheduled[11], int_scheduled[12], int_scheduled[13], int_scheduled[14],
+		int_scheduled[15], int_scheduled[16], int_scheduled[17], int_scheduled[18], int_scheduled[19],
+		int_scheduled[20],
+		int_due[0], int_due[1], int_due[2], int_due[3], int_due[4],
+		int_due[5], int_due[6], int_due[7], int_due[8], int_due[9],
+		int_due[10], int_due[11], int_due[12], int_due[13], int_due[14],
+		int_due[15], int_due[16], int_due[17], int_due[18], int_due[19],
+		int_due[20],
+		vif1_source[0], vif1_source[1], vif1_source[2], vif1_source[3], vif1_source[4],
+		vif1_source[5], vif1_source[6], vif1_source[7], vif1_source[8], vif1_source[9],
+		vif1_source[10], vif1_source[11], vif1_source[12], vif1_source[13],
+		vif1_cycles[0], vif1_cycles[1], vif1_cycles[2], vif1_cycles[3], vif1_cycles[4],
+			vif1_cycles[5], vif1_cycles[6], vif1_cycles[7], vif1_cycles[8], vif1_fast,
+			samples, compiles, reccalls, clears,
+		cache_used / 1024, static_cast<int>(HostMemoryMap::EErecSize / 1024),
 		sg_clears_perf, rc_total_perf, rc_blocks_perf,
-		rc_sz1, rc_sz1024, rc_szlarge, rc_szother);
+		rc_sz1, rc_sz1024, rc_szlarge, rc_szother, mtc1_calls,
+		top[0].pc, top[0].count, top[1].pc, top[1].count, top[2].pc, top[2].count,
+		top[3].pc, top[3].count, top[4].pc, top[4].count,
+		cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause,
+		cpuRegs.CP0.n.Count, cpuRegs.CP0.n.Compare, cpuRegs.lastCOP0Cycle);
 
 	// [TEMP_DIAG] @@COMPILE_CONTENT@@ — compile content analysis (DISABLED: suspected crash in map iteration)
 #if 0
@@ -2148,38 +2286,6 @@ void recReportPerfCounters(int vsync)
 
 void recClear(u32 addr, u32 size)
 {
-	s_recClear_total_count.fetch_add(1, std::memory_order_relaxed); // [TEMP_DIAG]
-	// [TEMP_DIAG] @@RECCLEAR_BUCKET@@ — categorize recClear calls by size for JIT_PERF reporting
-	{
-		// Buckets: sz1 (size==1), sz1024 (size==0x400, page clear), sz_large (size>=0x100000), sz_other
-		if (size == 1)
-			s_recClear_sz1.fetch_add(1, std::memory_order_relaxed);
-		else if (size == 0x400)
-			s_recClear_sz1024.fetch_add(1, std::memory_order_relaxed);
-		else if (size >= 0x100000u) {
-			s_recClear_szlarge.fetch_add(1, std::memory_order_relaxed);
-			// [TEMP_DIAG] Log first 50 large clears after boot to identify caller
-			static uint32_t s_lg_n = 0;
-			static uint32_t s_lg_skip = 0;
-			s_lg_skip++;
-			if (s_lg_skip > 100 && s_lg_n < 50) { // skip initial boot clears
-				Console.WriteLn("@@RECCLEAR_LARGE@@ n=%u addr=%08x size=%u(0x%x)", s_lg_n, addr, size, size);
-				s_lg_n++;
-			}
-		}
-		else
-			s_recClear_szother.fetch_add(1, std::memory_order_relaxed);
-	}
-
-	// [iter681] @@RECCLEAR_DIAG@@ — log large clears to verify FlushCache effectiveness
-	const bool is_large_clear = (size >= 0x100000u);
-	if (is_large_clear) {
-		static int s_rc_n = 0;
-		if (s_rc_n < 5)
-			Console.WriteLn("@@RECCLEAR_DIAG@@ n=%d addr=%08x size=%u maxrecmem=%08x recLUT[0]=%lx",
-				s_rc_n++, addr, size, maxrecmem, (unsigned long)recLUT[addr >> 16]);
-	}
-
 	if ((addr) >= maxrecmem || !(recLUT[(addr) >> 16] + (addr & ~0xFFFFUL)))
 		return;
 
@@ -2238,13 +2344,6 @@ void recClear(u32 addr, u32 size)
 		recBlocks.Remove((blockidx + 1), toRemoveLast);
 	}
 
-	if (is_large_clear) {
-		static int s_clear_log_n = 0;
-		if (s_clear_log_n < 10)
-			Console.WriteLn("@@RECCLEAR_DIAG@@ cleared %d blocks, range=[%08x,%08x)", cleared_count, lowerextent, upperextent);
-		s_clear_log_n++;
-	}
-
 	upperextent = std::min(upperextent, ceiling);
 
 	for (int i = 0; (pexblock = recBlocks[i]); ++i)
@@ -2264,8 +2363,6 @@ void recClear(u32 addr, u32 size)
 	if (upperextent > lowerextent)
 		ClearRecLUT(PC_GETBLOCK(lowerextent), upperextent - lowerextent);
 
-	if (cleared_count > 0)
-		s_recClear_total_blocks.fetch_add(cleared_count, std::memory_order_relaxed); // [TEMP_DIAG]
 }
 
 
@@ -2999,9 +3096,10 @@ bool jit_gtavc_fixes_enabled() {
     static int s_flag = -1;
     if (s_flag < 0) {
         const char* e = std::getenv("iPSX2_GTAVC_FIXES");
-        // [V15] 実機 ipa 用 default ON (= ship 構成と等価)、 env=0 で OFF override 可
-        s_flag = (e && e[0] == '0') ? 0 : 1;
-        Console.WriteLn("@@CFG@@ iPSX2_GTAVC_FIXES=%d (V3-features unified, default ON)", s_flag);
+        // Keep this iPSX2 timing experiment opt-in. Default-on injected per-instruction
+        // cycle bookkeeping into every EE block and made the ARM64 rec path much heavier.
+        s_flag = (e && e[0] && e[0] != '0') ? 1 : 0;
+        Console.WriteLn("@@CFG@@ iPSX2_GTAVC_FIXES=%d (V3-features unified, opt-in)", s_flag);
     }
     return s_flag != 0;
 }
@@ -3013,6 +3111,8 @@ bool jit_runtime_blk_enabled() {
         if (e && e[0]) s_flag = (e[0] != '0') ? 1 : 0;
         else           s_flag = jit_gtavc_fixes_enabled() ? 1 : 0;
         Console.WriteLn("@@CFG@@ iPSX2_JIT_RUNTIME_BLK=%d (Step 5 runtime cycle accumulator)", s_flag);
+        Console.WriteLn("@@IOS_EE_TIMING_POLICY@@ runtime_block_cycles=%d source=%s",
+            s_flag, (e && e[0]) ? "env" : "default_legacy");
     }
     return s_flag != 0;
 }
@@ -3733,12 +3833,13 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	}
 	else
 	{
-		//If the COP0 DIE bit is disabled, cycles should be doubled.
-		// [TEMP_DIAG] @@DIE_BIT_CHECK@@ — log DIE bit at compile time for OSDSYS blocks
-		// Removal condition: DIE bit 仮説検証後
-		{
-			static u32 s_die_log_cnt = 0;
-			u32 die_bit = (cpuRegs.CP0.n.Config >> 18) & 0x1;
+			//If the COP0 DIE bit is disabled, cycles should be doubled.
+			// [TEMP_DIAG] @@DIE_BIT_CHECK@@ — log DIE bit at compile time for OSDSYS blocks
+			// Removal condition: DIE bit 仮説検証後
+			if (kIOSLegacyEEDiagnostics)
+			{
+				static u32 s_die_log_cnt = 0;
+				u32 die_bit = (cpuRegs.CP0.n.Config >> 18) & 0x1;
 			u32 hw_pc = HWADDR(pc);
 			if (hw_pc >= 0x210000 && hw_pc < 0x270000 && s_die_log_cnt < 10) {
 				Console.WriteLn("@@DIE_BIT_CHECK@@ pc=%08x die=%u config=%08x mult=%u block_start=%08x",
@@ -3965,7 +4066,6 @@ static void PreBlockCheck(u32 blockpc)
 //  less likely, self-modifying code)
 void dyna_block_discard(u32 start, u32 sz)
 {
-	s_dyna_block_discard_count.fetch_add(1, std::memory_order_relaxed);
 #ifdef PCSX2_DEVBUILD
 	eeRecPerfLog.Write(Color_StrongGray, "Clearing Manual Block @ 0x%08X  [size=%d]", start, sz * 4);
 #endif
@@ -3977,7 +4077,6 @@ void dyna_block_discard(u32 start, u32 sz)
 // and the block is re-assigned for write protection.
 void dyna_page_reset(u32 start, u32 sz)
 {
-	s_dyna_page_reset_count.fetch_add(1, std::memory_order_relaxed);
 	recClear(start & ~0xfffUL, 0x400);
 	manual_counter[start >> 12]++;
 	mmap_MarkCountedRamPage(start);
@@ -4296,7 +4395,6 @@ static void recRecompile(const u32 startpc)
         s_100000_n++;
     }
 
-    s_recompile_cnt.fetch_add(1, std::memory_order_relaxed);
     static int s_recomp_diag_enabled = -1;
     if (s_recomp_diag_enabled == -1)
     {
@@ -5729,7 +5827,6 @@ static void recRecompile(const u32 startpc)
 
     armSetAsmPtr(recPtr, _256kb, nullptr);
     recPtr = armStartBlock();
-    s_jit_compile_count.fetch_add(1, std::memory_order_relaxed);
 
     // [iPSX2] Flight Recorder: Log Block Entry - REMOVED (Verified OK)
     /*
@@ -7007,11 +7104,6 @@ StartRecomp:
 
 			if (memcmp(&recRAMCopy[oldBlock->startpc], PSM(oldBlock->startpc), oldBlock->size << 2)) // [FIX] removed >>2 index compression to prevent overlap corruption
 			{
-				s_overlap_clear_count.fetch_add(1, std::memory_order_relaxed); // [TEMP_DIAG]
-				{
-					uint32_t pg = oldBlock->startpc >> 12;
-					if (pg < 2048) s_overlap_page_hist[pg]++;
-				}
 				recClear(startpc, (pc - startpc) >> 2); // (pc - startpc) / 4
 				s_pCurBlockEx = recBlocks.Get(HWADDR(startpc));
 				pxAssert(s_pCurBlockEx->startpc == HWADDR(startpc));
@@ -7135,6 +7227,23 @@ StartRecomp:
 	pxAssert(armGetCurrentCodePointer() < SysMemory::GetEERecEnd());
 
 	s_pCurBlockEx->x86size = static_cast<u32>(armGetCurrentCodePointer() - recPtr);
+
+	{
+		const u32 hw_start = HWADDR(startpc);
+		const bool is_profile_hot_block =
+			hw_start == 0x00183894u || hw_start == 0x00289320u ||
+			hw_start == 0x0017a204u || hw_start == 0x00299290u;
+		static u32 s_iosHotBlockLogCount = 0;
+		if (is_profile_hot_block && s_iosHotBlockLogCount < 80)
+		{
+			Console.WriteLn("@@IOS_EE_HOTBLOCK@@ n=%u start=%08x hw=%08x end=%08x branchTo=%08x size=%u native=%u g_branch=%u willbranch3=%u blockFF=%u blockCycles=%u waitloop=%u rec_cache=%tdKB",
+				s_iosHotBlockLogCount++, startpc, hw_start, pc, s_branchTo,
+				s_pCurBlockEx->size, s_pCurBlockEx->x86size,
+				g_branch, willbranch3, s_nBlockFF ? 1u : 0u, s_nBlockCycles,
+				EmuConfig.Speedhacks.WaitLoop ? 1u : 0u,
+				(recPtr - SysMemory::GetEERec()) / 1024);
+		}
+	}
 
 	// [TEMP_DIAG] @@NATIVE_272C@@ dump complete ARM64 native code for stuck blocks
 	if (HWADDR(startpc) == 0x272c08u || HWADDR(startpc) == 0x272c50u) {

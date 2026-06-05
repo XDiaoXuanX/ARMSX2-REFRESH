@@ -6,71 +6,9 @@
 
 #include "Common.h"
 #include <cmath>
-#include <atomic>
-#include <sys/time.h> // [CLIFF_DIAG]
 #include "VUmicro.h"
 #include "MTVU.h"
 #include "Gif_Unit.h" // for gifUnit
-
-// [TEMP_DIAG] VU1 kick counter — defined in Counters.cpp
-// Removal condition: BIOS browserafter confirmed
-extern std::atomic<uint32_t> g_vu1_kick_count;
-
-#if defined(__APPLE__)
-namespace
-{
-struct ARMSX2VU1KickProfileEntry
-{
-	u32 pc = 0;
-	u32 count = 0;
-};
-
-static constexpr u32 ARMSX2_VU1_KICK_PC_CAPACITY = 256;
-static ARMSX2VU1KickProfileEntry s_armsx2_vu1_kick_pcs[ARMSX2_VU1_KICK_PC_CAPACITY];
-static u32 s_armsx2_vu1_kick_pc_count = 0;
-static bool s_armsx2_vu1_kick_overflow_logged = false;
-
-static void ARMSX2LogVU1Kick(u32 addr)
-{
-	const u32 raw_tpc = VU1.VI[REG_TPC].UL;
-	const u32 pc = (raw_tpc << 3) & VU1_PROGMASK;
-
-	for (u32 i = 0; i < s_armsx2_vu1_kick_pc_count; i++)
-	{
-		ARMSX2VU1KickProfileEntry& entry = s_armsx2_vu1_kick_pcs[i];
-		if (entry.pc != pc)
-			continue;
-
-		entry.count++;
-		if (entry.count <= 4 || (entry.count % 512) == 0)
-		{
-			Console.Warning("@@IOS_VU1_KICK@@ build=132 source=vu1ExecMicro pc=%04X raw_tpc=%08X addr=%08X count=%u cpu=%s vpu=%08X vu1_cycle=%u ee_cycle=%u",
-				pc, raw_tpc, addr, entry.count, CpuVU1 ? CpuVU1->GetShortName() : "null",
-				VU0.VI[REG_VPU_STAT].UL, VU1.cycle, cpuRegs.cycle);
-		}
-		return;
-	}
-
-	if (s_armsx2_vu1_kick_pc_count >= ARMSX2_VU1_KICK_PC_CAPACITY)
-	{
-		if (!s_armsx2_vu1_kick_overflow_logged)
-		{
-			s_armsx2_vu1_kick_overflow_logged = true;
-			Console.Warning("@@IOS_VU1_KICK_OVERFLOW@@ build=132 pc=%04X capacity=%zu",
-				pc, static_cast<size_t>(ARMSX2_VU1_KICK_PC_CAPACITY));
-		}
-		return;
-	}
-
-	ARMSX2VU1KickProfileEntry& entry = s_armsx2_vu1_kick_pcs[s_armsx2_vu1_kick_pc_count++];
-	entry.pc = pc;
-	entry.count = 1;
-	Console.Warning("@@IOS_VU1_KICK@@ build=132 source=vu1ExecMicro pc=%04X raw_tpc=%08X addr=%08X count=%u unique=%u cpu=%s vpu=%08X vu1_cycle=%u ee_cycle=%u",
-		pc, raw_tpc, addr, entry.count, s_armsx2_vu1_kick_pc_count,
-		CpuVU1 ? CpuVU1->GetShortName() : "null", VU0.VI[REG_VPU_STAT].UL, VU1.cycle, cpuRegs.cycle);
-}
-} // namespace
-#endif
 
 #ifdef PCSX2_DEBUG
 u32 vudump = 0;
@@ -111,12 +49,6 @@ void vu1Finish(bool add_cycles) {
 
 void vu1ExecMicro(u32 addr)
 {
-	// [CLIFF_DIAG] Time the entire vu1ExecMicro call
-	struct timeval _vu1_tv0;
-	gettimeofday(&_vu1_tv0, nullptr);
-
-	g_vu1_kick_count.fetch_add(1, std::memory_order_relaxed); // [TEMP_DIAG]
-
 	// [P24] Per-kick drain removed — replaced by VSync-level pacing in Counters.cpp.
 
 	if (THREAD_VU1) {
@@ -131,14 +63,6 @@ void vu1ExecMicro(u32 addr)
 		// }
 		// Update 25/06/2022: Disabled this for now, let games YOLO it, if it breaks MTVU, disable MTVU (it doesn't work properly anyway) - Refraction
 		vu1Thread.ExecuteVU(addr, vif1Regs.top, vif1Regs.itop, VU0.VI[REG_FBRST].UL);
-		// [CLIFF_DIAG] end timing (MTVU path — unlikely on interpreter)
-		{
-			struct timeval _vu1_tv1;
-			gettimeofday(&_vu1_tv1, nullptr);
-			uint32_t dt = (uint32_t)((_vu1_tv1.tv_sec - _vu1_tv0.tv_sec) * 1000000 + (_vu1_tv1.tv_usec - _vu1_tv0.tv_usec));
-			CliffDiag::vu1ExecUs.fetch_add(dt, std::memory_order_relaxed);
-			CliffDiag::vu1Kicks.fetch_add(1, std::memory_order_relaxed);
-		}
 		return;
 	}
 	static int count = 0;
@@ -150,24 +74,12 @@ void vu1ExecMicro(u32 addr)
 	VU0.VI[REG_VPU_STAT].UL |=  0x0100;
 	if ((s32)addr != -1) VU1.VI[REG_TPC].UL = addr & 0x7FF;
 
-#if defined(__APPLE__)
-	ARMSX2LogVU1Kick(addr);
-#endif
 	CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
 	_vuExecMicroDebug(VU1);
 	if(!INSTANT_VU1)
 		CpuVU1->ExecuteBlock(1);
 	else
 		CpuVU1->Execute(vu1RunCycles);
-
-	// [CLIFF_DIAG] end timing (interpreter path)
-	{
-		struct timeval _vu1_tv1;
-		gettimeofday(&_vu1_tv1, nullptr);
-		uint32_t dt = (uint32_t)((_vu1_tv1.tv_sec - _vu1_tv0.tv_sec) * 1000000 + (_vu1_tv1.tv_usec - _vu1_tv0.tv_usec));
-		CliffDiag::vu1ExecUs.fetch_add(dt, std::memory_order_relaxed);
-		CliffDiag::vu1Kicks.fetch_add(1, std::memory_order_relaxed);
-	}
 }
 
 void MTVUInterrupt()

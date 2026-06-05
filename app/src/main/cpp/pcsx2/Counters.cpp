@@ -4,7 +4,6 @@
 #include <atomic>
 #include <time.h>
 #include <cmath>
-#include <sys/time.h> // [TEMP_DIAG] gettimeofday for @@WALLCLOCK_PC@@
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -14,7 +13,6 @@
 #include "R3000A.h"
 #include "Counters.h"
 #include "IopCounters.h"
-#include "QAProbe.h" // [V34]
 
 #include "GS.h"
 #include "GS/GS.h"
@@ -46,46 +44,6 @@ static u32 g_sif0_ee_xfer_total = 0; // stub to prevent link error
 
 // [TEMP_DIAG] @@STUB_GUARD@@ clear counter — externed by iR5900.cpp for perf reporting
 std::atomic<uint32_t> g_stub_guard_clear_count{0};
-// [TEMP_DIAG] SW renderer draw/skip counters — externed by GSRendererSW.cpp
-std::atomic<uint32_t> g_sw_draw_count{0};
-std::atomic<uint32_t> g_sw_skip_count{0};
-// [TEMP_DIAG] HW renderer draw counter — externed by GSRendererHW.cpp
-// Removal condition: draws=0 root causeafter identified
-std::atomic<uint32_t> g_hw_draw_count{0};
-// [TEMP_DIAG] VIF→VU exec counters — defined in Vif_Codes.cpp
-extern uint32_t getVU0ExecCount();
-extern uint32_t getVU1ExecCount();
-// [TEMP_DIAG] VU1 kick counter — externed by VU1micro.cpp
-// Removal condition: BIOS browserafter confirmed
-std::atomic<uint32_t> g_vu1_kick_count{0};
-// [TEMP_DIAG] per-path GS xfer counter — defined in GS.cpp
-extern volatile uint32_t g_gs_xfer_count[4];
-
-// [CLIFF_DIAG] Per-frame lightweight metrics
-#include <sys/time.h>
-namespace CliffDiag {
-	std::atomic<uint32_t> copyGSPkt{0};
-	std::atomic<uint32_t> realignPkt{0};
-	std::atomic<uint32_t> xgkickXfer{0};
-	std::atomic<uint32_t> mtgsWaitCalls{0};
-	std::atomic<uint32_t> path1Bytes{0};
-	std::atomic<uint32_t> path3Bytes{0};
-	std::atomic<int32_t>  readAmountMax{0};
-	std::atomic<uint32_t> gsXferUs{0};
-	std::atomic<uint32_t> gsXferCalls{0};
-	std::atomic<uint32_t> vu1Ebit{0};
-	std::atomic<uint32_t> vu1ExecUs{0};
-	std::atomic<uint32_t> vu1Kicks{0};
-	std::atomic<uint32_t> xgkickUs{0};
-	std::atomic<uint32_t> path2Bytes{0};
-	uint64_t frameStartUs{0};
-	std::atomic<uint32_t> frameKickNum{0};
-	std::atomic<uint32_t> firstWaitKick{0xFFFFFFFF};
-	std::atomic<uint32_t> firstRealignKick{0xFFFFFFFF};
-	std::atomic<uint32_t> waitUsAccum{0};
-	uint32_t f2258_totalKicks{0};
-	// [P52] Log output suppressed in Release via Console.cpp @@-tag filter
-}
 #include "common/Darwin/DarwinMisc.h" // [P11] iPSX2_JIT_HLE
 
 // P0 gate: vtlb_NullHandlerFallback default OFF
@@ -98,6 +56,8 @@ extern "C" void recSwitchForReset();
 static const uint EECNT_FUTURE_TARGET = 0x10000000;
 
 uint g_FrameCount = 0;
+
+static constexpr bool kIOSLegacyCountersDiagnostics = false;
 
 // Counter 4 takes care of scanlines - hSync/hBlanks
 // Counter 5 takes care of vSync/vBlanks
@@ -662,6 +622,9 @@ extern "C" u32 vtlb_NullHandlerFallback(u32 paddr, u32 data, u32 vaddr, u32 mode
 
 extern "C" void vtlb_LogSelfLoop(u32 pc)
 {
+	if (!kIOSLegacyCountersDiagnostics)
+		return;
+
     static int log_count = 0;
     if (log_count < 1) { // Rate limit: Only 1 time
         Console.WriteLn("DEBUG: SelfLoop @ PC=%08x", pc);
@@ -671,6 +634,9 @@ extern "C" void vtlb_LogSelfLoop(u32 pc)
 
 extern "C" void vtlb_LogKseg1Write(u32 addr, u32 data)
 {
+	if (!kIOSLegacyCountersDiagnostics)
+		return;
+
     // static int log_count = 0;
     // if (log_count < 1) { // Rate limit: Only 1 time
         Console.WriteLn("DEBUG: KSEG1 WRITE Addr=%08x Data=%08x", addr, data);
@@ -680,26 +646,27 @@ extern "C" void vtlb_LogKseg1Write(u32 addr, u32 data)
 
 extern "C" void vtlb_MemWrite32_KSEG1(u32 addr, u32 data)
 {
-    // Track early timer setup writes in BIOS wait-loop area.
-    static u32 s_kseg1_wr_probe = 0;
-    if (s_kseg1_wr_probe < 64 && addr >= 0xB0000000 && addr < 0xB0000100)
-    {
-        Console.WriteLn("@@KSEG1_WR32@@ n=%u pc=%08x addr=%08x data=%08x", s_kseg1_wr_probe, cpuRegs.pc, addr, data);
-        s_kseg1_wr_probe++;
+	// Track early timer setup writes in BIOS wait-loop area.
+	static u32 s_kseg1_wr_probe = 0;
+	if (kIOSLegacyCountersDiagnostics && s_kseg1_wr_probe < 64 && addr >= 0xB0000000 && addr < 0xB0000100)
+	{
+		Console.WriteLn("@@KSEG1_WR32@@ n=%u pc=%08x addr=%08x data=%08x", s_kseg1_wr_probe, cpuRegs.pc, addr, data);
+		s_kseg1_wr_probe++;
     }
-    // [iter57] @@KSEG1_WR32_HW@@ – capture HW register writes (0xB0008000-0xB0010000)
-    // [iter235] rangeをextend: DMAC (0xB000E000), INTC (0xB000F000) include
-    static u32 s_kseg1_hw_wr_probe = 0;
-    if (s_kseg1_hw_wr_probe < 64 && addr >= 0xB0008000 && addr < 0xB0010000)
-    {
-        Console.WriteLn("@@KSEG1_WR32_HW@@ n=%u pc=%08x addr=%08x data=%08x", s_kseg1_hw_wr_probe, cpuRegs.pc, addr, data);
-        s_kseg1_hw_wr_probe++;
+	// [iter57] @@KSEG1_WR32_HW@@ – capture HW register writes (0xB0008000-0xB0010000)
+	// [iter235] rangeをextend: DMAC (0xB000E000), INTC (0xB000F000) include
+	static u32 s_kseg1_hw_wr_probe = 0;
+	if (kIOSLegacyCountersDiagnostics && s_kseg1_hw_wr_probe < 64 && addr >= 0xB0008000 && addr < 0xB0010000)
+	{
+		Console.WriteLn("@@KSEG1_WR32_HW@@ n=%u pc=%08x addr=%08x data=%08x", s_kseg1_hw_wr_probe, cpuRegs.pc, addr, data);
+		s_kseg1_hw_wr_probe++;
     }
 
-    // [iter146] @@KSEG1_SBUS_WRITE@@ – SBUS_F220/F240への書き込みを専用キャップで追跡（MCH操作でキャップ消費されない）
-    {
-        u32 phys = addr & 0x1FFFFFFFu;
-        if (phys == 0x1000F220u || phys == 0x1000F240u) {
+	// [iter146] @@KSEG1_SBUS_WRITE@@ – SBUS_F220/F240への書き込みを専用キャップで追跡（MCH操作でキャップ消費されない）
+	if (kIOSLegacyCountersDiagnostics)
+	{
+		u32 phys = addr & 0x1FFFFFFFu;
+		if (phys == 0x1000F220u || phys == 0x1000F240u) {
             static u32 s_sbus_kseg1_n = 0;
             if (s_sbus_kseg1_n < 20) {
                 ++s_sbus_kseg1_n;
@@ -756,74 +723,6 @@ static __fi void VSyncStart(u32 sCycle)
 		}
 	}
 
-	// [CLIFF_DIAG] Per-frame metrics output (frame 1700+ only, ~1 line/frame)
-	{
-		struct timeval tv;
-		gettimeofday(&tv, nullptr);
-		uint64_t nowUs = (uint64_t)tv.tv_sec * 1000000ULL + tv.tv_usec;
-		uint64_t frameUs = (CliffDiag::frameStartUs > 0) ? (nowUs - CliffDiag::frameStartUs) : 0;
-		if (g_FrameCount <= 10000)
-		{
-			s32 raMax = CliffDiag::readAmountMax.load(std::memory_order_relaxed);
-			u32 gsUs = CliffDiag::gsXferUs.load(std::memory_order_relaxed);
-			u32 gsN  = CliffDiag::gsXferCalls.load(std::memory_order_relaxed);
-			u32 ebit = CliffDiag::vu1Ebit.load(std::memory_order_relaxed);
-			u32 p2   = CliffDiag::path2Bytes.load(std::memory_order_relaxed);
-			u32 vu1Us = CliffDiag::vu1ExecUs.load(std::memory_order_relaxed);
-			u32 vu1K  = CliffDiag::vu1Kicks.load(std::memory_order_relaxed);
-			u32 xgkUs = CliffDiag::xgkickUs.load(std::memory_order_relaxed);
-			u32 eeRes = (frameUs > vu1Us) ? (u32)(frameUs - vu1Us) : 0;
-			Console.WriteLn("@@CLIFF@@ f=%d wt=%llu vu1=%u xgkUs=%u gsUs=%u eeRes=%u kicks=%u gsN=%u ebit=%u cpGS=%u p1=%u p2=%u p3=%u iopc=%08x",
-				g_FrameCount, frameUs, vu1Us, xgkUs, gsUs, eeRes, vu1K, gsN, ebit,
-				CliffDiag::copyGSPkt.load(std::memory_order_relaxed),
-				CliffDiag::path1Bytes.load(std::memory_order_relaxed),
-				p2,
-				CliffDiag::path3Bytes.load(std::memory_order_relaxed),
-				psxRegs.pc);
-
-			// [P27] F_CMP_DONE for frame 2258/2260
-			if (g_FrameCount == 2258 || g_FrameCount == 2260)
-			{
-				Console.WriteLn(Color_Yellow,
-					"[F_CMP_DONE] f=%d totalKicks=%u totalEbit=%u totalWait=%u firstWaitK=%u firstRealignK=%u waitUsAccum=%u p1=%u p2=%u p3=%u wt=%llu vu1=%u",
-					g_FrameCount,
-					CliffDiag::frameKickNum.load(std::memory_order_relaxed),
-					ebit,
-					CliffDiag::mtgsWaitCalls.load(std::memory_order_relaxed),
-					CliffDiag::firstWaitKick.load(std::memory_order_relaxed),
-					CliffDiag::firstRealignKick.load(std::memory_order_relaxed),
-					CliffDiag::waitUsAccum.load(std::memory_order_relaxed),
-					CliffDiag::path1Bytes.load(std::memory_order_relaxed),
-					p2,
-					CliffDiag::path3Bytes.load(std::memory_order_relaxed),
-					frameUs, vu1Us);
-			}
-			if (g_FrameCount == 2258)
-				CliffDiag::f2258_totalKicks = CliffDiag::frameKickNum.load(std::memory_order_relaxed);
-		}
-		CliffDiag::copyGSPkt.store(0, std::memory_order_relaxed);
-		CliffDiag::realignPkt.store(0, std::memory_order_relaxed);
-		CliffDiag::xgkickXfer.store(0, std::memory_order_relaxed);
-		CliffDiag::mtgsWaitCalls.store(0, std::memory_order_relaxed);
-		CliffDiag::path1Bytes.store(0, std::memory_order_relaxed);
-		CliffDiag::path2Bytes.store(0, std::memory_order_relaxed);
-		CliffDiag::path3Bytes.store(0, std::memory_order_relaxed);
-		CliffDiag::readAmountMax.store(0, std::memory_order_relaxed);
-		CliffDiag::gsXferUs.store(0, std::memory_order_relaxed);
-		CliffDiag::gsXferCalls.store(0, std::memory_order_relaxed);
-		CliffDiag::vu1Ebit.store(0, std::memory_order_relaxed);
-		CliffDiag::vu1ExecUs.store(0, std::memory_order_relaxed);
-		CliffDiag::vu1Kicks.store(0, std::memory_order_relaxed);
-		CliffDiag::xgkickUs.store(0, std::memory_order_relaxed);
-		// Reset P27 per-frame counters
-		CliffDiag::frameKickNum.store(0, std::memory_order_relaxed);
-		CliffDiag::firstWaitKick.store(0xFFFFFFFF, std::memory_order_relaxed);
-		CliffDiag::firstRealignKick.store(0xFFFFFFFF, std::memory_order_relaxed);
-		CliffDiag::waitUsAccum.store(0, std::memory_order_relaxed);
-		CliffDiag::frameStartUs = nowUs;
-
-	}
-
 	gsPostVsyncStart(); // MUST be after framelimit; doing so before causes funk with frame times!
 
 	// Poll input after MTGS frame push, just in case it has to stall to catch up.
@@ -874,6 +773,30 @@ static __fi void VSyncStart(u32 sCycle)
 
 static __fi void GSVSync()
 {
+	if (!kIOSLegacyCountersDiagnostics)
+	{
+		// Clean upstream-style GS vblank path. The legacy iPSX2 diagnostic body below
+		// contains large memory dumps/probes and must not run during normal gameplay.
+		if (GSSMODE1reg.SINT)
+			return;
+
+		if (IsProgressiveVideoMode()
+			&& (*(u32*)PS2GS_BASE(GS_SMODE1) != 0)
+			&& (*(u32*)PS2GS_BASE(GS_SYNCV) != 0))
+			CSRreg.SetField();
+		else
+			CSRreg.SwapField();
+
+		if (!CSRreg.VSINT)
+		{
+			CSRreg.VSINT = true;
+			if (!GSIMR.VSMSK)
+				gsIrq();
+		}
+
+		return;
+	}
+
 	static int gsvsync_count = 0;
 	gsvsync_count++;
 
@@ -899,72 +822,7 @@ static __fi void GSVSync()
 		g_ee_cycle_shadow = cpuRegs.cycle;
 	}
 
-    // @@GS_TICK@@ - Track GS path activity (once per second at 60fps = every 60 calls)
-    // [TEMP_DIAG] @@GIF_DMA_RATE@@ counter — Removal condition: BIOS browserafter confirmed
-    extern u32 g_gif_dma_total;
-    static u32 s_last_gif_total = 0;
-    static u32 s_last_draw = 0, s_last_skip = 0, s_last_vu1 = 0;
-    static u32 s_last_p[4] = {};
-    if (gsvsync_count <= 10 || (gsvsync_count % 60) == 0) {
-        u32 gif_delta = g_gif_dma_total - s_last_gif_total;
-        u32 cur_draw = g_sw_draw_count.load(std::memory_order_relaxed);
-        u32 cur_skip = g_sw_skip_count.load(std::memory_order_relaxed);
-        u32 cur_vu1  = g_vu1_kick_count.load(std::memory_order_relaxed);
-        u32 cur_hw   = g_hw_draw_count.load(std::memory_order_relaxed);
-        u32 cp[4];
-        for (int i = 0; i < 4; i++) cp[i] = g_gs_xfer_count[i];
-        if (gsvsync_count == 1) Console.WriteLn("@@XFER_ADDR@@ g_gs_xfer_count=%p", (void*)g_gs_xfer_count);
-        // [TEMP_DIAG] PATH bytes from gifUnit
-        extern u64 g_path_bytes[4];
-        u64 pb[4];
-        for (int i = 0; i < 4; i++) pb[i] = g_path_bytes[i];
-        static u64 s_last_pb[4] = {};
-        static u32 s_last_hw = 0;
-        // [R103] BSS check + register dump after BSS zeroing
-        if (gsvsync_count == 500 || gsvsync_count == 600 || gsvsync_count == 900) {
-            u32* bss = (u32*)PSM(0x158700);
-            if (bss) {
-                bool allZero = true;
-                for (int i = 0; i < 16; i++) { if (bss[i] != 0) { allZero = false; break; } }
-                Console.WriteLn(Color_Red, "[R103_BSS] vsync=%d BSS@0x158700: %08x %08x %08x %08x %s ee_pc=%08x",
-                    gsvsync_count, bss[0], bss[1], bss[2], bss[3],
-                    allZero ? "ALL_ZERO" : "NOT_ZERO", cpuRegs.pc);
-            }
-        }
-        Console.WriteLn("@@GS_TICK@@ vsync=%d gif_dma=%u(+%u) sw=%u(+%u) hw=%u(+%u) skips=%u(+%u) vu1=%u(+%u) p1=%u(+%u) p2=%u(+%u) p3=%u(+%u) ee_pc=%08x cycle=%u",
-            gsvsync_count, g_gif_dma_total, gif_delta,
-            cur_draw, cur_draw - s_last_draw,
-            cur_hw, cur_hw - s_last_hw,
-            cur_skip, cur_skip - s_last_skip,
-            cur_vu1, cur_vu1 - s_last_vu1,
-            cp[0], cp[0] - s_last_p[0],
-            cp[1], cp[1] - s_last_p[1],
-            cp[2], cp[2] - s_last_p[2], cpuRegs.pc, cpuRegs.cycle);
-        extern u32 g_vif1_dma_starts;
-        static u32 s_last_vif1 = 0;
-        Console.WriteLn("@@PATH_BYTES@@ vsync=%d vif1=%u(+%u) xgkick=%llu(+%llu) direct=%llu(+%llu) dma=%llu(+%llu) fifo=%llu(+%llu)",
-            gsvsync_count, g_vif1_dma_starts, g_vif1_dma_starts - s_last_vif1,
-            pb[0], pb[0] - s_last_pb[0],
-            pb[1], pb[1] - s_last_pb[1],
-            pb[2], pb[2] - s_last_pb[2],
-            pb[3], pb[3] - s_last_pb[3]);
-        extern u32 g_intchack_fire_cnt, g_intchack_call_cnt;
-        static u32 s_last_fire = 0, s_last_call = 0;
-        Console.WriteLn("@@INTCHACK@@ vsync=%d fire=%u(+%u) call=%u(+%u)",
-            gsvsync_count, g_intchack_fire_cnt, g_intchack_fire_cnt - s_last_fire,
-            g_intchack_call_cnt, g_intchack_call_cnt - s_last_call);
-        s_last_fire = g_intchack_fire_cnt;
-        s_last_call = g_intchack_call_cnt;
-        for (int i = 0; i < 4; i++) s_last_pb[i] = pb[i];
-        s_last_vif1 = g_vif1_dma_starts;
-        s_last_gif_total = g_gif_dma_total;
-        s_last_draw = cur_draw;
-        s_last_hw = cur_hw;
-        s_last_skip = cur_skip;
-        s_last_vu1 = cur_vu1;
-        for (int i = 0; i < 4; i++) s_last_p[i] = cp[i];
-    }
-    // [P16] Auto-start button injection for testing
+	// [P16] Auto-start button injection for testing
     // env var iPSX2_AUTO_START_FRAME で指定したフレーム以降、Start ボタンを自動押下
     // Removal condition: iOS 仮想コントローラ UI impl後
     {
@@ -1583,13 +1441,6 @@ static __fi void GSVSync()
                 gsvsync_count, s_dmac_last, dmac_cur, cpuRegs.pc, cpuRegs.cycle, psxRegs.pc);
             s_dmac_last = dmac_cur;
         }
-    }
-
-    // [TEMP_DIAG] @@JIT_PERF@@ — report JIT performance counters every 30 vsyncs
-    // Removal condition: JIT performance issue resolved
-    if (Cpu != &intCpu && (gsvsync_count % 30) == 0) {
-        extern void recReportPerfCounters(int vsync);
-        recReportPerfCounters(gsvsync_count);
     }
 
     // [iter666] @@EELOAD_LOOP_CODE@@ EELOAD ポーリングloop + SIF init code ダンプ
@@ -6077,8 +5928,6 @@ static __fi void VSyncEnd(u32 sCycle)
 
 	EECNT_LOG("    ================  EE COUNTER VSYNC END (frame: %d)  ================", g_FrameCount);
 
-	QAProbe::on_vsync_end(g_FrameCount); // [V34] QA probe: emit BL_FRAME + optional SS dump
-
 	g_FrameCount++;
 	if (!GSSMODE1reg.SINT)
 	{
@@ -6276,6 +6125,27 @@ __fi void rcntSyncCounter(int i)
 // well forceinline it!
 __fi void rcntUpdate()
 {
+	// Match ARMSX2 Android master's hot counter update path. The old iPSX2
+	// diagnostic probes below remain compiled for now, but are bypassed so they
+	// cannot perturb gameplay timing/heat while we test EE behavior.
+	rcntUpdate_vSync();
+	// HBlank after as VSync can do error compensation.
+	rcntUpdate_hScanline();
+
+	for (int i = 0; i <= 3; i++)
+	{
+		rcntSyncCounter(i);
+
+		if (counters[i].mode.ClockSource == 0x3 || !rcntCanCount(i))
+			continue;
+
+		_cpuTestOverflow(i);
+		_cpuTestTarget(i);
+	}
+
+	cpuRcntSet();
+	return;
+
 	if (iPSX2_IsDebugVerbose() && rcnt_upd_log_limit < 50) {
 		Console.WriteLn("DEBUG: rcntUpdate called. Cycles=%u, HStart=%u, HDelta=%u, HMode=%d", cpuRegs.cycle, hsyncCounter.startCycle, hsyncCounter.deltaCycles, hsyncCounter.Mode);
         rcnt_upd_log_limit++;
@@ -6467,42 +6337,7 @@ __fi void rcntUpdate()
 		}
 	}
 
-	// [TEMP_DIAG] @@TAG_WATCH@@ — monitor DMA tag memory at 0x21380
-	// Removal condition: SIF DMA tag 書き込みissue解決後
-	if (eeMem && 0x213A0 <= Ps2MemSize::MainRam) {
-		static u32 s_tag_prev = 0;
-		static int s_tag_watch_n = 0;
-		u32 tag_val = *(u32*)(eeMem->Main + 0x21380);
-		if (tag_val != s_tag_prev && s_tag_watch_n < 50) {
-			Console.WriteLn("@@TAG_WATCH@@ n=%d old=%08x new=%08x ee_pc=%08x ee_cyc=%u tag=[%08x %08x %08x %08x]",
-				s_tag_watch_n++, s_tag_prev, tag_val, cpuRegs.pc, cpuRegs.cycle,
-				*(u32*)(eeMem->Main + 0x21380), *(u32*)(eeMem->Main + 0x21384),
-				*(u32*)(eeMem->Main + 0x21388), *(u32*)(eeMem->Main + 0x2138C));
-			s_tag_prev = tag_val;
-		}
-	}
-
-	// [TEMP_DIAG] @@WALLCLOCK_PC@@ — wall-clock-based EE PC sample every 2 seconds
-	{
-		static uint64_t s_last_wall_us = 0;
-		struct timeval tv;
-		gettimeofday(&tv, nullptr);
-		uint64_t now_us = (uint64_t)tv.tv_sec * 1000000ULL + tv.tv_usec;
-		if (s_last_wall_us == 0) s_last_wall_us = now_us;
-		if (now_us - s_last_wall_us >= 2000000ULL) {
-			s_last_wall_us = now_us;
-			// [TEMP_DIAG] Also dump iop_pc, iop_cycle, IOP INTC, and SIF status word at 0x937c0
-			u32 sif_stat_word = (eeMem && 0x937c0 < Ps2MemSize::MainRam) ? *(u32*)(eeMem->Main + 0x937c0) : 0xDEADDEADu;
-			u32 iop_i_stat = psxHu32(0x1070); // IOP INTC status
-			u32 iop_i_mask = psxHu32(0x1074); // IOP INTC mask
-			u32 iop_cop0_sr = psxRegs.CP0.n.Status; // IOP COP0 Status
-			Console.WriteLn("@@WALLCLOCK_PC@@ ee_pc=%08x iop_pc=%08x ee_cyc=%u iop_cyc=%u frame=%u sif_stat=%08x iop_ISTAT=%08x iop_IMASK=%08x iop_SR=%08x",
-				cpuRegs.pc, psxRegs.pc, cpuRegs.cycle, psxRegs.cycle, g_FrameCount, sif_stat_word,
-				iop_i_stat, iop_i_mask, iop_cop0_sr);
-		}
-	}
-
-	rcntUpdate_vSync();
+		rcntUpdate_vSync();
 	// HBlank after as VSync can do error compensation
 	rcntUpdate_hScanline();
 
@@ -6727,6 +6562,11 @@ __fi u32 rcntRcount(int index)
 	rcntSyncCounter(index);
 	
 	ret = counters[index].count;
+
+	// Android master behavior: timer reads return the synced low 16 bits with no
+	// BIOS wait-loop probes or temporary return-value overrides.
+	EECNT_LOG("EE Counter[%d] readCount32 = %x", index, ret);
+	return (u16)ret;
 
 	// [TEMP_DIAG][REMOVE_AFTER=EE_9FC41048_T0_WAIT_ROOTCAUSE_V1]
 	// 目的: EE BIOS wait-loop(9FC41040/48 の連続T0 read)で、読値変化と cycle 前進の有無を同一runで証拠化。

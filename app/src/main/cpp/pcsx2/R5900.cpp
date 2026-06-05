@@ -3,6 +3,7 @@
 
 #include "Common.h"
 #include "common/Error.h" // [P15] for ELF preload Error parameter
+#include <atomic>
 #include <sys/time.h> // [TEMP_DIAG] @@IOP_STUCK@@
 
 #include "common/StringUtil.h"
@@ -735,10 +736,235 @@ static bool cpuIntsEnabled(int Interrupt)
 		!cpuRegs.CP0.n.Status.b.EXL && (cpuRegs.CP0.n.Status.b.ERL == 0);
 }
 
+static bool iPSX2_EventDiagnosticsEnabled()
+{
+	static int s_cached = -1;
+	if (s_cached < 0)
+		s_cached = (!iPSX2_IsSafeOnlyEnabled() && iPSX2_GetRuntimeEnvBool("iPSX2_ENABLE_DIAG_FLAGS", false)) ? 1 : 0;
+	return s_cached == 1;
+}
+
+static std::atomic<u32> s_iosEEEventReasonNoop{0};
+static std::atomic<u32> s_iosEEEventReasonMask{0};
+static std::atomic<u32> s_iosEEEventReasonIop{0};
+static std::atomic<u32> s_iosEEEventReasonRcnt{0};
+static std::atomic<u32> s_iosEEEventReasonIntr{0};
+static std::atomic<u32> s_iosEEEventReasonIntrLow{0};
+static std::atomic<u32> s_iosEEEventReasonIntrHigh{0};
+static std::atomic<u32> s_iosEEEventReasonIntrAfterLow{0};
+static std::atomic<u32> s_iosEEEventReasonIntrAfterHigh{0};
+static std::atomic<u32> s_iosEEIntcWake{0};
+static std::atomic<u32> s_iosEEDmacWake{0};
+static std::atomic<u32> s_iosEETimrWake{0};
+static constexpr u32 kIosEEInterruptCount = 21;
+static constexpr u32 kIosEEVIF1SourceCount = EE_VIF1_SRC_COUNT;
+static constexpr u32 kIosEEVIF1CycleBucketCount = 9;
+static std::atomic<u32> s_iosEEInterruptScheduled[kIosEEInterruptCount]{};
+static std::atomic<u32> s_iosEEInterruptDue[kIosEEInterruptCount]{};
+static std::atomic<u32> s_iosEEVIF1ScheduledBySource[kIosEEVIF1SourceCount]{};
+static std::atomic<u32> s_iosEEVIF1ScheduledByCycle[kIosEEVIF1CycleBucketCount]{};
+static std::atomic<u32> s_iosEEVIF1FastLoopSchedules{0};
+
+extern "C" void iPSX2_GetAndResetEEEventReasonCounters(u32* noop, u32* mask, u32* iop, u32* rcnt, u32* intr)
+{
+	if (noop)
+		*noop = s_iosEEEventReasonNoop.exchange(0, std::memory_order_relaxed);
+	if (mask)
+		*mask = s_iosEEEventReasonMask.exchange(0, std::memory_order_relaxed);
+	if (iop)
+		*iop = s_iosEEEventReasonIop.exchange(0, std::memory_order_relaxed);
+	if (rcnt)
+		*rcnt = s_iosEEEventReasonRcnt.exchange(0, std::memory_order_relaxed);
+	if (intr)
+		*intr = s_iosEEEventReasonIntr.exchange(0, std::memory_order_relaxed);
+}
+
+extern "C" void iPSX2_GetAndResetEEInterruptDetailCounters(
+	u32* intr_low, u32* intr_high, u32* intr_after_low, u32* intr_after_high,
+	u32* intc_wake, u32* dmac_wake, u32* timr_wake,
+	u32* scheduled, u32* due, u32 count)
+{
+	if (intr_low)
+		*intr_low = s_iosEEEventReasonIntrLow.exchange(0, std::memory_order_relaxed);
+	if (intr_high)
+		*intr_high = s_iosEEEventReasonIntrHigh.exchange(0, std::memory_order_relaxed);
+	if (intr_after_low)
+		*intr_after_low = s_iosEEEventReasonIntrAfterLow.exchange(0, std::memory_order_relaxed);
+	if (intr_after_high)
+		*intr_after_high = s_iosEEEventReasonIntrAfterHigh.exchange(0, std::memory_order_relaxed);
+	if (intc_wake)
+		*intc_wake = s_iosEEIntcWake.exchange(0, std::memory_order_relaxed);
+	if (dmac_wake)
+		*dmac_wake = s_iosEEDmacWake.exchange(0, std::memory_order_relaxed);
+	if (timr_wake)
+		*timr_wake = s_iosEETimrWake.exchange(0, std::memory_order_relaxed);
+
+	const u32 n = (count < kIosEEInterruptCount) ? count : kIosEEInterruptCount;
+	for (u32 i = 0; i < n; i++)
+	{
+		if (scheduled)
+			scheduled[i] = s_iosEEInterruptScheduled[i].exchange(0, std::memory_order_relaxed);
+		if (due)
+			due[i] = s_iosEEInterruptDue[i].exchange(0, std::memory_order_relaxed);
+	}
+}
+
+static __fi void iPSX2_RecordEEInterruptScheduled(u8 n)
+{
+	if (n < kIosEEInterruptCount)
+		s_iosEEInterruptScheduled[n].fetch_add(1, std::memory_order_relaxed);
+}
+
+static __fi void iPSX2_RecordEEInterruptDue(u8 n)
+{
+	if (n < kIosEEInterruptCount)
+		s_iosEEInterruptDue[n].fetch_add(1, std::memory_order_relaxed);
+}
+
+extern "C" void iPSX2_GetAndResetEEVIF1ScheduleCounters(
+	u32* by_source, u32 source_count, u32* by_cycle, u32 cycle_count, u32* fast_loop)
+{
+	const u32 sources = (source_count < kIosEEVIF1SourceCount) ? source_count : kIosEEVIF1SourceCount;
+	for (u32 i = 0; i < sources; i++)
+	{
+		if (by_source)
+			by_source[i] = s_iosEEVIF1ScheduledBySource[i].exchange(0, std::memory_order_relaxed);
+	}
+
+	const u32 cycles = (cycle_count < kIosEEVIF1CycleBucketCount) ? cycle_count : kIosEEVIF1CycleBucketCount;
+	for (u32 i = 0; i < cycles; i++)
+	{
+		if (by_cycle)
+			by_cycle[i] = s_iosEEVIF1ScheduledByCycle[i].exchange(0, std::memory_order_relaxed);
+	}
+
+	if (fast_loop)
+		*fast_loop = s_iosEEVIF1FastLoopSchedules.exchange(0, std::memory_order_relaxed);
+}
+
+static __fi u32 iPSX2_GetEEVIF1CycleBucket(s32 ecycle)
+{
+	if (ecycle <= 0)
+		return 0;
+	if (ecycle == 1)
+		return 1;
+	if (ecycle <= 3)
+		return 2;
+	if (ecycle == 4)
+		return 3;
+	if (ecycle <= 7)
+		return 4;
+	if (ecycle <= 15)
+		return 5;
+	if (ecycle <= 31)
+		return 6;
+	if (ecycle <= 127)
+		return 7;
+	return 8;
+}
+
+static __fi void iPSX2_RecordEEVIF1Schedule(s32 ecycle, u8 source, bool fast_loop)
+{
+	const u8 safe_source = (source < kIosEEVIF1SourceCount) ? source : EE_VIF1_SRC_GENERIC;
+	s_iosEEVIF1ScheduledBySource[safe_source].fetch_add(1, std::memory_order_relaxed);
+	s_iosEEVIF1ScheduledByCycle[iPSX2_GetEEVIF1CycleBucket(ecycle)].fetch_add(1, std::memory_order_relaxed);
+	if (fast_loop)
+		s_iosEEVIF1FastLoopSchedules.fetch_add(1, std::memory_order_relaxed);
+}
+
+static __fi void iPSX2_RecordEEEventReasons(bool mask, bool iop, bool rcnt, u32 intr_before, u32 intr_after)
+{
+	if (mask)
+		s_iosEEEventReasonMask.fetch_add(1, std::memory_order_relaxed);
+	if (iop)
+		s_iosEEEventReasonIop.fetch_add(1, std::memory_order_relaxed);
+	if (rcnt)
+		s_iosEEEventReasonRcnt.fetch_add(1, std::memory_order_relaxed);
+	if (intr_before)
+		s_iosEEEventReasonIntr.fetch_add(1, std::memory_order_relaxed);
+	if (intr_before & 0x1FFFFu)
+		s_iosEEEventReasonIntrLow.fetch_add(1, std::memory_order_relaxed);
+	if (intr_before & ~0x1FFFFu)
+		s_iosEEEventReasonIntrHigh.fetch_add(1, std::memory_order_relaxed);
+	if (intr_after & 0x1FFFFu)
+		s_iosEEEventReasonIntrAfterLow.fetch_add(1, std::memory_order_relaxed);
+	if (intr_after & ~0x1FFFFu)
+		s_iosEEEventReasonIntrAfterHigh.fetch_add(1, std::memory_order_relaxed);
+	if (!mask && !iop && !rcnt && !intr_before)
+		s_iosEEEventReasonNoop.fetch_add(1, std::memory_order_relaxed);
+}
+
 // Shared portion of the branch test, called from both the Interpreter
 // and the recompiler.  (moved here to help alleviate redundant code)
 __fi void _cpuEventTest_Shared()
 {
+	// Keep the normal EE scheduler path aligned with ARMSX2 Android master.
+	// The legacy iPSX2 diagnostic body below is intentionally bypassed here; it
+	// was adding checks/logging around one of the hottest EE event paths.
+	eeEventTestIsActive = true;
+	cpuRegs.nextEventCycle = cpuRegs.cycle + eeWaitCycles;
+	cpuRegs.lastEventCycle = cpuRegs.cycle;
+
+	uint mask = intcInterrupt() | dmacInterrupt();
+	if (cpuIntsEnabled(mask))
+		cpuException(mask, cpuRegs.branch);
+
+	EEsCycle += cpuRegs.cycle - EEoCycle;
+	EEoCycle = cpuRegs.cycle;
+
+	if (EEsCycle > 0)
+		iopEventAction = true;
+
+	if (iopEventAction)
+	{
+		EEsCycle = psxCpu->ExecuteBlock(EEsCycle);
+		iopEventAction = false;
+	}
+
+	iopEventTest();
+
+	if (cpuTestCycle(nextStartCounter, nextDeltaCounter))
+	{
+		rcntUpdate();
+		_cpuTestPERF();
+	}
+
+	_cpuTestTIMR();
+
+	if (cpuRegs.interrupt)
+	{
+		if (CHECK_INSTANTDMAHACK && dmacRegs.ctrl.DMAE && !(psHu8(DMAC_ENABLER + 2) & 1) && (cpuRegs.interrupt & 0x1FFFF))
+		{
+			while ((cpuRegs.interrupt & 0x1FFFF) && _cpuTestInterrupts())
+				;
+		}
+		else
+			_cpuTestInterrupts();
+	}
+
+	CpuVU0->ExecuteBlock();
+	CpuVU1->ExecuteBlock();
+
+#if defined(ANDROID)
+	const s32 cleanNextIopEventDelta = (psxRegs.iopNextEventCycle - psxRegs.cycle) << 3;
+#else
+	const float cleanIopMultiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
+	const s32 cleanNextIopEventDelta = ((psxRegs.iopNextEventCycle - psxRegs.cycle) * cleanIopMultiplier);
+#endif
+
+	if (EEsCycle >= cleanNextIopEventDelta)
+		cpuSetNextEventDelta(48);
+	else
+		cpuSetNextEventDelta(cleanNextIopEventDelta - EEsCycle);
+
+	cpuSetNextEvent(nextStartCounter, nextDeltaCounter);
+	eeEventTestIsActive = false;
+	return;
+
+	const bool diag_enabled = iPSX2_EventDiagnosticsEnabled();
+
+	if (diag_enabled)
+	{
 	// [iter218] TEMP_DIAG: periodic EE PC sample to find hang location
 	{
 		static u32 s_evt_cnt = 0;
@@ -871,9 +1097,7 @@ __fi void _cpuEventTest_Shared()
 			}
 		}
 	}
-
-	const bool safe_only = iPSX2_IsSafeOnlyEnabled();
-	const bool diag_enabled = (!safe_only && iPSX2_GetRuntimeEnvBool("iPSX2_ENABLE_DIAG_FLAGS", false));
+	}
 
     // [TEMP_DIAG][REMOVE_AFTER=ROM_RESET_SCAN_V1] One-shot ROM scan for ROMDIR "RESET" entry
     if (diag_enabled)
@@ -941,8 +1165,10 @@ __fi void _cpuEventTest_Shared()
 
 	// Debug logging removed from here (handled above)
 
-	uint mask_check = intcInterrupt() | dmacInterrupt();
+		uint mask_check = intcInterrupt() | dmacInterrupt();
+
 	// [TEMP_DIAG] @@DMAC_INT_CHECK@@ — log when DMAC interrupt is pending
+	if (diag_enabled)
 	{
 		static int s_dmac_chk_n = 0;
 		uint dmac_only = dmacInterrupt();
@@ -955,6 +1181,7 @@ __fi void _cpuEventTest_Shared()
 	}
 	// [TEMP_DIAG] @@INTC_INT_CHECK@@ — log INTC interrupt delivery status
 	// Removal condition: BIOS browserafter confirmed
+	if (diag_enabled)
 	{
 		static int s_intc_chk_n = 0;
 		uint intc_only = intcInterrupt();
@@ -982,12 +1209,13 @@ __fi void _cpuEventTest_Shared()
 	EEsCycle += cpuRegs.cycle - EEoCycle;
 	EEoCycle = cpuRegs.cycle;
 
-	if (EEsCycle > 0)
-		iopEventAction = true;
+		if (EEsCycle > 0)
+			iopEventAction = true;
 
-	if (iopEventAction)
+		if (iopEventAction)
 	{
 		// [TEMP_DIAG] @@IOP_STUCK@@ wall-clock check around IOP execution
+		if (diag_enabled)
 		{
 			static uint64_t s_iop_wall_prev = 0;
 			static int s_iop_stuck_n = 0;
@@ -1005,6 +1233,10 @@ __fi void _cpuEventTest_Shared()
 					cpuRegs.pc, cpuRegs.cycle,
 					psxRegs.pc, psxRegs.cycle, g_FrameCount);
 			}
+		}
+		else
+		{
+			EEsCycle = psxCpu->ExecuteBlock(EEsCycle);
 		}
 		iopEventAction = false;
 	}
@@ -1032,10 +1264,10 @@ __fi void _cpuEventTest_Shared()
 		s_prev_cycle = cpuRegs.cycle;
 	}
 
-	if (cpuTestCycle(nextStartCounter, nextDeltaCounter))
-	{
-		rcntUpdate();
-		_cpuTestPERF();
+		if (cpuTestCycle(nextStartCounter, nextDeltaCounter))
+		{
+			rcntUpdate();
+			_cpuTestPERF();
 	}
 
 	_cpuTestTIMR();
@@ -1044,8 +1276,8 @@ __fi void _cpuEventTest_Shared()
 	// These are basically just DMAC-related events, which also piggy-back the same bits as
 	// the PS2's own DMA channel IRQs and IRQ Masks.
 
-	if (cpuRegs.interrupt)
-	{
+		if (cpuRegs.interrupt)
+		{
 		// This is a BIOS hack because the coding in the BIOS is terrible but the bug is masked by Data Cache
 		// where a DMA buffer is overwritten without waiting for the transfer to end, which causes the fonts to get all messed up
 		// so to fix it, we run all the DMA's instantly when in the BIOS.
@@ -1065,8 +1297,8 @@ __fi void _cpuEventTest_Shared()
 	CpuVU0->ExecuteBlock();
 	CpuVU1->ExecuteBlock();
 
-	if (diag_enabled)
-	{
+		if (diag_enabled)
+		{
     // @@EVENT_POST@@ - Log only when Status/Cause/EPC changes or every 1000 events
     static u64 s_event_post_count = 0;
     static u32 s_last_status = 0, s_last_cause = 0, s_last_epc = 0;
@@ -1970,7 +2202,7 @@ __ri void cpuTestINTCInts()
 	if ((psHu32(INTC_STAT) & psHu32(INTC_MASK)) == 0)
 		return;
 
-	cpuSetNextEventDelta(4);
+		cpuSetNextEventDelta(4);
 	if (eeEventTestIsActive && (psxRegs.iopCycleEE > 0))
 	{
 		psxRegs.iopBreak += psxRegs.iopCycleEE; // record the number of cycles the IOP didn't run.
@@ -1989,7 +2221,7 @@ __fi void cpuTestDMACInts()
 		((psHu16(0xe010) & 0x8000) == 0))
 		return;
 
-	cpuSetNextEventDelta(4);
+		cpuSetNextEventDelta(4);
 	if (eeEventTestIsActive && (psxRegs.iopCycleEE > 0))
 	{
 		psxRegs.iopBreak += psxRegs.iopCycleEE; // record the number of cycles the IOP didn't run.
@@ -2021,7 +2253,7 @@ __fi void CPU_SET_DMASTALL(EE_EventType n, bool set)
 		cpuRegs.dmastall &= ~(1 << n);
 }
 
-__fi void CPU_INT( EE_EventType n, s32 ecycle)
+__fi void CPU_INT( EE_EventType n, s32 ecycle, u8 source)
 {
 	// If it's retunning too quick, just rerun the DMA, there's no point in running the EE for < 4 cycles.
 	// This causes a huge uplift in performance for ONI FMV's.

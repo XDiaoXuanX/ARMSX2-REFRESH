@@ -69,18 +69,12 @@ static __fi void vifFlush(int idx)
 	vifExecQueue(idx);
 }
 
-// [TEMP_DIAG] VIF→VU exec counters — Removal condition: draws=0 root causeafter identified
-static std::atomic<uint32_t> s_vu0_exec_count{0};
-static std::atomic<uint32_t> s_vu1_exec_count{0};
-uint32_t getVU0ExecCount() { return s_vu0_exec_count.load(); }
-uint32_t getVU1ExecCount() { return s_vu1_exec_count.load(); }
+uint32_t getVU0ExecCount() { return 0; }
+uint32_t getVU1ExecCount() { return 0; }
 
 static __fi void vuExecMicro(int idx, u32 addr, bool requires_wait)
 {
 	VIFregisters& vifRegs = vifXRegs;
-	// [TEMP_DIAG] count VIF→VU exec triggers
-	if (idx) s_vu1_exec_count.fetch_add(1, std::memory_order_relaxed);
-	else     s_vu0_exec_count.fetch_add(1, std::memory_order_relaxed);
 
 	vifFlush(idx);
 	if (GetVifX.waitforvu)

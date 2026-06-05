@@ -35,7 +35,7 @@ void vif1TransferToMemory()
 
 		vif1ch.qwc = 0;
 		vif1.done = true;
-		CPU_INT(DMAC_VIF1, 0);
+		CPU_INT(DMAC_VIF1, 0, EE_VIF1_SRC_BUSERR);
 		return; // An error has occurred.
 	}
 
@@ -310,7 +310,7 @@ __fi void vif1Interrupt()
 		if ((isDirect && !gifUnit.CanDoPath2()) || (isDirectHL && !gifUnit.CanDoPath2HL()))
 		{
 			GUNIT_WARN("vif1Interrupt() - Waiting for Path 2 to be ready");
-			CPU_INT(DMAC_VIF1, 128);
+			CPU_INT(DMAC_VIF1, 128, EE_VIF1_SRC_PATH2_WAIT);
 			if (gifRegs.stat.APATH == 3)
 				vif1Regs.stat.VGW = 1; //We're waiting for path 3. Gunslinger II
 			CPU_SET_DMASTALL(DMAC_VIF1, true);
@@ -395,17 +395,19 @@ __fi void vif1Interrupt()
 		if (vif1ch.chcr.DIR)
 			vif1Regs.stat.FQC = std::min(vif1ch.qwc, (u32)16);
 
-		if (!(vif1Regs.stat.VGW && gifUnit.gifPath[GIF_PATH_3].state != GIF_PATH_IDLE)) //If we're waiting on GIF, stop looping, (can be over 1000 loops!)
-		{
-			if (vif1.waitforvu)
+			if (!(vif1Regs.stat.VGW && gifUnit.gifPath[GIF_PATH_3].state != GIF_PATH_IDLE)) //If we're waiting on GIF, stop looping, (can be over 1000 loops!)
 			{
-				//if (cpuGetCycles(VU_MTVU_BUSY) > static_cast<int>(g_vif1Cycles))
-				//	DevCon.Warning("Waiting %d instead of %d", cpuGetCycles(VU_MTVU_BUSY), static_cast<int>(g_vif1Cycles));
-				CPU_INT(DMAC_VIF1, std::max(static_cast<int>(g_vif1Cycles), cpuGetCycles(VU_MTVU_BUSY)));
+				if (vif1.waitforvu)
+				{
+					//if (cpuGetCycles(VU_MTVU_BUSY) > static_cast<int>(g_vif1Cycles))
+					//	DevCon.Warning("Waiting %d instead of %d", cpuGetCycles(VU_MTVU_BUSY), static_cast<int>(g_vif1Cycles));
+					CPU_INT(DMAC_VIF1, std::max(static_cast<int>(g_vif1Cycles), cpuGetCycles(VU_MTVU_BUSY)), EE_VIF1_SRC_INPROGRESS_WAITVU);
+				}
+				else
+				{
+					CPU_INT(DMAC_VIF1, g_vif1Cycles, EE_VIF1_SRC_INPROGRESS_CYCLES);
+				}
 			}
-			else
-				CPU_INT(DMAC_VIF1, g_vif1Cycles);
-		}
 		return;
 	}
 
@@ -423,24 +425,26 @@ __fi void vif1Interrupt()
 		if (vif1ch.chcr.DIR)
 			vif1Regs.stat.FQC = std::min(vif1ch.qwc, (u32)16);
 
-		if (!(vif1Regs.stat.VGW && gifUnit.gifPath[GIF_PATH_3].state != GIF_PATH_IDLE)) //If we're waiting on GIF, stop looping, (can be over 1000 loops!)
-		{
-			if (vif1.waitforvu)
+			if (!(vif1Regs.stat.VGW && gifUnit.gifPath[GIF_PATH_3].state != GIF_PATH_IDLE)) //If we're waiting on GIF, stop looping, (can be over 1000 loops!)
 			{
-				//if (cpuGetCycles(VU_MTVU_BUSY) > static_cast<int>(g_vif1Cycles))
-				//	DevCon.Warning("Waiting %d instead of %d", cpuGetCycles(VU_MTVU_BUSY), static_cast<int>(g_vif1Cycles));
-				CPU_INT(DMAC_VIF1, std::max(static_cast<int>(g_vif1Cycles), cpuGetCycles(VU_MTVU_BUSY)));
+				if (vif1.waitforvu)
+				{
+					//if (cpuGetCycles(VU_MTVU_BUSY) > static_cast<int>(g_vif1Cycles))
+					//	DevCon.Warning("Waiting %d instead of %d", cpuGetCycles(VU_MTVU_BUSY), static_cast<int>(g_vif1Cycles));
+					CPU_INT(DMAC_VIF1, std::max(static_cast<int>(g_vif1Cycles), cpuGetCycles(VU_MTVU_BUSY)), EE_VIF1_SRC_SETUP_WAITVU);
+				}
+				else
+				{
+					CPU_INT(DMAC_VIF1, g_vif1Cycles, EE_VIF1_SRC_SETUP_CYCLES);
+				}
 			}
-			else
-				CPU_INT(DMAC_VIF1, g_vif1Cycles);
-		}
 		return;
 	}
 
 	if (vif1.vifstalled.enabled && vif1.done)
 	{
 		DevCon.WriteLn("VIF1 looping on stall at end\n");
-		CPU_INT(DMAC_VIF1, 0);
+		CPU_INT(DMAC_VIF1, 0, EE_VIF1_SRC_STALL_END);
 		CPU_SET_DMASTALL(DMAC_VIF1, true);
 		return; //Dont want to end if vif is stalled.
 	}
@@ -471,148 +475,12 @@ __fi void vif1Interrupt()
 	CPU_SET_DMASTALL(DMAC_VIF1, false);
 }
 
-// [TEMP_DIAG] VIF1 DMA start counter — Removal condition: BIOS browserafter confirmed
 u32 g_vif1_dma_starts = 0;
-// [TEMP_DIAG] @@GAP_PC_SAMPLE@@ — Removal condition: ギャップcauseafter identified
-// Set when a large gap starts; _cpuEventTest_Shared logs PCs while active
 u32 g_gap_sample_active = 0;
 u32 g_gap_sample_start_cyc = 0;
-// [TEMP_DIAG] per-frame VIF1 DMA log — Removal condition: BIOS browserafter confirmed
-static u32 s_vif1_frame_cnt = 0;
-static s32 s_vif1_last_frame = -1;
-static u32 s_vif1_log_n = 0;
-// [TEMP_DIAG] per-frame RA breakdown for divergent callers
-static u32 s_vif1_ra218474 = 0;  // ra=0x218474 (divergent ~30%)
-static u32 s_vif1_ra220exx = 0;  // ra=0x220ea0-0x220ec0 group (divergent ~27%)
 
 void dmaVIF1()
 {
-	g_vif1_dma_starts++;
-	// [TEMP_DIAG] @@VIF1_KICK_PC@@ — PC histogram — debug only
-#if DEBUG
-	{
-		extern uint g_FrameCount;
-		static u32 s_pc_hist[16] = {};
-		static u32 s_pc_addr[16] = {};
-		static u32 s_pc_hist_n = 0;
-		static u32 s_kick_total = 0;
-		static u32 s_last_report_frame = 0;
-		u32 pc = cpuRegs.pc;
-		u32 ra = cpuRegs.GPR.n.ra.UL[0];
-		s_kick_total++;
-		// Record PC in histogram (find existing or add new slot)
-		bool found = false;
-		for (u32 i = 0; i < s_pc_hist_n; i++) {
-			if (s_pc_addr[i] == pc) { s_pc_hist[i]++; found = true; break; }
-		}
-		if (!found && s_pc_hist_n < 16) {
-			s_pc_addr[s_pc_hist_n] = pc;
-			s_pc_hist[s_pc_hist_n] = 1;
-			s_pc_hist_n++;
-		}
-		// RA histogram
-		static u32 s_ra_hist[16] = {}, s_ra_addr[16] = {}, s_ra_hist_n = 0;
-		found = false;
-		for (u32 i = 0; i < s_ra_hist_n; i++) {
-			if (s_ra_addr[i] == ra) { s_ra_hist[i]++; found = true; break; }
-		}
-		if (!found && s_ra_hist_n < 16) {
-			s_ra_addr[s_ra_hist_n] = ra;
-			s_ra_hist[s_ra_hist_n] = 1;
-			s_ra_hist_n++;
-		}
-		// Report every 60 frames during animation phase (frame 50-400)
-		if (g_FrameCount >= 50 && g_FrameCount <= 400 && g_FrameCount >= s_last_report_frame + 60) {
-			s_last_report_frame = g_FrameCount;
-			Console.WriteLn("@@VIF1_KICK_PC@@ frame=%u total=%u slots=%u ra_slots=%u", g_FrameCount, s_kick_total, s_pc_hist_n, s_ra_hist_n);
-			for (u32 i = 0; i < s_pc_hist_n; i++) {
-				Console.WriteLn("  pc=%08x count=%u", s_pc_addr[i], s_pc_hist[i]);
-			}
-			for (u32 i = 0; i < s_ra_hist_n; i++) {
-				Console.WriteLn("  ra=%08x count=%u", s_ra_addr[i], s_ra_hist[i]);
-			}
-			// One-time: dump MIPS code around divergent RA sites
-			static bool s_dumped = false;
-			if (!s_dumped && eeMem) {
-				s_dumped = true;
-				u32 ranges[][2] = {
-					{0x218200, 0x218600}, // ra=0x218474 divergent caller (wider)
-					{0x220d00, 0x220f40}, // ra=0x220ea0 divergent caller (wider)
-					{0x219100, 0x219180}, // ra=0x219138 (JIT-only caller)
-				};
-				for (auto& r : ranges) {
-					Console.WriteLn("@@RA_DUMP@@ MIPS 0x%08x-0x%08x:", r[0], r[1]);
-					for (u32 a = r[0]; a < r[1]; a += 4) {
-						u32 op = *(u32*)(eeMem->Main + a);
-						Console.WriteLn("  %08x: %08x", a, op);
-					}
-				}
-			}
-			// Reset for next window
-			s_kick_total = 0;
-			for (u32 i = 0; i < 16; i++) { s_pc_hist[i] = 0; s_ra_hist[i] = 0; }
-			s_pc_hist_n = 0;
-			s_ra_hist_n = 0;
-		}
-	}
-#endif // DEBUG — VIF1_KICK_PC
-	// [TEMP_DIAG] Stop gap sampling when next DMA arrives
-	g_gap_sample_active = 0;
-	g_gap_sample_start_cyc = cpuRegs.cycle; // Record this DMA's cycle for gap detection
-	extern uint g_FrameCount;
-	// Cycle gap tracking + large gap logging
-	static u32 s_last_cyc = 0;
-	static u32 s_gap_max = 0;
-	static u32 s_gap_max_at = 0;
-	static u32 s_large_gap_n = 0;
-	u32 gap = cpuRegs.cycle - s_last_cyc;
-	s_last_cyc = cpuRegs.cycle;
-	if (gap > s_gap_max) {
-		s_gap_max = gap;
-		s_gap_max_at = s_vif1_frame_cnt;
-	}
-	// Log first 10 large gaps (> 500K cycles) with full context
-	if (gap > 500000 && s_large_gap_n < 10 && g_vif1_dma_starts > 50) {
-		Console.WriteLn("@@VIF1_GAP@@ n=%u gap=%u dma_idx=%u frame=%u ee_pc=%08x ra=%08x cyc=%u",
-			s_large_gap_n, gap, s_vif1_frame_cnt, g_FrameCount,
-			cpuRegs.pc, cpuRegs.GPR.n.ra.UL[0], cpuRegs.cycle);
-		// [TEMP_DIAG] @@VIF1_GAP_DUMP@@ Removal condition: ギャップcauseafter identified
-		// Dump hotspot at 0x2659f0 (JIT dominant PC during gap)
-		if (s_large_gap_n == 0 && eeMem) {
-			Console.WriteLn("@@VIF1_GAP_DUMP@@ MIPS hotspot 0x2659f0 (0x2659a0-0x265b00):");
-			for (u32 addr = 0x2659a0; addr < 0x265b00; addr += 4) {
-				u32 opcode = *(u32*)(eeMem->Main + (addr & 0x01FFFFFF));
-				Console.WriteLn("  %08x: %08x", addr, opcode);
-			}
-			// Also dump 0x265040-0x265100 (second hot area)
-			Console.WriteLn("@@VIF1_GAP_DUMP@@ MIPS hotspot 0x265058 (0x265000-0x2650f0):");
-			for (u32 addr = 0x265000; addr < 0x2650f0; addr += 4) {
-				u32 opcode = *(u32*)(eeMem->Main + (addr & 0x01FFFFFF));
-				Console.WriteLn("  %08x: %08x", addr, opcode);
-			}
-		}
-		s_large_gap_n++;
-	}
-	if ((s32)g_FrameCount != s_vif1_last_frame) {
-		if (s_vif1_last_frame >= 0 && s_vif1_log_n < 120) {
-			Console.WriteLn("@@VIF1_FRAME@@ frame=%d cnt=%u ra218474=%u ra220e=%u max_gap=%u at=%u",
-				s_vif1_last_frame, s_vif1_frame_cnt, s_vif1_ra218474, s_vif1_ra220exx, s_gap_max, s_gap_max_at);
-		}
-		s_vif1_log_n++;
-		s_vif1_frame_cnt = 0;
-		s_vif1_ra218474 = 0;
-		s_vif1_ra220exx = 0;
-		s_vif1_last_frame = g_FrameCount;
-		s_gap_max = 0;
-		s_gap_max_at = 0;
-	}
-	s_vif1_frame_cnt++;
-	// [TEMP_DIAG] track divergent RA per frame
-	{
-		u32 ra_now = cpuRegs.GPR.n.ra.UL[0];
-		if (ra_now == 0x218474) s_vif1_ra218474++;
-		else if (ra_now >= 0x220e80 && ra_now <= 0x220f00) s_vif1_ra220exx++;
-	}
 	VIF_LOG("dmaVIF1 chcr = %lx, madr = %lx, qwc  = %lx\n"
 			"        tadr = %lx, asr0 = %lx, asr1 = %lx",
 		vif1ch.chcr._u32, vif1ch.madr, vif1ch.qwc,
@@ -671,5 +539,5 @@ void dmaVIF1()
 	// Batman Vengence does something stupid and instead of cancelling a stall it tries to restart VIF, THEN check the stall
 	// However if VIF FIFO is reversed, it can continue
 	if (!vif1ch.chcr.DIR || !vif1Regs.stat.test(VIF1_STAT_VSS | VIF1_STAT_VIS | VIF1_STAT_VFS))
-		CPU_INT(DMAC_VIF1, 4);
+		CPU_INT(DMAC_VIF1, 4, EE_VIF1_SRC_DMA_START);
 }
