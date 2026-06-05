@@ -207,6 +207,8 @@ Aprilo più tardi da Impostazioni → Apri la directory ARMSX2.</string>
     <string name="settings_intc_spin_detection">Rilevamento Spin INTC</string>
     <string name="settings_mvu_flag_hack">mVU Flag Hack</string>
     <string name="settings_instant_vu1">VU1 istantaneo</string>
+    <string name="settings_enable_vu0">Enable VU0 Recompiler</string>
+    <string name="settings_enable_vu1">Enable VU1 Recompiler</string>
     <string name="settings_fast_cdvd">CDVD veloce</string>
     <string name="settings_performance_overlay">Overlay Prestazioni</string>
     <string name="settings_osd_scale_default">Scala Di Visualizzazione Su Schermo: 100</string>
