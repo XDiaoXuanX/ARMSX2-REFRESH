@@ -207,6 +207,8 @@ Plats: %1$s
     <string name="settings_intc_spin_detection">INTC Spin-detektion</string>
     <string name="settings_mvu_flag_hack">mVU Flagga hack</string>
     <string name="settings_instant_vu1">Instant VU1</string>
+    <string name="settings_enable_vu0">Enable VU0 Recompiler</string>
+    <string name="settings_enable_vu1">Enable VU1 Recompiler</string>
     <string name="settings_fast_cdvd">Snabb CDVD</string>
     <string name="settings_performance_overlay">Prestandaöverlägg</string>
     <string name="settings_osd_scale_default">Skärmskala: 100</string>
