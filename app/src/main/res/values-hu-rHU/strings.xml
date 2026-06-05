@@ -207,6 +207,8 @@ Később nyisd meg a Beállítások menüpontot → ARMSX2 mappa megnyitása men
     <string name="settings_intc_spin_detection">INTC Forgási Felismerés</string>
     <string name="settings_mvu_flag_hack">mVU Felesleges Flag Kihagyása</string>
     <string name="settings_instant_vu1">Instant VU1</string>
+    <string name="settings_enable_vu0">Enable VU0 Recompiler</string>
+    <string name="settings_enable_vu1">Enable VU1 Recompiler</string>
     <string name="settings_fast_cdvd">Gyors CDVD</string>
     <string name="settings_performance_overlay">Teljesítmény kijelző</string>
     <string name="settings_osd_scale_default">Képernyőn megjelenő képskálázás: 100</string>
