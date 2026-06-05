@@ -1095,9 +1095,9 @@ set(pcsx2arm64Sources
 	arm64/iVU0micro_arm64.cpp
 	arm64/iVU0Upper_arm64.cpp
 	arm64/iVU0Lower_arm64.cpp
-	arm64/iVU1micro_arm64.cpp
-	arm64/iVU1Upper_arm64.cpp
-	arm64/iVU1Lower_arm64.cpp
+	arm64/microVU_arm/microVU.cpp
+	arm64/microVU_arm/microVU_Upper.cpp
+	arm64/microVU_arm/microVU_Lower.cpp
 	arm64/iDMAC_arm64.cpp
 	arm64/iR3000A_arm64.cpp
 	arm64/iR3000Atables_arm64.cpp
@@ -1109,8 +1109,8 @@ set(pcsx2arm64Headers
 	arm64/AsmHelpers.h
 	arm64/arm64Emitter.h
 	arm64/iVU0micro_arm64.h
-	arm64/iVU1micro_arm64.h
-	arm64/iVU1IR_arm64.h
+	arm64/microVU_arm/microVU.h
+	arm64/microVU_arm/microVU_IR.h
 	arm64/iDMAC_arm64.h
 	arm64/iR3000A_arm64.h
 )

@@ -12,7 +12,7 @@
 #include "VUflags.h"
 #include "arm64/arm64Emitter.h"
 #include "arm64/AsmHelpers.h"
-#include "arm64/iVU1micro_arm64.h" // emitVU1InterpBL
+#include "arm64/microVU_arm/microVU.h" // emitVU1InterpBL
 
 using namespace vixl::aarch64;
 

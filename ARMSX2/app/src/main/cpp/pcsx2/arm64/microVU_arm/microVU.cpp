@@ -21,8 +21,8 @@
 #include "VUops.h"
 #include "arm64/arm64Emitter.h"
 #include "arm64/AsmHelpers.h"
-#include "arm64/iVU1micro_arm64.h"
-#include "arm64/iVU1IR_arm64.h"
+#include "arm64/microVU_arm/microVU.h"
+#include "arm64/microVU_arm/microVU_IR.h"
 #include "common/Perf.h"
 
 #include <algorithm>
@@ -1551,6 +1551,405 @@ void mvu1AnalyzeBlock(
 				lane_state[v] &= static_cast<u8>(~mask);
 			}
 		}
+	}
+
+	// ============================================================================
+	//  x86-port mirror — populate uOp / lOp / sFlag / mFlag / cFlag
+	// ============================================================================
+	// Mechanical projection from the already-filled _VURegsNum data into the
+	// upstream-shaped per-pair view. Future emit ports read these directly
+	// instead of re-deriving the same data from _VURegsNum.
+	//
+	// Coverage gaps documented inline. Fields not yet derived stay at zero so
+	// downstream consumers can spot the gap explicitly rather than acting on
+	// half-populated state.
+	//
+	// VFwxyzw / VFr0xyzw / VFr1xyzw bit convention: bit 3 = X, 2 = Y, 1 = Z,
+	// 0 = W. microVFreg's per-lane field stores the cycle-decrement code
+	// expected by the pipeline-state tracker: 4 for a write, 1 for a read.
+	auto setLanes = [](microVFreg& vf, u8 reg, u8 packed_mask, u8 set_val) {
+		vf.reg = reg;
+		vf.x = ((packed_mask >> 3) & 1u) ? set_val : 0;
+		vf.y = ((packed_mask >> 2) & 1u) ? set_val : 0;
+		vf.z = ((packed_mask >> 1) & 1u) ? set_val : 0;
+		vf.w = ((packed_mask >> 0) & 1u) ? set_val : 0;
+	};
+
+	auto firstSetVI = [](u32 mask) -> u8 {
+		// _VURegsNum::VIread/VIwrite are 32-bit masks (bit N == VI[N]).
+		// VI[0] is hardwired to zero; bit 0 doesn't carry useful state.
+		// Cacheable VI range is [1..15]; flag registers live in [16..23].
+		for (u32 b = 1; b < 24; b++)
+			if (mask & (1u << b)) return static_cast<u8>(b);
+		return 0;
+	};
+
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		microOp& mo = ir.info[i];
+		const _VURegsNum& ui = uregs_data[i];
+		const _VURegsNum& li = lregs_data[i];
+
+		// -------- microUpperOp --------
+		mo.uOp.eBit = mo.eBit;
+		mo.uOp.iBit = mo.iBit;
+		mo.uOp.mBit = mo.mBit;
+		mo.uOp.tBit = mo.tBit;
+		mo.uOp.dBit = mo.dBit;
+		setLanes(mo.uOp.VF_write,   ui.VFwrite, ui.VFwxyzw, 4);
+		setLanes(mo.uOp.VF_read[0], ui.VFread0, ui.VFr0xyzw, 1);
+		setLanes(mo.uOp.VF_read[1], ui.VFread1, ui.VFr1xyzw, 1);
+
+		// -------- microLowerOp --------
+		setLanes(mo.lOp.VF_write,   li.VFwrite, li.VFwxyzw, 4);
+		setLanes(mo.lOp.VF_read[0], li.VFread0, li.VFr0xyzw, 1);
+		setLanes(mo.lOp.VF_read[1], li.VFread1, li.VFr1xyzw, 1);
+
+		// VI read/write — lossy projection: _VURegsNum carries unified
+		// 32-bit masks while upstream microLowerOp expects per-slot
+		// tracking. We emit the two lowest-set VI reads into VI_read[0,1]
+		// and the lowest-set VI write into VI_write. Sufficient for
+		// "is VI X read/written by this pair" queries, which is what the
+		// analyzeBranchVI-shaped consumers want. Future per-slot precision
+		// requires plumbing through the lower-op analyzer dispatch.
+		{
+			u32 rm = li.VIread;
+			mo.lOp.VI_read[0].reg = firstSetVI(rm);
+			mo.lOp.VI_read[0].used = mo.lOp.VI_read[0].reg ? 1 : 0;
+			if (mo.lOp.VI_read[0].reg)
+				rm &= ~(1u << mo.lOp.VI_read[0].reg);
+			mo.lOp.VI_read[1].reg = firstSetVI(rm);
+			mo.lOp.VI_read[1].used = mo.lOp.VI_read[1].reg ? 1 : 0;
+		}
+		mo.lOp.VI_write.reg = firstSetVI(li.VIwrite);
+		mo.lOp.VI_write.used = mo.lOp.VI_write.reg ? 1 : 0;
+
+		mo.lOp.branch       = static_cast<u32>(mo.branch);
+		mo.lOp.isNOP        = mo.isNOP;
+		mo.lOp.isFSSET      = mo.isFSSET;
+		mo.lOp.readFlags    = mo.isFlagRead;
+		mo.lOp.isMemWrite   = mo.isMemWrite;
+		mo.lOp.isKick       = mo.isKick;
+		mo.lOp.noWriteVF    = mo.noWriteVF;
+		mo.lOp.backupVI     = mo.needs_vi_backup;
+		mo.lOp.kickcycles   = 0;  // CHECK_XGKICKHACK accounting not ported
+		mo.lOp.constJump.isValid  = 0;  // const-prop not yet ported
+		mo.lOp.constJump.regValue = 0;
+		mo.lOp.badBranch    = false;
+		mo.lOp.evilBranch   = false;
+		mo.lOp.memReadIs    = false;
+		mo.lOp.memReadIt    = false;
+
+		// -------- Flag instances (doFlag bits; ring indices set in later pass) --------
+		// Precise classification per upstream microVU_Tables.inl. Walks
+		// mVU_UPPER_OPCODE + the four FD subtables to identify FMAC1/3 (set
+		// sFlag.doFlag), FMAC2 (ABS/ITOF/FTOI — no flag), FMAC4 (CLIP →
+		// cFlag.doFlag), and NOP/unknown.
+		auto classifyUpper = [](u32 upper) -> u8 {
+			// 0 = unknown/NOP, 1 = FMAC1/3 (sFlag), 2 = FMAC2 (no flag), 3 = CLIP.
+			const u32 op6   = upper & 0x3Fu;
+			const u32 sub   = (upper >> 6) & 0x1Fu;
+			if (op6 < 0x30u) return 1;            // top-table FMAC arith
+			if (op6 < 0x3Cu) return 0;            // 0x30..0x3B reserved
+			if (sub <= 0x03u) return 1;           // ADDAx/SUBAx/MADDAx/MSUBAx variants
+			if (sub == 0x04u || sub == 0x05u) return 2; // ITOFn / FTOIn
+			if (sub == 0x06u) return 1;           // MULAx/y/z/w
+			if (sub == 0x07u) {
+				if (op6 == 0x3Du) return 2;       // ABS
+				if (op6 == 0x3Fu) return 3;       // CLIP
+				return 1;                         // FD_00 MULAq, FD_10 MULAi
+			}
+			if (sub <= 0x0Bu) {
+				// FD_11 has NOP at 0x0B and unknown at 0x0A; everything else
+				// in [0x08..0x0B] across the four FD tables is FMAC arith.
+				if (op6 == 0x3Fu && (sub == 0x0Au || sub == 0x0Bu)) return 0;
+				return 1;
+			}
+			return 0;
+		};
+
+		const u8 ukind = classifyUpper(mo.upper);
+
+		mo.sFlag.doFlag      = (ukind == 1);
+		mo.sFlag.doNonSticky = false;  // set by backward walk below.
+		mo.sFlag.write       = 0;
+		mo.sFlag.lastWrite   = 0;
+		mo.sFlag.read        = 0;
+
+		// mFlag.doFlag set by the backward walk that mirrors x86 mVUsetFlags
+		// lines 113-137 — only the last ~3 sFlag.doFlag pairs get mFlag set.
+		// Defaults false here; flipped true in the post-pass below.
+		mo.mFlag.doFlag      = false;
+		mo.mFlag.doNonSticky = false;
+		mo.mFlag.write       = 0;
+		mo.mFlag.lastWrite   = 0;
+		mo.mFlag.read        = 0;
+
+		mo.cFlag.doFlag      = (ukind == 3);
+		mo.cFlag.doNonSticky = false;
+		mo.cFlag.write       = 0;
+		mo.cFlag.lastWrite   = 0;
+		mo.cFlag.read        = 0;
+
+		// isBadOp: ukind == 0 AND upper isn't the known-quirky 0x8000033C
+		// (CLIP-like encoding that x86 mVUunknown lets pass).
+		mo.isBadOp = (ukind == 0) && (mo.upper != 0x8000033Cu) && !mo.iBit;
+
+		// -------- Remaining x86-port fields (filled by later passes) --------
+		// stall:     set by the cycle/stall tracker pass below.
+		// doXGKICK / XGKICKPC: matches mo.isKick at fire time; precise early-
+		//            exit XGKICKPC tracking needs a forward sweep — out of
+		//            scope for this slice.
+		// doDivFlag: tied to writeQ retirement of DIV/SQRT/RSQRT — handled
+		//            by the Q-instance pass when ported.
+		// readQ/writeQ/readP/writeP: Q/P instance ring is a future slice.
+		mo.stall     = 0;
+		mo.doXGKICK  = false;
+		mo.XGKICKPC  = 0;
+		mo.doDivFlag = false;
+		mo.readQ     = 0;
+		mo.writeQ    = 0;
+		mo.readP     = 0;
+		mo.writeP    = 0;
+	}
+
+	// -------- Block-level x86-port fields --------
+	// Zero const-prop slots, microRegInfo, regsTemp. These are storage-only
+	// until consumers land; explicit zero avoids tripping on stack garbage.
+	for (u32 v = 0; v < 16; v++)
+	{
+		ir.constReg[v].isValid  = 0;
+		ir.constReg[v].regValue = 0;
+	}
+	std::memset(&ir.block,    0, sizeof(ir.block));
+	std::memset(&ir.blockEnd, 0, sizeof(ir.blockEnd));
+	std::memset(&ir.regsTemp, 0, sizeof(ir.regsTemp));
+	ir.cycles     = 0;
+	ir.sFlagHack  = EmuConfig.Speedhacks.vuFlagHack ? 1u : 0u;
+	ir.branchKind = static_cast<u8>(numPairs ? ir.info[numPairs - 1].branch : BR_NONE);
+
+	// ============================================================================
+	//  Cycle / stall tracker (microRegInfo pipeline-state walk)
+	// ============================================================================
+	// Mirrors x86 mVUanalyzeFMACx pipeline-state update: for each pair,
+	// compute stall = max countdown over the pair's input regs. Then decay
+	// all counters by (1 + stall) and add this pair's writes (countdown 4
+	// for VF, 1 for VI — matching upstream cycle encoding).
+	//
+	// Block-start state is zero (no cross-block analysis yet — mVUpBlock
+	// pState would feed in once block-link is ported). The final state is
+	// captured in ir.blockEnd for the future variant-cache content key and
+	// for the JR/JALR jumpCache equivalent.
+	//
+	// COVERAGE GAP: Q/P stall counters not yet tracked here. The arm port
+	// currently identifies Q/P readers via per-op tables that haven't been
+	// ported; without that classification we can't tell which pairs read Q
+	// or P. Stall therefore under-counts in FDIV / EFU code paths. Once
+	// the lower-op classifier ports, state.q / state.p contribute to stall.
+	{
+		microRegInfo state;
+		std::memset(&state, 0, sizeof(state));
+
+		auto decay_u8 = [](u8 v, u8 by) -> u8 {
+			return (v > by) ? static_cast<u8>(v - by) : 0;
+		};
+
+		for (u32 i = 0; i < numPairs; i++)
+		{
+			microOp& mo = ir.info[i];
+			const _VURegsNum& ui = uregs_data[i];
+			const _VURegsNum& li = lregs_data[i];
+
+			u8 stall = 0;
+
+			auto consumeVFRead = [&](u8 vfreg, u8 mask) {
+				if (!vfreg)
+					return;
+				if (mask & 0x8u) stall = std::max(stall, state.VF[vfreg].x);
+				if (mask & 0x4u) stall = std::max(stall, state.VF[vfreg].y);
+				if (mask & 0x2u) stall = std::max(stall, state.VF[vfreg].z);
+				if (mask & 0x1u) stall = std::max(stall, state.VF[vfreg].w);
+			};
+
+			consumeVFRead(ui.VFread0, ui.VFr0xyzw);
+			consumeVFRead(ui.VFread1, ui.VFr1xyzw);
+			consumeVFRead(li.VFread0, li.VFr0xyzw);
+			consumeVFRead(li.VFread1, li.VFr1xyzw);
+
+			// VI reads — only the cacheable VI[1..15] bits.
+			u32 vi_reads = (ui.VIread | li.VIread) & 0xFFFEu;
+			while (vi_reads)
+			{
+				const u32 bit = vi_reads & -vi_reads;
+				const u32 b   = __builtin_ctz(bit);
+				stall = std::max(stall, state.VI[b]);
+				vi_reads ^= bit;
+			}
+
+			mo.stall = stall;
+
+			// Decay all counters by (1 + stall).
+			const u8 decay_by = static_cast<u8>(1u + stall);
+			for (u32 v = 1; v < 32; v++)
+			{
+				state.VF[v].x = decay_u8(state.VF[v].x, decay_by);
+				state.VF[v].y = decay_u8(state.VF[v].y, decay_by);
+				state.VF[v].z = decay_u8(state.VF[v].z, decay_by);
+				state.VF[v].w = decay_u8(state.VF[v].w, decay_by);
+			}
+			for (u32 v = 0; v < 16; v++)
+				state.VI[v] = decay_u8(state.VI[v], decay_by);
+			state.q = decay_u8(state.q, decay_by);
+			state.p = decay_u8(state.p, decay_by);
+			state.xgkick = decay_u8(state.xgkick, decay_by);
+
+			// Add this pair's writes. VF write countdown = 4 (FMAC pipe),
+			// VI write countdown = 1 (IALU). Matches x86 analyzeReg2 and
+			// analyzeVIreg2's aCycles=1 convention.
+			auto addVFWrite = [&](u8 vfreg, u8 mask) {
+				if (!vfreg)
+					return;
+				if (mask & 0x8u) state.VF[vfreg].x = 4;
+				if (mask & 0x4u) state.VF[vfreg].y = 4;
+				if (mask & 0x2u) state.VF[vfreg].z = 4;
+				if (mask & 0x1u) state.VF[vfreg].w = 4;
+			};
+			addVFWrite(ui.VFwrite, ui.VFwxyzw);
+			addVFWrite(li.VFwrite, li.VFwxyzw);
+
+			u32 vi_writes = li.VIwrite & 0xFFFEu;
+			while (vi_writes)
+			{
+				const u32 bit = vi_writes & -vi_writes;
+				const u32 b   = __builtin_ctz(bit);
+				state.VI[b] = 1;
+				vi_writes ^= bit;
+			}
+		}
+
+		ir.blockEnd = state;
+	}
+
+	// ============================================================================
+	//  mFlag.doFlag backward walk
+	// ============================================================================
+	// x86 mVUsetFlags lines 113-137: the last ~3 sFlag.doFlag pairs in the
+	// block must also flip mFlag.doFlag and sFlag.doNonSticky so the next
+	// block's first 4 instructions can read MAC + non-sticky status. Without
+	// this, block-link reads see stale flag instances.
+	//
+	// __Mac / __Status: x86 gates these on cross-block flag-info bits. We
+	// don't yet track those, so the walk runs unconditionally (matching
+	// noFlagOpts=false in x86 — the safe default).
+	{
+		u32 aCount = 0;
+		for (s32 i = static_cast<s32>(numPairs) - 1; i >= 0; i--)
+		{
+			microOp& mo = ir.info[i];
+			if (mo.sFlag.doFlag)
+			{
+				mo.mFlag.doFlag      = true;
+				mo.sFlag.doNonSticky = true;
+				aCount++;
+				if (aCount >= 3)
+					break;
+			}
+		}
+	}
+
+	// ============================================================================
+	//  Flag-instance ring assignment (sFlag/mFlag/cFlag.write/lastWrite/read)
+	// ============================================================================
+	// Mirrors x86 mVUsetFlags forward walk (microVU_Flags.inl lines 139-244).
+	//
+	// xStatus/xMac/xClip[4]: cycle at which each instance was last written.
+	// xS/xM/xC: next-write instance index (mod 4).
+	// cycles: running cycle counter, ticking +stall at pair start and +1
+	// at pair end.
+	//
+	// Per pair:
+	//   - read       = findFlagInst(xFlag[], cycles): the instance whose
+	//                  write-cycle is the most recent ≤ now. This is what
+	//                  the t-stage reader (e.g. FSAND, FMAND) gets.
+	//   - write      = xS: the slot s-stage WOULD write into if doFlag fires.
+	//   - lastWrite  = (xS - 1) & 3: most-up-to-date instance for inline
+	//                  mid-block reads.
+	//   - On sCond (doFlag || isFSSET || doDivFlag): xStatus[xS] = cycles+4,
+	//     xS = (xS+1) & 3. The +4 latency matches the FMAC pipeline depth.
+	//
+	// sFlagHack: when vuFlagHack speedhack is on AND this pair doesn't need
+	// doNonSticky, drop sFlag.doFlag entirely (matches the existing arm
+	// pair_needs_flags heuristic). Saves a flag store per FMAC.
+	{
+		int xStatus[4] = {0, 1, 2, 3};
+		int xMac[4]    = {0, 1, 2, 3};
+		int xClip[4]   = {0, 1, 2, 3};
+		int xS = 0, xM = 0, xC = 0;
+		int cycles = 0;
+
+		auto findFlagInst = [](const int* fFlag, int cyc) -> int {
+			int j = 0, jValue = -1;
+			for (int i = 0; i < 4; i++)
+			{
+				if (fFlag[i] <= cyc && fFlag[i] > jValue)
+				{
+					j = i;
+					jValue = fFlag[i];
+				}
+			}
+			return j;
+		};
+
+		const bool sFlagHack = (ir.sFlagHack != 0);
+
+		for (u32 i = 0; i < numPairs; i++)
+		{
+			microOp& mo = ir.info[i];
+
+			cycles += mo.stall;
+
+			mo.sFlag.read = static_cast<u8>(findFlagInst(xStatus, cycles));
+			mo.mFlag.read = static_cast<u8>(findFlagInst(xMac,    cycles));
+			mo.cFlag.read = static_cast<u8>(findFlagInst(xClip,   cycles));
+
+			mo.sFlag.write     = static_cast<u8>(xS);
+			mo.mFlag.write     = static_cast<u8>(xM);
+			mo.cFlag.write     = static_cast<u8>(xC);
+			mo.sFlag.lastWrite = static_cast<u8>((xS + 3) & 3);
+			mo.mFlag.lastWrite = static_cast<u8>((xM + 3) & 3);
+			mo.cFlag.lastWrite = static_cast<u8>((xC + 3) & 3);
+
+			// sFlagHack short-circuit: drop sFlag.doFlag when the speedhack
+			// is on and this pair has no doNonSticky obligation. doFlag stays
+			// set on the last ~3 doFlag-pairs (the backward walk above set
+			// their doNonSticky), preserving block-link correctness.
+			bool sCond = mo.sFlag.doFlag || mo.lOp.isFSSET || mo.doDivFlag;
+			if (sFlagHack && !mo.sFlag.doNonSticky)
+			{
+				mo.sFlag.doFlag = false;
+				sCond = mo.lOp.isFSSET || mo.doDivFlag;
+			}
+
+			if (sCond)
+			{
+				xStatus[xS] = cycles + 4;
+				xS = (xS + 1) & 3;
+			}
+			if (mo.mFlag.doFlag)
+			{
+				xMac[xM] = cycles + 4;
+				xM = (xM + 1) & 3;
+			}
+			if (mo.cFlag.doFlag)
+			{
+				xClip[xC] = cycles + 4;
+				xC = (xC + 1) & 3;
+			}
+
+			cycles++;
+		}
+
+		ir.cycles = static_cast<u32>(cycles);
 	}
 }
 
