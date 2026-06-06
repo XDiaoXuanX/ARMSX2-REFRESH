@@ -123,6 +123,9 @@ final class SettingsStore: @unchecked Sendable {
     var enableNoInterlacingPatches: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore", key: "EnableNoInterlacingPatches", value: enableNoInterlacingPatches) }
     }
+    var hostFilesystem: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore", key: "HostFs", value: hostFilesystem) }
+    }
 
     // ── Graphics ──
     var renderer: Int {
@@ -454,6 +457,7 @@ final class SettingsStore: @unchecked Sendable {
         enableGameDBHardwareFixes = !ARMSX2Bridge.getINIBool("EmuCore/GS", key: "UserHacks", defaultValue: false)
         enableWidescreenPatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableWideScreenPatches", defaultValue: false)
         enableNoInterlacingPatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableNoInterlacingPatches", defaultValue: false)
+        hostFilesystem = ARMSX2Bridge.getINIBool("EmuCore", key: "HostFs", defaultValue: false)
         // Graphics
 #if targetEnvironment(macCatalyst)
         renderer = 17
@@ -567,6 +571,7 @@ final class SettingsStore: @unchecked Sendable {
         enableGameDBHardwareFixes = !ARMSX2Bridge.getINIBool("EmuCore/GS", key: "UserHacks", defaultValue: false)
         enableWidescreenPatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableWideScreenPatches", defaultValue: false)
         enableNoInterlacingPatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableNoInterlacingPatches", defaultValue: false)
+        hostFilesystem = ARMSX2Bridge.getINIBool("EmuCore", key: "HostFs", defaultValue: false)
 #if targetEnvironment(macCatalyst)
         renderer = 17
         ARMSX2Bridge.setINIInt("EmuCore/GS", key: "Renderer", value: Int32(17))
@@ -765,6 +770,7 @@ final class SettingsStore: @unchecked Sendable {
         enableGameDBHardwareFixes = true
         enableWidescreenPatches = false
         enableNoInterlacingPatches = false
+        hostFilesystem = false
     }
 
     /// Keep EE/IOP/VU0 fast while isolating suspected VU1 JIT regressions.

@@ -90,6 +90,13 @@ struct EmulatorSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section(settings.localized("Host Filesystem")) {
+                Toggle(settings.localized("Enable Host Filesystem"), isOn: $settings.hostFilesystem)
+                Text(settings.localized("Allows PS2 homebrew and ELF tools to access files through the host: device. This is separate from USB/SSD game storage, is off by default, and takes effect on next VM boot."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section(settings.localized("Memory")) {
                 Toggle(settings.localized("Fastmem"), isOn: $settings.fastmem)
                 Text(settings.localized("Direct memory mapping for EE. Disable if 3D graphics are broken. Requires restart."))
