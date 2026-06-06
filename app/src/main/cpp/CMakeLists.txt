@@ -13,7 +13,7 @@ endif()
 
 set(ARMSX2_VERSION_MAJOR 1)
 set(ARMSX2_VERSION_MINOR 3)
-set(ARMSX2_VERSION_PATCH 1)
+set(ARMSX2_VERSION_PATCH 2)
 set(ARMSX2_VERSION "${ARMSX2_VERSION_MAJOR}.${ARMSX2_VERSION_MINOR}.${ARMSX2_VERSION_PATCH}")
 set(ARMSX2_BUILD_NUMBER 137)
 
@@ -165,6 +165,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		${CMAKE_SOURCE_DIR}/../swift/Models/SettingsStore.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/FileImportHandler.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/ImportFileCopier.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/ExternalGameLibrary.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/ARMSX2DeepLinkHandler.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/ImportDocumentPicker.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/CoverStore.swift

@@ -448,6 +448,7 @@ struct GameScreenView: View {
         runtimePerGameSettingsEntry = ISOEntry(
             name: gameName,
             fileURL: nil,
+            bootPath: nil,
             coverURL: nil,
             coverSignature: nil,
             metadata: serial.isEmpty ? [:] : ["serial": serial],

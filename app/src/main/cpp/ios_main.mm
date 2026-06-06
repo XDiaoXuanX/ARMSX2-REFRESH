@@ -178,8 +178,8 @@ static VMBootParameters BuildBootParams() {
     std::string isoFilename = s_macos_settings->GetStringValue("GameISO", "BootISO", "");
     bool fastBoot = s_macos_settings->GetBoolValue("GameISO", "FastBoot", false);
     if (!isoFilename.empty()) {
-        std::string isoPath = isoDir + "/" + isoFilename;
-        if (!FileSystem::FileExists(isoPath.c_str())) {
+        std::string isoPath = (!isoFilename.empty() && isoFilename.front() == '/') ? isoFilename : (isoDir + "/" + isoFilename);
+        if (isoFilename.front() != '/' && !FileSystem::FileExists(isoPath.c_str())) {
             std::string rootPath = EmuFolders::DataRoot + "/" + isoFilename;
             if (FileSystem::FileExists(rootPath.c_str()))
                 isoPath = rootPath;
@@ -807,6 +807,7 @@ static void ARMSX2DrainCPUThreadTasks()
 }
 
 extern "C" void ARMSX2_PostRetroAchievementsStateChanged(void);
+extern "C" bool ARMSX2_StartExternalGameDirectoryAccess(const char* path);
 extern "C" void ARMSX2_PostRuntimeMenuStateChanged(void)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -3421,14 +3422,14 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             {
                 std::string isoDir = EmuFolders::DataRoot + "/iso";
                 std::string defaultISO = "";
-                std::string isoFilename = s_settings_interface->GetStringValue("GameISO", "BootISO", defaultISO.c_str());
-                bool fastBoot = s_settings_interface->GetBoolValue("GameISO", "FastBoot", false);
-                s_settings_interface->SetStringValue("GameISO", "BootISO", isoFilename.c_str());
-                s_settings_interface->SetBoolValue("GameISO", "FastBoot", fastBoot);
-                s_settings_interface->Save();
-                std::string isoPath = isoDir + "/" + isoFilename;
-                // Fallback: check Documents/ root if not found in iso/
-                if (!isoFilename.empty() && !FileSystem::FileExists(isoPath.c_str())) {
+	                std::string isoFilename = s_settings_interface->GetStringValue("GameISO", "BootISO", defaultISO.c_str());
+	                bool fastBoot = s_settings_interface->GetBoolValue("GameISO", "FastBoot", false);
+	                s_settings_interface->SetStringValue("GameISO", "BootISO", isoFilename.c_str());
+	                s_settings_interface->SetBoolValue("GameISO", "FastBoot", fastBoot);
+	                s_settings_interface->Save();
+	                std::string isoPath = (!isoFilename.empty() && isoFilename.front() == '/') ? isoFilename : (isoDir + "/" + isoFilename);
+	                // Fallback: check Documents/ root if not found in iso/.
+	                if (!isoFilename.empty() && isoFilename.front() != '/' && !FileSystem::FileExists(isoPath.c_str())) {
                     std::string rootPath = EmuFolders::DataRoot + "/" + isoFilename;
                     if (FileSystem::FileExists(rootPath.c_str())) {
                         isoPath = rootPath;

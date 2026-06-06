@@ -3,6 +3,7 @@
 
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 private struct StorageReport: Sendable, Equatable {
     var appCacheBytes: Int64 = 0
@@ -267,11 +268,23 @@ private enum StorageCleaner {
 
 struct StorageSettingsView: View {
     @State private var settings = SettingsStore.shared
+    @State private var externalLibrary = ExternalGameLibrary.shared
     @State private var report = StorageReport()
     @State private var isWorking = false
     @State private var pendingAction: StorageClearAction?
     @State private var resultMessage: String?
     @State private var showResult = false
+    @State private var showExternalGameFilePicker = false
+    @State private var showExternalFolderPicker = false
+    @State private var externalActionMessage: String?
+
+    private var externalGameFileContentTypes: [UTType] {
+        var types: [UTType] = [.item, .data, .content]
+        for type in FileImportHandler.gameContentTypes where !types.contains(type) {
+            types.append(type)
+        }
+        return types
+    }
 
     var body: some View {
         Form {
@@ -288,6 +301,61 @@ struct StorageSettingsView: View {
                     Label(settings.localized("Refresh Storage Usage"), systemImage: "arrow.clockwise")
                 }
                 .disabled(isWorking)
+            }
+
+            Section {
+                Button {
+                    showExternalGameFilePicker = true
+                } label: {
+                    Label(settings.localized("Add External Game File"), systemImage: "doc.badge.plus")
+                }
+
+                Button {
+                    showExternalFolderPicker = true
+                } label: {
+                    Label(settings.localized("Add External Game Folder"), systemImage: "externaldrive.badge.plus")
+                }
+
+                if externalLibrary.directories.isEmpty {
+                    ContentUnavailableView(
+                        settings.localized("No External Games"),
+                        systemImage: "externaldrive",
+                        description: Text(settings.localized("Add a folder or game file from Files to play without copying it into ARMSX2."))
+                    )
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ForEach(externalLibrary.directories) { location in
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: location.isDirectory ? "externaldrive" : "doc")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 24)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(location.displayName)
+                                    .font(.body.weight(.medium))
+                                Text(location.path)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                    .textSelection(.enabled)
+                            }
+
+                            Spacer()
+
+                            Button(role: .destructive) {
+                                externalLibrary.removeDirectory(id: location.id)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            } header: {
+                Text(settings.localized("External Games"))
+            } footer: {
+                Text(settings.localized("USB/SSD folders can be scanned and played directly. Removing an entry only removes ARMSX2's bookmark and does not delete the game."))
             }
 
             Section(settings.localized("Cleanup")) {
@@ -331,7 +399,54 @@ struct StorageSettingsView: View {
         .navigationTitle(settings.localized("Storage"))
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            externalLibrary.reload()
             await refreshReport()
+        }
+        .sheet(isPresented: $showExternalGameFilePicker) {
+            ImportDocumentPicker(
+                allowedContentTypes: externalGameFileContentTypes,
+                allowsMultipleSelection: false,
+                legacyDocumentTypes: ["public.item", "public.data", "public.content"],
+                legacyDocumentMode: .open,
+                asCopy: false
+            ) { result in
+                showExternalGameFilePicker = false
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else {
+                        externalActionMessage = "No external game was selected."
+                        return
+                    }
+                    externalActionMessage = externalLibrary.addLocation(url)
+                case .failure(let error):
+                    if !FileImportHandler.isUserCancelledPickerError(error) {
+                        externalActionMessage = "External game could not be added.\n\(error.localizedDescription)"
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showExternalFolderPicker) {
+            ImportDocumentPicker(
+                allowedContentTypes: [.folder],
+                allowsMultipleSelection: false,
+                legacyDocumentTypes: ["public.folder", "public.directory"],
+                legacyDocumentMode: .open,
+                asCopy: false
+            ) { result in
+                showExternalFolderPicker = false
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else {
+                        externalActionMessage = "No external folder was selected."
+                        return
+                    }
+                    externalActionMessage = externalLibrary.addLocation(url)
+                case .failure(let error):
+                    if !FileImportHandler.isUserCancelledPickerError(error) {
+                        externalActionMessage = "External folder could not be added.\n\(error.localizedDescription)"
+                    }
+                }
+            }
         }
         .confirmationDialog(
             settings.localized(pendingAction?.title ?? "Clear Cache"),
@@ -359,6 +474,19 @@ struct StorageSettingsView: View {
             Button(settings.localized("OK")) {}
         } message: {
             Text(resultMessage ?? "")
+        }
+        .alert(
+            settings.localized("External Games"),
+            isPresented: Binding(
+                get: { externalActionMessage != nil },
+                set: { if !$0 { externalActionMessage = nil } }
+            )
+        ) {
+            Button(settings.localized("OK")) {
+                externalActionMessage = nil
+            }
+        } message: {
+            Text(externalActionMessage ?? "")
         }
     }
 

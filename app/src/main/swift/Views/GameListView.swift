@@ -7,28 +7,38 @@ import UniformTypeIdentifiers
 import UIKit
 
 struct ISOEntry: Identifiable {
-    var id: String { name }
-    let name: String
-    let fileURL: URL?
-    let coverURL: URL?
-    let coverSignature: String?
-    let metadata: [String: String]
-    let size: UInt64
-    var isFavorite: Bool
+	var id: String { bootPath ?? fileURL?.path ?? name }
+	let name: String
+	let fileURL: URL?
+	let bootPath: String?
+	let coverURL: URL?
+	let coverSignature: String?
+	let metadata: [String: String]
+	let size: UInt64
+	var isFavorite: Bool
+	var isExternal: Bool = false
+	var sourceName: String? = nil
 
-    var coverInfo: CoverGameInfo {
-        CoverGameInfo(name: name, fileURL: fileURL, metadata: metadata, hasCover: coverURL != nil)
-    }
+	var bootName: String {
+		isExternal ? (bootPath ?? fileURL?.path ?? name) : name
+	}
+
+	var coverInfo: CoverGameInfo {
+		CoverGameInfo(name: name, fileURL: isExternal ? nil : fileURL, metadata: metadata, hasCover: coverURL != nil)
+	}
 }
 
 struct GameListView: View {
     @State private var games: [ISOEntry] = []
     @State private var appState = AppState.shared
-    @State private var settings = SettingsStore.shared
-    @State private var fileImporter = FileImportHandler.shared
-    @State private var coverStore = CoverStore.shared
-    @State private var showGameImporter = false
-    @State private var showCoverImporter = false
+	@State private var settings = SettingsStore.shared
+	@State private var fileImporter = FileImportHandler.shared
+	@State private var coverStore = CoverStore.shared
+	@State private var externalLibrary = ExternalGameLibrary.shared
+	@State private var externalCoverAutoDownloadAttemptedIDs = Set<String>()
+	@State private var showGameImporter = false
+	@State private var isLoadingGames = false
+	@State private var showCoverImporter = false
     @State private var showCoverPhotoPicker = false
     @State private var showRestartAlert = false
     @State private var showStopAlert = false
@@ -72,14 +82,16 @@ struct GameListView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .navigationTitle(settings.localized("Games"))
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showGameImporter = true } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel(settings.localized("Import Games"))
-                }
+			.navigationTitle(settings.localized("Games"))
+				.toolbar {
+					ToolbarItem(placement: .topBarTrailing) {
+						Button {
+							showGameImporter = true
+						} label: {
+							Image(systemName: "plus")
+						}
+						.accessibilityLabel(settings.localized("Import Games"))
+					}
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
@@ -140,6 +152,7 @@ struct GameListView: View {
                     Button { loadGames() } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .disabled(isLoadingGames)
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     if ARMSX2Bridge.hasBIOS() {
@@ -188,10 +201,10 @@ struct GameListView: View {
                         appState.shutdownAndBoot(isoName: pendingGameName)
                     }
                 }
-            } message: {
-                let target = pendingGameName.isEmpty ? "BIOS Only" : pendingGameName
-                Text("\(settings.localized("VM is currently running."))\n\(settings.localized("Shut down and start")) \(settings.localized(target))?")
-            }
+			} message: {
+				let target = pendingGameName.isEmpty ? "BIOS Only" : (pendingGameName as NSString).lastPathComponent
+				Text("\(settings.localized("VM is currently running."))\n\(settings.localized("Shut down and start")) \(settings.localized(target))?")
+			}
             .alert(
                 settings.localized("Delete Game Data?"),
                 isPresented: Binding(
@@ -260,11 +273,12 @@ struct GameListView: View {
             } message: {
                 Text(FileImportHandler.replacementConfirmationMessage(for: existingGameImportFileNames))
             }
-            .sheet(isPresented: $showGameImporter) {
-                ImportDocumentPicker(
-                    allowedContentTypes: FileImportHandler.gameContentTypes,
-                    allowsMultipleSelection: true
-                ) { result in
+				.sheet(isPresented: $showGameImporter) {
+					ImportDocumentPicker(
+						allowedContentTypes: FileImportHandler.gameContentTypes,
+						allowsMultipleSelection: true,
+						legacyDocumentTypes: ["public.item", "public.data", "public.content"]
+	                ) { result in
                     showGameImporter = false
                     switch result {
                     case .success(let urls):
@@ -273,12 +287,12 @@ struct GameListView: View {
                         if !FileImportHandler.isUserCancelledPickerError(error) {
                             fileImporter.presentImportResult(FileImportHandler.failedGamePickerMessage(errorDescription: error.localizedDescription))
                         }
-                    }
-                }
-            }
-            .sheet(isPresented: $showCoverImporter) {
-                ImportDocumentPicker(
-                    allowedContentTypes: CoverStore.coverContentTypes,
+					}
+				}
+			}
+			.sheet(isPresented: $showCoverImporter) {
+				ImportDocumentPicker(
+					allowedContentTypes: CoverStore.coverContentTypes,
                     allowsMultipleSelection: pendingCoverGameName == nil
                 ) { result in
                     showCoverImporter = false
@@ -345,7 +359,13 @@ struct GameListView: View {
                     .presentationDetents([.medium, .large])
             }
         }
-        .onAppear { loadGames() }
+	        .onAppear {
+			externalLibrary.reload()
+			loadGames(autoDownloadExternalCovers: true)
+		}
+		.onReceive(NotificationCenter.default.publisher(for: ExternalGameLibrary.didChangeNotification)) { _ in
+			loadGames(autoDownloadExternalCovers: true)
+		}
     }
 
     private var listLibrary: some View {
@@ -475,33 +495,36 @@ struct GameListView: View {
                             .font(.body)
                             .fontWeight(.medium)
                             .foregroundStyle(.primary)
-                        if game.name == appState.runningGameName {
-                            Image(systemName: "circle.fill")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.green)
-                        }
+						if isRunning(game) {
+							Image(systemName: "circle.fill")
+								.font(.system(size: 8))
+								.foregroundStyle(.green)
+						}
                     }
                     HStack(spacing: 8) {
-                        Text(formatSize(game.size))
-                        Text(game.name.pathExtensionLabel)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    toggleFavorite(game.name)
-                } label: {
-                    Image(systemName: game.isFavorite ? "star.fill" : "star")
-                        .foregroundStyle(game.isFavorite ? .yellow : .gray)
-                }
-                .buttonStyle(.plain)
+						Text(formatSize(game.size))
+						Text(game.name.pathExtensionLabel)
+						if game.isExternal {
+							Label(settings.localized("External"), systemImage: "externaldrive")
+						}
+					}
+					.font(.caption)
+					.foregroundStyle(.secondary)
+				}
+				Spacer()
+				Button {
+					toggleFavorite(game)
+				} label: {
+					Image(systemName: game.isFavorite ? "star.fill" : "star")
+						.foregroundStyle(game.isFavorite ? .yellow : .gray)
+				}
+				.buttonStyle(.plain)
 
-                Image(systemName: game.name == appState.runningGameName ? "play.fill" : "chevron.right")
-                    .foregroundStyle(game.name == appState.runningGameName ? .green : .secondary)
-                    .font(.caption)
-            }
-        }
+				Image(systemName: isRunning(game) ? "play.fill" : "chevron.right")
+					.foregroundStyle(isRunning(game) ? .green : .secondary)
+					.font(.caption)
+			}
+		}
         .foregroundStyle(.primary)
         .contextMenu {
             gameContextMenu(for: game)
@@ -517,10 +540,10 @@ struct GameListView: View {
                     coverThumbnail(for: game, width: 126, height: 189)
                         .frame(maxWidth: .infinity)
 
-                    Button {
-                        toggleFavorite(game.name)
-                    } label: {
-                        Image(systemName: game.isFavorite ? "star.fill" : "star")
+					Button {
+						toggleFavorite(game)
+					} label: {
+						Image(systemName: game.isFavorite ? "star.fill" : "star")
                             .font(.callout.weight(.semibold))
                             .foregroundStyle(game.isFavorite ? .yellow : .white.opacity(0.86))
                             .padding(8)
@@ -537,16 +560,19 @@ struct GameListView: View {
                             .foregroundStyle(.primary)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
-                        if game.name == appState.runningGameName {
-                            Image(systemName: "circle.fill")
+						if isRunning(game) {
+							Image(systemName: "circle.fill")
                                 .font(.system(size: 7))
                                 .foregroundStyle(.green)
                         }
                     }
                     HStack(spacing: 6) {
-                        Text(game.name.pathExtensionLabel)
-                        Text(formatSize(game.size))
-                    }
+						Text(game.name.pathExtensionLabel)
+						Text(formatSize(game.size))
+						if game.isExternal {
+							Image(systemName: "externaldrive")
+						}
+					}
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 }
@@ -555,10 +581,10 @@ struct GameListView: View {
             .padding(8)
             .frame(maxWidth: .infinity, minHeight: 268, alignment: .top)
             .background(.background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(game.name == appState.runningGameName ? .green.opacity(0.6) : .white.opacity(0.08), lineWidth: 1)
-            }
+				.overlay {
+					RoundedRectangle(cornerRadius: 18, style: .continuous)
+						.strokeBorder(isRunning(game) ? .green.opacity(0.6) : .white.opacity(0.08), lineWidth: 1)
+				}
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -575,9 +601,9 @@ struct GameListView: View {
                     coverThumbnail(for: game, width: 150, height: 225)
                         .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
 
-                    Button {
-                        toggleFavorite(game.name)
-                    } label: {
+					Button {
+						toggleFavorite(game)
+					} label: {
                         Image(systemName: game.isFavorite ? "star.fill" : "star")
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(game.isFavorite ? .yellow : .white.opacity(0.88))
@@ -593,18 +619,18 @@ struct GameListView: View {
                         .font(.headline.weight(.semibold))
                         .multilineTextAlignment(.center)
                         .lineLimit(2)
-                    Text("\(game.name.pathExtensionLabel)  \(formatSize(game.size))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+				Text(game.isExternal ? "\(game.name.pathExtensionLabel)  \(formatSize(game.size))  External" : "\(game.name.pathExtensionLabel)  \(formatSize(game.size))")
+					.font(.caption)
+					.foregroundStyle(.secondary)
                 }
                 .frame(width: 164)
             }
             .padding(12)
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .strokeBorder(game.name == appState.runningGameName ? .green.opacity(0.7) : .white.opacity(0.12), lineWidth: 1)
-            }
+			.overlay {
+				RoundedRectangle(cornerRadius: 24, style: .continuous)
+					.strokeBorder(isRunning(game) ? .green.opacity(0.7) : .white.opacity(0.12), lineWidth: 1)
+			}
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -699,8 +725,8 @@ struct GameListView: View {
         }
     }
 
-    @ViewBuilder
-    private func gameContextMenu(for game: ISOEntry) -> some View {
+	@ViewBuilder
+	private func gameContextMenu(for game: ISOEntry) -> some View {
         Button {
             gameInfoTarget = game
         } label: {
@@ -719,10 +745,10 @@ struct GameListView: View {
             Label(settings.localized("Compatibility Lab"), systemImage: "wand.and.stars")
         }
 
-        Button {
-            pendingPNACHGameName = game.name
-            showPNACHImporter = true
-        } label: {
+		Button {
+			pendingPNACHGameName = game.bootName
+			showPNACHImporter = true
+		} label: {
             Label(settings.localized("Import PNACH / 60 FPS Patch"), systemImage: "wand.and.stars")
         }
 
@@ -775,26 +801,28 @@ struct GameListView: View {
                 Label(settings.localized("Delete Game Data"), systemImage: "externaldrive.badge.xmark")
             }
 
-            Button(role: .destructive) {
-                pendingDeleteGame = game
-            } label: {
-                Label(settings.localized("Delete Game"), systemImage: "trash")
-            }
-        } label: {
-            Label(settings.localized("Game Data"), systemImage: "externaldrive")
-        }
-    }
+			if !game.isExternal {
+				Button(role: .destructive) {
+					pendingDeleteGame = game
+				} label: {
+					Label(settings.localized("Delete Game"), systemImage: "trash")
+				}
+			}
+		} label: {
+			Label(settings.localized("Game Data"), systemImage: "externaldrive")
+		}
+	}
 
-    private func open(_ game: ISOEntry) {
-        if game.name == appState.runningGameName {
-            appState.returnToGame()
-        } else if appState.runningGameName != nil {
-            pendingGameName = game.name
-            showRestartAlert = true
-        } else {
-            appState.bootGame(isoName: game.name)
-        }
-    }
+	private func open(_ game: ISOEntry) {
+		if isRunning(game) {
+			appState.returnToGame()
+		} else if appState.runningGameName != nil {
+			pendingGameName = game.bootName
+			showRestartAlert = true
+		} else {
+			appState.bootGame(isoName: game.bootName)
+		}
+	}
 
     private var emptyState: some View {
         VStack(spacing: 16) {
@@ -814,34 +842,72 @@ struct GameListView: View {
                 Label(settings.localized("Import Games"), systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
+			Label(settings.localized("External Games are in Settings > Storage"), systemImage: "externaldrive")
+				.font(.caption)
+				.foregroundStyle(.secondary)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func loadGames() {
-        let isoDir = ARMSX2Bridge.isoDirectory()
-        let docsDir = ARMSX2Bridge.documentsDirectory()
-        let fileNames = ARMSX2Bridge.availableISOs()
-        let fm = FileManager.default
-        games = fileNames.map { name in
-            var path = (isoDir as NSString).appendingPathComponent(name)
-            if !fm.fileExists(atPath: path) {
-                path = (docsDir as NSString).appendingPathComponent(name)
-            }
-            let attrs = try? fm.attributesOfItem(atPath: path)
-            let size = attrs?[.size] as? UInt64 ?? 0
-            let fav = ARMSX2Bridge.isFavorite(name)
-            let fileURL = fm.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
-            let metadata = ARMSX2Bridge.gameMetadata(forISO: name)
-            let coverURL = coverStore.coverURL(forGameName: name, gamePath: fileURL, metadata: metadata)
-            let coverSignature = CoverThumbnailCache.signature(for: coverURL)
-            return ISOEntry(name: name, fileURL: fileURL, coverURL: coverURL, coverSignature: coverSignature, metadata: metadata, size: size, isFavorite: fav)
-        }.sorted { a, b in
-            if a.isFavorite != b.isFavorite { return a.isFavorite }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-        }
-    }
+	private func loadGames(autoDownloadExternalCovers: Bool = false) {
+		guard !isLoadingGames else { return }
+		isLoadingGames = true
+		defer { isLoadingGames = false }
+
+		let fm = FileManager.default
+		let allowFullMetadata = appState.runningGameName == nil
+		let existingGames = Dictionary(games.map { ($0.id, $0) }, uniquingKeysWith: { current, _ in current })
+		externalLibrary.reload()
+		games = ARMSX2Bridge.availableISOEntries().compactMap { rawEntry -> ISOEntry? in
+			guard let name = rawEntry["name"] as? String,
+			      let path = rawEntry["path"] as? String else {
+				return nil
+			}
+			let external = (rawEntry["external"] as? NSNumber)?.boolValue ?? (rawEntry["external"] as? Bool ?? false)
+			let source = rawEntry["source"] as? String
+			let bootName = external ? path : name
+			let attrs = try? fm.attributesOfItem(atPath: path)
+			let size = attrs?[.size] as? UInt64 ?? 0
+			let fav = ARMSX2Bridge.isFavorite(bootName)
+			let fileURL = URL(fileURLWithPath: path)
+			let entryID = external ? path : fileURL.path
+			let metadata: [String: String]
+			if allowFullMetadata {
+				metadata = ARMSX2Bridge.gameMetadata(forISO: bootName)
+			} else if let existing = existingGames[entryID] {
+				metadata = existing.metadata
+			} else {
+				metadata = ["fileTitle": (name as NSString).deletingPathExtension]
+			}
+			let coverSearchURL = external ? nil : fileURL
+			let coverURL = coverStore.coverURL(forGameName: name, gamePath: coverSearchURL, metadata: metadata)
+			let coverSignature = CoverThumbnailCache.signature(for: coverURL)
+			return ISOEntry(
+				name: name,
+				fileURL: fileURL,
+				bootPath: external ? path : nil,
+				coverURL: coverURL,
+				coverSignature: coverSignature,
+				metadata: metadata,
+				size: size,
+				isFavorite: fav,
+				isExternal: external,
+				sourceName: source
+			)
+		}.sorted { a, b in
+			if a.isFavorite != b.isFavorite { return a.isFavorite }
+			return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+		}
+
+		if !allowFullMetadata {
+			NSLog("[ARMSX2 iOS GameList] skipped full ISO metadata refresh while VM is active")
+		}
+
+		if autoDownloadExternalCovers {
+			autoDownloadExternalCoversIfNeeded()
+		}
+	}
 
     private func downloadMissingCovers() {
         let targets = games.map(\.coverInfo)
@@ -902,54 +968,92 @@ struct GameListView: View {
         }
     }
 
-    private func autoDownloadCovers(for importedGames: [FileImportHandler.ImportedGame]) {
-        guard !importedGames.isEmpty else { return }
+	private func autoDownloadCovers(for importedGames: [FileImportHandler.ImportedGame]) {
+		guard !importedGames.isEmpty else { return }
 
-        let targets = importedGames.map { game in
-            let metadata = ARMSX2Bridge.gameMetadata(forISO: game.name)
-            let existingCover = coverStore.coverURL(forGameName: game.name, gamePath: game.fileURL, metadata: metadata)
-            return CoverGameInfo(name: game.name, fileURL: game.fileURL, metadata: metadata, hasCover: existingCover != nil)
+		let targets = importedGames.map { game in
+			let metadata = ARMSX2Bridge.gameMetadata(forISO: game.name)
+			let existingCover = coverStore.coverURL(forGameName: game.name, gamePath: game.fileURL, metadata: metadata)
+			return CoverGameInfo(name: game.name, fileURL: game.fileURL, metadata: metadata, hasCover: existingCover != nil)
+		}
+
+		Task {
+			let summary = await coverStore.downloadMissingCovers(for: targets, showResult: false)
+			if summary.downloaded > 0 {
+				loadGames()
+			}
+		}
+	}
+
+	private func autoDownloadExternalCoversIfNeeded() {
+		guard appState.runningGameName == nil else { return }
+
+		let targets = games.filter { game in
+			game.isExternal &&
+			game.coverURL == nil &&
+			!externalCoverAutoDownloadAttemptedIDs.contains(game.id)
+		}
+		guard !targets.isEmpty else { return }
+
+		for game in targets {
+			externalCoverAutoDownloadAttemptedIDs.insert(game.id)
+		}
+
+		let coverTargets = targets.map(\.coverInfo)
+		let serials = coverTargets.map { $0.metadata["serial"] ?? "" }.filter { !$0.isEmpty }.joined(separator: ",")
+		NSLog("[ARMSX2 iOS Covers] auto-download external missing covers count=%d serials=%@", targets.count, serials)
+		Task {
+			let summary = await coverStore.downloadMissingCovers(for: coverTargets, showResult: false)
+			if summary.downloaded > 0 {
+				loadGames()
+			}
+		}
+	}
+
+	private func toggleFavorite(_ game: ISOEntry) {
+		let key = game.bootName
+		let current = ARMSX2Bridge.isFavorite(key)
+		ARMSX2Bridge.setFavorite(key, favorite: !current)
+		loadGames()
+	}
+
+	private func clearGameCache(_ game: ISOEntry) {
+		gameActionTitle = "Clear Game Cache"
+		gameActionMessage = ARMSX2Bridge.clearCache(forISO: game.bootName)
+	}
+
+	private func deleteGameData(_ game: ISOEntry) {
+		gameActionTitle = "Delete Game Data"
+		gameActionMessage = ARMSX2Bridge.deleteGameData(forISO: game.bootName)
+	}
+
+	private func deleteGame(_ game: ISOEntry, deleteData: Bool) {
+		if isRunning(game) {
+			gameActionTitle = "Delete Game"
+			gameActionMessage = settings.localized("Stop this game before deleting it.")
+			return
+		}
+
+		let success = ARMSX2Bridge.deleteISO(game.bootName, deleteGameData: deleteData)
+		if success {
+			coverStore.removeManagedCovers(forGameNamed: game.name)
+			loadGames()
         }
+		gameActionTitle = "Delete Game"
+		gameActionMessage = success ? settings.localized("Game deleted.") : settings.localized("Could not delete this game file.")
+	}
 
-        Task {
-            let summary = await coverStore.downloadMissingCovers(for: targets, showResult: false)
-            if summary.downloaded > 0 {
-                loadGames()
-            }
-        }
-    }
+	private func isRunning(_ game: ISOEntry) -> Bool {
+		guard let runningGameName = appState.runningGameName else {
+			return false
+		}
 
-    private func toggleFavorite(_ name: String) {
-        let current = ARMSX2Bridge.isFavorite(name)
-        ARMSX2Bridge.setFavorite(name, favorite: !current)
-        loadGames()
-    }
+		if runningGameName == game.bootName || runningGameName == game.name {
+			return true
+		}
 
-    private func clearGameCache(_ game: ISOEntry) {
-        gameActionTitle = "Clear Game Cache"
-        gameActionMessage = ARMSX2Bridge.clearCache(forISO: game.name)
-    }
-
-    private func deleteGameData(_ game: ISOEntry) {
-        gameActionTitle = "Delete Game Data"
-        gameActionMessage = ARMSX2Bridge.deleteGameData(forISO: game.name)
-    }
-
-    private func deleteGame(_ game: ISOEntry, deleteData: Bool) {
-        if appState.runningGameName == game.name {
-            gameActionTitle = "Delete Game"
-            gameActionMessage = settings.localized("Stop this game before deleting it.")
-            return
-        }
-
-        let success = ARMSX2Bridge.deleteISO(game.name, deleteGameData: deleteData)
-        if success {
-            coverStore.removeManagedCovers(forGameNamed: game.name)
-            loadGames()
-        }
-        gameActionTitle = "Delete Game"
-        gameActionMessage = success ? settings.localized("Game deleted.") : settings.localized("Could not delete this game file.")
-    }
+		return (runningGameName as NSString).lastPathComponent == game.name
+	}
 
     private func formatSize(_ bytes: UInt64) -> String {
         let gb = Double(bytes) / 1_073_741_824
@@ -1088,8 +1192,8 @@ private struct GameCompatibilityPanel: View {
 
     init(game: ISOEntry) {
         self.game = game
-        _selectedPreset = State(initialValue: ARMSX2Bridge.compatibilityPreset(forISO: game.name))
-        _identity = State(initialValue: ARMSX2Bridge.compatibilityIdentity(forISO: game.name))
+        _selectedPreset = State(initialValue: ARMSX2Bridge.compatibilityPreset(forISO: game.bootName))
+        _identity = State(initialValue: ARMSX2Bridge.compatibilityIdentity(forISO: game.bootName))
     }
 
     var body: some View {
@@ -1130,11 +1234,11 @@ private struct GameCompatibilityPanel: View {
                 Section {
                     ForEach(advancedPresets) { preset in
                         Toggle(isOn: Binding(
-                            get: { ARMSX2Bridge.compatibilityFlag(preset.id, forISO: game.name) },
+                            get: { ARMSX2Bridge.compatibilityFlag(preset.id, forISO: game.bootName) },
                             set: { enabled in
-                                ARMSX2Bridge.setCompatibilityFlag(preset.id, enabled: enabled, forISO: game.name)
-                                selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.name)
-                                identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.name)
+                                ARMSX2Bridge.setCompatibilityFlag(preset.id, enabled: enabled, forISO: game.bootName)
+                                selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.bootName)
+                                identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.bootName)
                                 statusMessage = "\(settings.localized("Custom compatibility flags saved for")) \(identity)"
                             }
                         )) {
@@ -1149,9 +1253,9 @@ private struct GameCompatibilityPanel: View {
 
                 Section {
                     Button(role: .destructive) {
-                        ARMSX2Bridge.forgetCompatibilityPreset(forISO: game.name)
-                        selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.name)
-                        identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.name)
+                        ARMSX2Bridge.forgetCompatibilityPreset(forISO: game.bootName)
+                        selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.bootName)
+                        identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.bootName)
                         statusMessage = settings.localized("Compatibility preset reset for this game.")
                     } label: {
                         Label(settings.localized("Forget This Game's Override"), systemImage: "trash")
@@ -1178,9 +1282,9 @@ private struct GameCompatibilityPanel: View {
     }
 
     private func apply(_ preset: CompatibilityPreset) {
-        ARMSX2Bridge.setCompatibilityPreset(preset.id, forISO: game.name)
-        selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.name)
-        identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.name)
+        ARMSX2Bridge.setCompatibilityPreset(preset.id, forISO: game.bootName)
+        selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.bootName)
+        identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.bootName)
         statusMessage = "\(settings.localized(preset.title)) \(settings.localized("saved for this game. Reset or relaunch to apply."))"
     }
 
@@ -1285,7 +1389,7 @@ struct PerGameSettingsPanel: View {
         self.savesToRunningGame = savesToRunningGame
         // The runtime caller passes settings it already loaded through a VM-safe path so
         // this view never re-scans the disc image during init while a game is running.
-        let info = preloadedSettings ?? ARMSX2Bridge.gameSettings(forISO: game.name)
+        let info = preloadedSettings ?? ARMSX2Bridge.gameSettings(forISO: game.bootName)
         _enabled = State(initialValue: Self.boolValue(info["enabled"], defaultValue: false))
         _upscaleMultiplier = State(initialValue: Self.floatValue(info["upscaleMultiplier"], defaultValue: 1.0))
         _aspectRatio = State(initialValue: Self.normalizedAspect(info["aspectRatio"] as? String))
@@ -1649,7 +1753,7 @@ struct PerGameSettingsPanel: View {
             )
         } else {
             ARMSX2Bridge.setGameSettings(
-                forISO: game.name,
+                forISO: game.bootName,
                 enabled: enabled,
                 upscaleMultiplier: upscaleMultiplier,
                 aspectRatio: aspectRatio,
