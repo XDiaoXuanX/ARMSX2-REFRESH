@@ -205,8 +205,8 @@
     <string name="settings_intc_spin_detection">كشف دوران INTC</string>
     <string name="settings_mvu_flag_hack">mVU Flag Hack</string>
     <string name="settings_instant_vu1">VU1 فوري</string>
-    <string name="settings_enable_vu0">Enable VU0 Recompiler</string>
-    <string name="settings_enable_vu1">Enable VU1 Recompiler</string>
+    <string name="settings_enable_vu0">تفعيل VU0 Recompiler</string>
+    <string name="settings_enable_vu1">تفعيل VU1 Recompiler</string>
     <string name="settings_fast_cdvd">CDVD سريع</string>
     <string name="settings_performance_overlay">طبقة الأداء</string>
     <string name="settings_osd_scale_default">حجم واجهة عرض الشاشة: 100</string>
