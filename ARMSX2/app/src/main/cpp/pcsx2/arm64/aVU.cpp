@@ -5303,8 +5303,21 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		}
 		if (fmac_clean) eff_gate_fmac = 0;
 		if (ialu_clean) eff_gate_ialu = 0;
-		if (es.q == 0)  eff_gate_fdiv = 0;
-		if (es.p == 0)  eff_gate_efu  = 0;
+		// FDIV (es.q) and EFU (es.p) tracking is a documented COVERAGE GAP
+		// in mvu1AnalyzeBlock (see ~line 1777 — analyze pass decays state.q /
+		// state.p per pair but NEVER writes them when an FDIV/EFU op fires
+		// because the lower-op classifier doesn't yet flag those writes).
+		// es.q / es.p are therefore vacuously zero, so a naive
+		// `if (es.q == 0) eff_gate_fdiv = 0` would claim the FDIV pipe is
+		// drained at entry whether it is or not. Harmless on its own (the
+		// BL still does the real work) but combined with the inline-drain
+		// TestPipes — which inlines only the FMAC ring walk and assumes
+		// FDIV/EFU are empty when fmacOnlyTestPipes is true — the inline
+		// drain skips required VI[REG_Q] / VI[REG_P] commits. Symptom: SH /
+		// FDIV-heavy games glitch when both toggles are on. Keep the FDIV /
+		// EFU gates at their conservative defaults until the analyze pass
+		// learns to write es.q / es.p on DIV / SQRT / RSQRT / ETAN / ESIN /
+		// ELENG / ERLENG / EATAN / EEXP / ESUM ops.
 	}
 
 	struct PerPairSkip
