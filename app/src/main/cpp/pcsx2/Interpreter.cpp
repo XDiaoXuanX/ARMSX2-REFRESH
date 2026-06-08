@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "R3000A.h"
 #include "R5900OpcodeTables.h"
 #include "VMManager.h"
 #include "Elfheader.h"

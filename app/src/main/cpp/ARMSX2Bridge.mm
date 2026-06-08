@@ -271,6 +271,9 @@ static void ARMSX2ApplyCompatibilityProfile(NSString* profile, BOOL persistSetti
         }
 
         NSLog(@"[ARMSX2Bridge] Compatibility preset=custom reason=%@ flags preserved", reason ?: @"manual");
+        std::fprintf(stderr, "@@IOS_JIT_PROFILE_APPLY@@ profile=custom reason=\"%s\" persisted=%d flags_preserved=1\n",
+            reason ? reason.UTF8String : "manual", persistSettings ? 1 : 0);
+        std::fflush(stderr);
         return;
     }
 
@@ -289,6 +292,19 @@ static void ARMSX2ApplyCompatibilityProfile(NSString* profile, BOOL persistSetti
     }
 
     NSLog(@"[ARMSX2Bridge] Compatibility preset=%@ reason=%@", normalized, reason ?: @"manual");
+    std::fprintf(stderr,
+        "@@IOS_JIT_PROFILE_APPLY@@ profile=%s flag=%s reason=\"%s\" persisted=%d cop1=%d ls=%d mmi=%d cop2vu=%d multdiv=%d shifts=%d moves=%d ialu=%d branches=%d\n",
+        normalized.UTF8String, activeFlag.UTF8String, reason ? reason.UTF8String : "manual", persistSettings ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_ONLY ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_LOADSTORE ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MMI ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_COP2_VU ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MULTDIV ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_SHIFTS ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MOVES ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_INTEGER_ALU ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_BRANCHES ? 1 : 0);
+    std::fflush(stderr);
 }
 
 static NSString* ARMSX2CompatibilityCustomFlagSection(NSString* identity)
@@ -323,22 +339,43 @@ static BOOL ARMSX2LoadCompatibilityCustomFlagsForIdentity(NSString* identity)
 
     NSString* section = ARMSX2CompatibilityCustomFlagSection(identity);
     bool foundAny = false;
+    bool anyEnabled = false;
 
     for (NSString* key in ARMSX2JITBisectFlagKeys()) {
         bool enabled = false;
         if (g_p44_settings_interface->GetBoolValue(section.UTF8String, key.UTF8String, &enabled))
             foundAny = true;
+        if (enabled)
+            anyEnabled = true;
 
         ARMSX2ApplyJITBisectFlag(key, enabled ? YES : NO);
         g_p44_settings_interface->SetBoolValue("ARMSX2/JITBisect", key.UTF8String, enabled);
     }
 
-    if (!foundAny)
+    if (!foundAny || !anyEnabled)
+    {
+        std::fprintf(stderr, "@@IOS_JIT_PROFILE_CUSTOM@@ identity=\"%s\" found=%d enabled=0 action=ignore_empty_custom\n",
+            identity ? identity.UTF8String : "", foundAny ? 1 : 0);
+        std::fflush(stderr);
         return NO;
+    }
 
     g_p44_settings_interface->SetStringValue("ARMSX2/JITBisect", "Profile", ARMSX2CompatibilityProfileCustom.UTF8String);
     g_p44_settings_interface->Save();
     NSLog(@"[ARMSX2Bridge] Compatibility custom flags loaded identity=%@", identity);
+    std::fprintf(stderr,
+        "@@IOS_JIT_PROFILE_CUSTOM@@ identity=\"%s\" found=1 enabled=1 cop1=%d ls=%d mmi=%d cop2vu=%d multdiv=%d shifts=%d moves=%d ialu=%d branches=%d\n",
+        identity ? identity.UTF8String : "",
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_ONLY ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_LOADSTORE ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MMI ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_COP2_VU ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MULTDIV ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_SHIFTS ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MOVES ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_INTEGER_ALU ? 1 : 0,
+        DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_BRANCHES ? 1 : 0);
+    std::fflush(stderr);
     return YES;
 }
 
@@ -803,7 +840,32 @@ static NSString* ARMSX2CurrentCompatibilityIdentityKey()
 static NSString* ARMSX2CompatibilityBuiltInPreset(NSString* title, NSString* serial)
 {
     NSString* haystack = [[NSString stringWithFormat:@"%@ %@", title ?: @"", serial ?: @""] lowercaseString];
+    if ([haystack containsString:@"grand theft auto"] ||
+        [haystack containsString:@"gta"] ||
+        [haystack containsString:@"slus-20946"] ||
+        [haystack containsString:@"sles-52541"] ||
+        [haystack containsString:@"sles-52542"] ||
+        [haystack containsString:@"sles-52543"] ||
+        [haystack containsString:@"sles-52544"] ||
+        [haystack containsString:@"sles-52545"])
+        return ARMSX2CompatibilityProfileMMI;
+
     if ([haystack containsString:@"god of war"] ||
+        [haystack containsString:@"scus-97399"] ||
+        [haystack containsString:@"scus-97481"] ||
+        [haystack containsString:@"sces-53133"] ||
+        [haystack containsString:@"sces-54206"] ||
+        [haystack containsString:@"scaj-20190"] ||
+        [haystack containsString:@"scka-30006"] ||
+        [haystack containsString:@"slpm-67013"] ||
+        [haystack containsString:@"metal gear solid"] ||
+        [haystack containsString:@"slus-20144"] ||
+        [haystack containsString:@"slus-20554"] ||
+        [haystack containsString:@"slus-20915"] ||
+        [haystack containsString:@"sles-50383"] ||
+        [haystack containsString:@"sles-82042"] ||
+        [haystack containsString:@"sles-82043"] ||
+        [haystack containsString:@"sles-82044"] ||
         [haystack containsString:@"budokai"] ||
         [haystack containsString:@"dragon ball"] ||
         [haystack containsString:@"naruto"])
@@ -860,10 +922,38 @@ static void ARMSX2ApplyCompatibilityPresetForISOName(NSString* isoName)
         }
     }
 
+    const bool autoPresets = g_p44_settings_interface ?
+        g_p44_settings_interface->GetBoolValue("ARMSX2/JITBisect", "AutoGamePresets", true) : false;
+    NSString* saved = ARMSX2SavedCompatibilityPreset(identity);
+    NSString* builtIn = ARMSX2CompatibilityBuiltInPreset(title, identity);
     NSString* profile = ARMSX2ResolvedCompatibilityPreset(identity, title);
-    if ([profile isEqualToString:ARMSX2CompatibilityProfileCustom] && ARMSX2LoadCompatibilityCustomFlagsForIdentity(identity)) {
-        NSLog(@"[ARMSX2Bridge] Compatibility preset=custom identity=%@ reason=boot %@", identity ?: @"", title ?: @"");
-        return;
+    std::fprintf(stderr,
+        "@@IOS_JIT_PRESET_RESOLVE@@ iso=\"%s\" path=\"%s\" identity=\"%s\" title=\"%s\" auto=%d saved=\"%s\" builtin=\"%s\" profile=\"%s\"\n",
+        isoName ? isoName.UTF8String : "", path ? path.UTF8String : "", identity ? identity.UTF8String : "",
+        title ? title.UTF8String : "", autoPresets ? 1 : 0, saved ? saved.UTF8String : "",
+        builtIn ? builtIn.UTF8String : "", profile ? profile.UTF8String : "");
+    std::fflush(stderr);
+    if ([profile isEqualToString:ARMSX2CompatibilityProfileCustom]) {
+        if (ARMSX2LoadCompatibilityCustomFlagsForIdentity(identity)) {
+            NSLog(@"[ARMSX2Bridge] Compatibility preset=custom identity=%@ reason=boot %@", identity ?: @"", title ?: @"");
+            std::fprintf(stderr,
+                "@@IOS_JIT_PROFILE_APPLY@@ profile=custom reason=\"boot %s %s\" persisted=1 flags_preserved=0 loaded_custom=1\n",
+                identity ? identity.UTF8String : "", title ? title.UTF8String : "");
+            std::fflush(stderr);
+            return;
+        }
+
+        if (builtIn.length > 0) {
+            g_p44_settings_interface->DeleteValue("ARMSX2/JITBisectGamePresets", identity.UTF8String);
+            ARMSX2ClearCompatibilityCustomFlagsForIdentity(identity);
+            profile = builtIn;
+            std::fprintf(stderr,
+                "@@IOS_JIT_PROFILE_STALE_CUSTOM_IGNORED@@ identity=\"%s\" title=\"%s\" fallback=\"%s\"\n",
+                identity ? identity.UTF8String : "", title ? title.UTF8String : "", profile.UTF8String);
+            std::fflush(stderr);
+        } else {
+            profile = ARMSX2CompatibilityProfileOff;
+        }
     }
     ARMSX2ApplyCompatibilityProfile(profile, YES, [NSString stringWithFormat:@"boot %@ %@", identity ?: @"", title ?: @""]);
 }
@@ -1635,7 +1725,13 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 }
 
 + (void)setVMPaused:(BOOL)paused {
-    if (!VMManager::HasValidVM())
+    const bool hasValidVM = VMManager::HasValidVM();
+    std::fprintf(stderr, "@@IOS_VM_PAUSE_REQUEST@@ paused=%d valid=%d block=0 state=%d\n",
+        paused ? 1 : 0, hasValidVM ? 1 : 0,
+        hasValidVM ? static_cast<int>(VMManager::GetState()) : -1);
+    std::fflush(stderr);
+
+    if (!hasValidVM)
         return;
 
     Host::RunOnCPUThread([paused]() {
@@ -1650,6 +1746,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
             VMManager::SetPaused(false);
             Console.WriteLn("@@IOS_VM_PAUSE@@ paused=0 reason=swiftui-menu");
         }
+        Console.WriteLn("@@IOS_VM_PAUSE_APPLY@@ requested=%d before=%d after=%d",
+            paused ? 1 : 0, static_cast<int>(state), static_cast<int>(VMManager::GetState()));
     }, false);
 }
 
@@ -2236,10 +2334,19 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     if (visible) {
         GSConfig.OsdPerformancePos = EmuConfig.GS.OsdPerformancePos;
         // If user had None in config, default to TopRight
-        if (GSConfig.OsdPerformancePos == OsdOverlayPos::None)
+        if (GSConfig.OsdPerformancePos == OsdOverlayPos::None) {
             GSConfig.OsdPerformancePos = OsdOverlayPos::TopRight;
+            EmuConfig.GS.OsdPerformancePos = OsdOverlayPos::TopRight;
+        }
     } else {
         GSConfig.OsdPerformancePos = OsdOverlayPos::None;
+        EmuConfig.GS.OsdPerformancePos = OsdOverlayPos::None;
+    }
+
+    if (g_p44_settings_interface) {
+        g_p44_settings_interface->SetIntValue("EmuCore/GS", "OsdPerformancePos",
+            static_cast<int>(EmuConfig.GS.OsdPerformancePos));
+        g_p44_settings_interface->Save();
     }
 }
 
@@ -2271,6 +2378,7 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         GSConfig.OsdShowFPS = true;
         GSConfig.OsdShowSpeed = true;
         GSConfig.OsdShowCPU = true;
+        GSConfig.OsdShowVersion = true;
         break;
     case 2: // detail: performance and renderer diagnostics
         GSConfig.OsdShowFPS = true;
@@ -2280,6 +2388,7 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         GSConfig.OsdShowGPU = true;
         GSConfig.OsdShowResolution = true;
         GSConfig.OsdShowIndicators = true;
+        GSConfig.OsdShowVersion = true;
         break;
     case 3: // full: closest to Android's full stats section
         GSConfig.OsdShowFPS = true;
@@ -2321,17 +2430,36 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 
 #pragma mark - ISO boot
 
++ (BOOL)canResolveISO:(nonnull NSString *)isoName {
+	return ARMSX2ResolveISOPath(isoName).length > 0 ? YES : NO;
+}
+
 + (void)bootISO:(nonnull NSString *)isoName {
-	if (!g_p44_settings_interface) return;
+	if (!g_p44_settings_interface) {
+		std::fprintf(stderr, "@@BOOT_SET_ISO@@ status=no_settings input=\"%s\"\n", isoName ? isoName.UTF8String : "");
+		std::fflush(stderr);
+		return;
+	}
 	NSString* resolvedPath = ARMSX2ResolveISOPath(isoName);
 	NSString* bootValue = isoName.isAbsolutePath ? (resolvedPath ?: isoName) : isoName;
 	if (bootValue.isAbsolutePath) {
 		BOOL accessActive = ARMSX2StartExternalGameDirectoryAccessForPathSafe(bootValue);
 		NSLog(@"[ARMSX2Bridge] bootISO external access path=%@ active=%d", bootValue, accessActive ? 1 : 0);
 	}
+	std::fprintf(stderr, "@@BOOT_SET_ISO@@ input=\"%s\" boot=\"%s\" resolved=\"%s\" resolved_exists=%d absolute=%d\n",
+		isoName ? isoName.UTF8String : "", bootValue ? bootValue.UTF8String : "", resolvedPath ? resolvedPath.UTF8String : "",
+		resolvedPath.length > 0 ? 1 : 0, bootValue.isAbsolutePath ? 1 : 0);
+	std::fflush(stderr);
 	g_p44_settings_interface->SetStringValue("GameISO", "BootISO", bootValue.UTF8String);
+	const bool fastBoot = g_p44_settings_interface->GetBoolValue(
+		"GameISO", "FastBoot",
+		g_p44_settings_interface->GetBoolValue("EmuCore", "EnableFastBoot", true));
+	g_p44_settings_interface->SetBoolValue("GameISO", "FastBoot", fastBoot);
+	g_p44_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", fastBoot);
 	g_p44_settings_interface->Save();
 	ARMSX2ApplyCompatibilityPresetForISOName(bootValue);
+	std::fprintf(stderr, "@@BOOT_FASTBOOT_SET@@ value=%d source=settings\n", fastBoot ? 1 : 0);
+	std::fflush(stderr);
 	NSLog(@"bootISO: set BootISO=%@ resolved=%@", bootValue, resolvedPath ?: @"");
 }
 
@@ -2666,6 +2794,14 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 }
 
 + (void)requestVMBoot {
+	std::string bootISO;
+	if (g_p44_settings_interface)
+		bootISO = g_p44_settings_interface->GetStringValue("GameISO", "BootISO", "");
+	const std::string biosPath = Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios);
+	std::fprintf(stderr, "@@BOOT_REQUEST@@ posted=1 has_bios=%d bios=\"%s\" boot_iso=\"%s\"\n",
+		(!EmuConfig.BaseFilenames.Bios.empty() && FileSystem::FileExists(biosPath.c_str())) ? 1 : 0,
+		EmuConfig.BaseFilenames.Bios.c_str(), bootISO.c_str());
+	std::fflush(stderr);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSRequestVMBoot" object:nil];
 }
 
@@ -2762,9 +2898,15 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                 return;
             }
 
-            result = VMManager::SaveStateToSlot(nativeSlot, false);
+            std::string saveError;
+            VMManager::SaveStateToSlot(nativeSlot, false, [&saveError](const std::string& error) {
+                saveError = error;
+            });
+            result = saveError.empty();
             if (result)
                 ARMSX2FlushNVRAMAndMemoryCards("post-save-state");
+            else
+                NSLog(@"[ARMSX2 iOS SaveState] CPU save failed slot=%d error=%@", nativeSlot, ARMSX2NSStringFromStdString(saveError));
             NSLog(@"[ARMSX2 iOS SaveState] CPU save finished slot=%d result=%d", nativeSlot, result ? 1 : 0);
         }, true);
 
@@ -2996,18 +3138,78 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 #pragma mark - RetroAchievements
 
 + (nonnull NSDictionary<NSString *, id> *)retroAchievementsState {
-    Achievements::UserStats userStats;
-    Achievements::GameStats gameStats;
+    std::string username;
+    std::string displayName;
+    std::string avatarPath;
+    std::string gameTitle;
+    std::string richPresence;
+    std::string gameIconPath;
+    std::string gameIconURL;
     bool loggedIn = false;
     bool hasGame = false;
     bool active = false;
     bool hardcoreActive = false;
+    bool hasAchievements = false;
+    bool hasLeaderboards = false;
+    bool hasRichPresence = false;
+    u32 gameId = 0;
+    u32 points = 0;
+    u32 softcorePoints = 0;
+    u32 unreadMessages = 0;
+    u32 unlockedAchievements = 0;
+    u32 totalAchievements = 0;
+    u32 unlockedPoints = 0;
+    u32 totalPoints = 0;
+
+    Achievements::UserStats userStats;
+    Achievements::GameStats gameStats;
+    const bool haveUserStats = Achievements::GetCurrentUserStats(&userStats);
+    const bool haveGameStats = Achievements::GetCurrentGameStats(&gameStats);
 
     {
         auto lock = Achievements::GetLock();
         active = Achievements::IsActive();
-        loggedIn = Achievements::GetCurrentUserStats(&userStats);
-        hasGame = Achievements::GetCurrentGameStats(&gameStats);
+        if (haveUserStats) {
+            username = userStats.username;
+            displayName = userStats.display_name;
+            avatarPath = userStats.avatar_path;
+            points = userStats.points;
+            softcorePoints = userStats.softcore_points;
+            unreadMessages = userStats.unread_messages;
+            loggedIn = !username.empty();
+        } else if (active) {
+            if (const char* loggedInUser = Achievements::GetLoggedInUserName()) {
+                username = loggedInUser;
+                displayName = username;
+                loggedIn = !username.empty();
+            }
+        }
+        if (active && loggedIn && avatarPath.empty())
+            avatarPath = Achievements::GetLoggedInUserBadgePath();
+        hasGame = Achievements::HasActiveGame();
+        if (haveGameStats) {
+            hasGame = true;
+            gameTitle = gameStats.title;
+            richPresence = gameStats.rich_presence;
+            gameIconPath = gameStats.icon_path;
+            gameIconURL = gameStats.icon_url;
+            gameId = gameStats.game_id;
+            unlockedAchievements = gameStats.unlocked_achievements;
+            totalAchievements = gameStats.total_achievements;
+            unlockedPoints = gameStats.unlocked_points;
+            totalPoints = gameStats.total_points;
+            hasAchievements = gameStats.has_achievements;
+            hasLeaderboards = gameStats.has_leaderboards;
+            hasRichPresence = gameStats.has_rich_presence;
+        } else if (hasGame) {
+            gameTitle = Achievements::GetGameTitle();
+            richPresence = Achievements::GetRichPresenceString();
+            gameIconURL = Achievements::GetGameIconURL();
+            gameId = Achievements::GetGameID();
+            hasAchievements = Achievements::HasAchievements();
+            hasLeaderboards = Achievements::HasLeaderboards();
+            hasRichPresence = Achievements::HasRichPresence();
+        }
         hardcoreActive = Achievements::IsHardcoreModeActive();
     }
 
@@ -3015,30 +3217,30 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         @"enabled": @(EmuConfig.Achievements.Enabled),
         @"active": @(active),
         @"loggedIn": @(loggedIn),
-        @"username": ARMSX2NSStringFromStdString(userStats.username),
-        @"displayName": ARMSX2NSStringFromStdString(userStats.display_name),
-        @"avatarPath": ARMSX2NSStringFromStdString(userStats.avatar_path),
-        @"points": @(userStats.points),
-        @"softcorePoints": @(userStats.softcore_points),
-        @"unreadMessages": @(userStats.unread_messages),
+        @"username": ARMSX2NSStringFromStdString(username),
+        @"displayName": ARMSX2NSStringFromStdString(displayName.empty() ? username : displayName),
+        @"avatarPath": ARMSX2NSStringFromStdString(avatarPath),
+        @"points": @(points),
+        @"softcorePoints": @(softcorePoints),
+        @"unreadMessages": @(unreadMessages),
         @"hardcorePreference": @(EmuConfig.Achievements.HardcoreMode),
         @"hardcoreActive": @(hardcoreActive),
         @"notifications": @(EmuConfig.Achievements.Notifications),
         @"leaderboardNotifications": @(EmuConfig.Achievements.LeaderboardNotifications),
         @"overlays": @(EmuConfig.Achievements.Overlays),
         @"hasActiveGame": @(hasGame),
-        @"gameTitle": ARMSX2NSStringFromStdString(gameStats.title),
-        @"richPresence": ARMSX2NSStringFromStdString(gameStats.rich_presence),
-        @"gameIconPath": ARMSX2NSStringFromStdString(gameStats.icon_path),
-        @"gameIconURL": ARMSX2NSStringFromStdString(gameStats.icon_url),
-        @"unlockedAchievements": @(gameStats.unlocked_achievements),
-        @"totalAchievements": @(gameStats.total_achievements),
-        @"unlockedPoints": @(gameStats.unlocked_points),
-        @"totalPoints": @(gameStats.total_points),
-        @"gameId": @(gameStats.game_id),
-        @"hasAchievements": @(gameStats.has_achievements),
-        @"hasLeaderboards": @(gameStats.has_leaderboards),
-        @"hasRichPresence": @(gameStats.has_rich_presence),
+        @"gameTitle": ARMSX2NSStringFromStdString(gameTitle),
+        @"richPresence": ARMSX2NSStringFromStdString(richPresence),
+        @"gameIconPath": ARMSX2NSStringFromStdString(gameIconPath),
+        @"gameIconURL": ARMSX2NSStringFromStdString(gameIconURL),
+        @"unlockedAchievements": @(unlockedAchievements),
+        @"totalAchievements": @(totalAchievements),
+        @"unlockedPoints": @(unlockedPoints),
+        @"totalPoints": @(totalPoints),
+        @"gameId": @(gameId),
+        @"hasAchievements": @(hasAchievements),
+        @"hasLeaderboards": @(hasLeaderboards),
+        @"hasRichPresence": @(hasRichPresence),
     };
 }
 

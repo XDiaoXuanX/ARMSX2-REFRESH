@@ -518,7 +518,7 @@ __fi void CPU_SET_DMASTALL(EE_EventType n, bool set)
 		cpuRegs.dmastall &= ~(1 << n);
 }
 
-__fi void CPU_INT( EE_EventType n, s32 ecycle)
+__fi void CPU_INT( EE_EventType n, s32 ecycle, u8 source)
 {
 	// If it's retunning too quick, just rerun the DMA, there's no point in running the EE for < 4 cycles.
 	// This causes a huge uplift in performance for ONI FMV's.

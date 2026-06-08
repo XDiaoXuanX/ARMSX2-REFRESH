@@ -90,6 +90,35 @@ namespace Achievements
 	/// Returns true if the achievement system is active. Achievements can be active without a valid client.
 	bool IsActive();
 
+	struct UserStats
+	{
+		std::string username;
+		std::string display_name;
+		std::string avatar_path;
+		u32 points = 0;
+		u32 softcore_points = 0;
+		u32 unread_messages = 0;
+	};
+
+	struct GameStats
+	{
+		std::string title;
+		std::string rich_presence;
+		std::string icon_path;
+		std::string icon_url;
+		u32 game_id = 0;
+		u32 unlocked_achievements = 0;
+		u32 total_achievements = 0;
+		u32 unlocked_points = 0;
+		u32 total_points = 0;
+		bool has_achievements = false;
+		bool has_leaderboards = false;
+		bool has_rich_presence = false;
+	};
+
+	bool GetCurrentUserStats(UserStats* stats);
+	bool GetCurrentGameStats(GameStats* stats);
+
 	/// Returns true if RetroAchievements game data has been loaded.
 	bool HasActiveGame();
 

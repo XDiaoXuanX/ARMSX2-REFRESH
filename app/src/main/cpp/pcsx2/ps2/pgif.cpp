@@ -7,6 +7,7 @@
 #include "IopHw.h"
 #include "IopDma.h"
 #include "Common.h"
+#include "R3000A.h"
 
 //NOTES (TODO):
 /*

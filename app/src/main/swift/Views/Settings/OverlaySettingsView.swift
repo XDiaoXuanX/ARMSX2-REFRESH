@@ -19,7 +19,7 @@ struct OverlaySettingsView: View {
                 Picker(settings.localized("Position"), selection: $settings.osdPerformancePosition) {
                     Text(settings.localized("Hidden")).tag(0)
                     Text(settings.localized("Top Left")).tag(1)
-                    Text(settings.localized("Top Right")).tag(2)
+                    Text(settings.localized("Top Right")).tag(3)
                 }
             }
 

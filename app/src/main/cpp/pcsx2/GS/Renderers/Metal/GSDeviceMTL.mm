@@ -12,6 +12,8 @@
 #include "common/Console.h"
 #include "common/HostSys.h"
 
+#include <cstdio>
+
 #include "cpuinfo.h"
 #include "imgui.h"
 
@@ -796,19 +798,44 @@ bool GSDeviceMTL::HasSurface()  const { return static_cast<bool>(m_layer);}
 void GSDeviceMTL::AttachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
+	m_view = MRCRetain((__bridge GSMTLView*)m_window_info.window_handle);
+	std::fprintf(stderr, "@@MTL_ATTACH@@ uses_uiview=%d view=%p type=%d size=%ux%u\n",
+		PCSX2_MTL_USES_UIVIEW, m_view.Get(), static_cast<int>(m_window_info.type),
+		m_window_info.surface_width, m_window_info.surface_height);
+	std::fflush(stderr);
+#if PCSX2_MTL_USES_UIVIEW
+	CALayer* view_layer = [m_view layer];
+	if (![view_layer isKindOfClass:[CAMetalLayer class]])
+	{
+		std::fprintf(stderr, "@@MTL_ATTACH_FAIL@@ reason=layer_not_cametal view=%p layer=%p\n",
+			m_view.Get(), view_layer);
+		std::fflush(stderr);
+		return;
+	}
+
+	m_layer = MRCRetain((CAMetalLayer*)view_layer);
+	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
+	[m_layer setDevice:m_dev.dev];
+	std::fprintf(stderr, "@@MTL_ATTACH_OK@@ platform=uikit layer=%p\n", m_layer.Get());
+	std::fflush(stderr);
+#else
 	m_layer = MRCRetain([CAMetalLayer layer]);
 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
 	[m_layer setDevice:m_dev.dev];
-	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
 	[m_view setWantsLayer:YES];
 	[m_view setLayer:m_layer];
+	std::fprintf(stderr, "@@MTL_ATTACH_OK@@ platform=appkit layer=%p\n", m_layer.Get());
+	std::fflush(stderr);
+#endif
 }
 
 void GSDeviceMTL::DetachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
+#if !PCSX2_MTL_USES_UIVIEW
 	[m_view setLayer:nullptr];
 	[m_view setWantsLayer:NO];
+#endif
 	m_view = nullptr;
 	m_layer = nullptr;
 }
@@ -975,7 +1002,9 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 		// Metal does not support mailbox.
 		m_vsync_mode = (m_vsync_mode == GSVSyncMode::Mailbox) ? GSVSyncMode::FIFO : m_vsync_mode;
+#if !TARGET_OS_IPHONE
 		[m_layer setDisplaySyncEnabled:m_vsync_mode == GSVSyncMode::FIFO];
+#endif
 	}
 	else
 	{
@@ -1411,8 +1440,10 @@ void GSDeviceMTL::EndPresent()
 				{
 					[[MTLCaptureManager sharedCaptureManager] stopCapture];
 					Console.WriteLn("Metal Trace Capture to /tmp/PCSX2MTLCapture.gputrace finished");
+#if !TARGET_OS_IPHONE
 					[[NSWorkspace sharedWorkspace] selectFile:path
 					                 inFileViewerRootedAtPath:@"/tmp/"];
+#endif
 				}
 			}
 			else if (s_capture_next)
@@ -1456,7 +1487,9 @@ void GSDeviceMTL::SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 		return;
 
 	m_vsync_mode = (mode == GSVSyncMode::Mailbox) ? GSVSyncMode::FIFO : mode;
+#if !TARGET_OS_IPHONE
 	[m_layer setDisplaySyncEnabled:m_vsync_mode == GSVSyncMode::FIFO];
+#endif
 }
 
 bool GSDeviceMTL::SetGPUTimingEnabled(bool enabled)
@@ -2039,9 +2072,17 @@ void GSDeviceMTL::MRESetSampler(SamplerSelector sel)
 
 static void textureBarrier(id<MTLRenderCommandEncoder> enc)
 {
+#if TARGET_OS_IPHONE
+#if !TARGET_OS_SIMULATOR
+	[enc memoryBarrierWithScope:MTLBarrierScopeTextures
+	                afterStages:MTLRenderStageFragment
+	               beforeStages:MTLRenderStageFragment];
+#endif
+#else
 	[enc memoryBarrierWithScope:MTLBarrierScopeRenderTargets
 	                afterStages:MTLRenderStageFragment
 	               beforeStages:MTLRenderStageFragment];
+#endif
 }
 
 void GSDeviceMTL::MRESetTexture(GSTexture* tex, int pos)

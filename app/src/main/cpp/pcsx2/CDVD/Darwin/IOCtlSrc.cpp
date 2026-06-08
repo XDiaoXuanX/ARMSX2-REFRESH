@@ -7,7 +7,9 @@
 #include "common/Console.h"
 #include "common/Error.h"
 
-#ifdef __APPLE__
+#include <TargetConditionals.h>
+
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 #include <IOKit/storage/IOCDMediaBSDClient.h>
 #include <IOKit/storage/IODVDMediaBSDClient.h>
 #endif
@@ -97,7 +99,6 @@ bool IOCtlSrc::ReadTrackSubQ(cdvdSubQ* subQ) const { return false; }
 bool IOCtlSrc::DiscReady() { return !!m_sectors; }
 #else
 // iOS Stubs
-#include "CDVD/CDVDisoReader.h"
 
 IOCtlSrc::IOCtlSrc(std::string filename) : m_filename(std::move(filename)) {}
 IOCtlSrc::~IOCtlSrc() {}
@@ -114,4 +115,3 @@ bool IOCtlSrc::ReadCDInfo() { return false; }
 bool IOCtlSrc::ReadTrackSubQ(cdvdSubQ* subQ) const { return false; }
 bool IOCtlSrc::DiscReady() { return false; }
 #endif
-

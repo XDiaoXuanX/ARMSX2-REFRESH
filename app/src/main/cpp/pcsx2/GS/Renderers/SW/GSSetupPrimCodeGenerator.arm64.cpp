@@ -7,6 +7,11 @@
 #include "common/StringUtil.h"
 #include "common/Perf.h"
 
+#if defined(__APPLE__)
+#include "common/Darwin/DarwinMisc.h"
+#include <TargetConditionals.h>
+#endif
+
 #include <cstdint>
 
 MULTI_ISA_UNSHARED_IMPL;
@@ -27,8 +32,18 @@ static constexpr const GSScanlineConstantData128B& g_const = g_const_128b;
 #define _local(field) MemOperand(_locals, OFFSETOF(GSScanlineLocalData, field))
 #define armAsm (&m_emitter)
 
+static void* GetWritableCodePtr(void* code)
+{
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	return static_cast<u8*>(code) + DarwinMisc::g_code_rw_offset;
+#else
+	return code;
+#endif
+}
+
 GSSetupPrimCodeGenerator::GSSetupPrimCodeGenerator(u64 key, void* code, size_t maxsize)
-	: m_emitter(static_cast<vixl::byte*>(code), maxsize, vixl::aarch64::PositionDependentCode)
+	: m_code(static_cast<const u8*>(code))
+	, m_emitter(static_cast<vixl::byte*>(GetWritableCodePtr(code)), maxsize, vixl::aarch64::PositionDependentCode)
 	, m_sel(key)
 {
 	m_en.z = m_sel.zb ? 1 : 0;

@@ -9,6 +9,11 @@
 #include "common/StringUtil.h"
 #include "common/Perf.h"
 
+#if defined(__APPLE__)
+#include "common/Darwin/DarwinMisc.h"
+#include <TargetConditionals.h>
+#endif
+
 #include <cstdint>
 
 // warning : offset of on non-standard-layout type 'GSScanlineGlobalData' [-Winvalid-offsetof]
@@ -83,8 +88,18 @@ static const auto& _fd = v2;
 #define _global(field) MemOperand(_globals, OFFSETOF(GSScanlineGlobalData, field))
 #define armAsm (&m_emitter)
 
+static void* GetWritableCodePtr(void* code)
+{
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	return static_cast<u8*>(code) + DarwinMisc::g_code_rw_offset;
+#else
+	return code;
+#endif
+}
+
 GSDrawScanlineCodeGenerator::GSDrawScanlineCodeGenerator(u64 key, void* code, size_t maxsize)
-	: m_emitter(static_cast<vixl::byte*>(code), maxsize, vixl::aarch64::PositionDependentCode)
+	: m_code(static_cast<const u8*>(code))
+	, m_emitter(static_cast<vixl::byte*>(GetWritableCodePtr(code)), maxsize, vixl::aarch64::PositionDependentCode)
 	, m_sel(key)
 {
 	// hopefully no constants which need to be moved to register first..

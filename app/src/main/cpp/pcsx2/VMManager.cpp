@@ -62,6 +62,7 @@
 #include "fmt/format.h"
 
 #include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <sstream>
 
@@ -76,6 +77,7 @@
 
 #ifdef __APPLE__
 #include "common/Darwin/DarwinMisc.h"
+#include <TargetConditionals.h>
 #endif
 
 namespace VMManager
@@ -735,10 +737,45 @@ void VMManager::ApplyGameFixes()
 
 		// Disable user's manual hardware fixes, it might be problematic.
 		EmuConfig.GS.ManualUserHacks = false;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		std::fprintf(stderr,
+			"@@IOS_GAMEFIX_APPLY_SKIP@@ reason=no_booted_elf_or_dump serial=\"%s\" disc_crc=0x%08x current_crc=0x%08x renderer=%s manualUserHacks=%d\n",
+			s_disc_serial.c_str(), s_disc_crc, s_current_crc, Pcsx2Config::GSOptions::GetRendererName(EmuConfig.GS.Renderer),
+			EmuConfig.GS.ManualUserHacks ? 1 : 0);
+		std::fflush(stderr);
+#endif
 		return;
 	}
 
 	const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(s_disc_serial);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	if (game)
+	{
+		const bool forced_gamefixes = !EmuConfig.EnableGameFixes;
+		const bool forced_gs_hw = EmuConfig.GS.ManualUserHacks;
+		if (forced_gamefixes)
+			EmuConfig.EnableGameFixes = true;
+		if (forced_gs_hw)
+			EmuConfig.GS.ManualUserHacks = false;
+
+		if (forced_gamefixes || forced_gs_hw)
+		{
+			std::fprintf(stderr,
+				"@@IOS_GAMEFIX_FORCE_ENABLE@@ serial=\"%s\" disc_crc=0x%08x forced_gamefixes=%d forced_manual_gs=%d renderer=%s\n",
+				s_disc_serial.c_str(), s_disc_crc, forced_gamefixes ? 1 : 0, forced_gs_hw ? 1 : 0,
+				Pcsx2Config::GSOptions::GetRendererName(EmuConfig.GS.Renderer));
+			std::fflush(stderr);
+		}
+	}
+#endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	std::fprintf(stderr,
+		"@@IOS_GAMEFIX_APPLY_BEGIN@@ serial=\"%s\" disc_crc=0x%08x current_crc=0x%08x found=%d enableGameFixes=%d renderer=%s manualUserHacks=%d upscale=%.2f gamedb_entries=%zu\n",
+		s_disc_serial.c_str(), s_disc_crc, s_current_crc, game ? 1 : 0, EmuConfig.EnableGameFixes ? 1 : 0,
+		Pcsx2Config::GSOptions::GetRendererName(EmuConfig.GS.Renderer), EmuConfig.GS.ManualUserHacks ? 1 : 0,
+		EmuConfig.GS.UpscaleMultiplier, GameDatabase::entryCount());
+	std::fflush(stderr);
+#endif
 	if (!game)
 		return;
 
@@ -748,6 +785,18 @@ void VMManager::ApplyGameFixes()
 	// Re-remove upscaling fixes, make sure they don't apply at native res.
 	// We do this in LoadCoreSettings(), but game fixes get applied afterwards because of the unsafe warning.
 	EmuConfig.GS.MaskUpscalingHacks();
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	std::fprintf(stderr,
+		"@@IOS_GAMEFIX_APPLY_END@@ serial=\"%s\" disc_crc=0x%08x current_crc=0x%08x renderer=%s autoFlush=%d halfPixelOffset=%d alignSprite=%d nativeScaling=%d manualUserHacks=%d upscale=%.2f eeClamp=%u vuClamp=%u mvuFlag=%d instantVU1=%d mtvu=%d\n",
+		s_disc_serial.c_str(), s_disc_crc, s_current_crc, Pcsx2Config::GSOptions::GetRendererName(EmuConfig.GS.Renderer),
+		static_cast<int>(EmuConfig.GS.UserHacks_AutoFlush), static_cast<int>(EmuConfig.GS.UserHacks_HalfPixelOffset),
+		EmuConfig.GS.UserHacks_AlignSpriteX ? 1 : 0, static_cast<int>(EmuConfig.GS.UserHacks_NativeScaling),
+		EmuConfig.GS.ManualUserHacks ? 1 : 0,
+		EmuConfig.GS.UpscaleMultiplier, EmuConfig.Cpu.Recompiler.GetEEClampMode(),
+		EmuConfig.Cpu.Recompiler.GetVUClampMode(), EmuConfig.Speedhacks.vuFlagHack ? 1 : 0,
+		EmuConfig.Speedhacks.vu1Instant ? 1 : 0, EmuConfig.Speedhacks.vuThread ? 1 : 0);
+	std::fflush(stderr);
+#endif
 }
 
 void VMManager::ApplySettings()
@@ -2796,8 +2845,29 @@ void VMManager::Execute()
 		vtlb_ResetFastmem();
 	}
 
+	static int s_execute_log_count = 0;
+	const bool log_execute = (s_execute_log_count < 8);
+	if (log_execute)
+	{
+		std::fprintf(stderr,
+			"@@VM_EXEC_CALL@@ idx=%d state=%d cpu=%p rec=%d pc=0x%08x cycle=%lld next=%lld impl_changed=%d\n",
+			s_execute_log_count, static_cast<int>(GetState()), Cpu, Cpu == &recCpu ? 1 : 0,
+			cpuRegs.pc, static_cast<long long>(cpuRegs.cycle),
+			static_cast<long long>(cpuRegs.nextEventCycle), s_cpu_implementation_changed ? 1 : 0);
+		std::fflush(stderr);
+		s_execute_log_count++;
+	}
+
 	// Execute until we're asked to stop.
 	Cpu->Execute();
+	if (log_execute)
+	{
+		std::fprintf(stderr,
+			"@@VM_EXEC_RETURN@@ state=%d pc=0x%08x cycle=%lld next=%lld\n",
+			static_cast<int>(GetState()), cpuRegs.pc, static_cast<long long>(cpuRegs.cycle),
+			static_cast<long long>(cpuRegs.nextEventCycle));
+		std::fflush(stderr);
+	}
 }
 
 void VMManager::IdlePollUpdate()
@@ -2912,6 +2982,13 @@ void VMManager::Internal::EntryPointCompilingOnCPUThread()
 		return;
 
 	const bool reset_speed_limiter = (EmuConfig.EnableFastBootFastForward && IsFastBootInProgress());
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	std::fprintf(stderr,
+		"@@IOS_ELF_ENTRY_BEGIN@@ elf=\"%s\" entry=0x%08x serial=\"%s\" disc_crc=0x%08x current_crc=0x%08x fastboot_requested=%d fastboot_in_progress=%d reset_speed=%d\n",
+		s_elf_path.c_str(), s_elf_entry_point, s_disc_serial.c_str(), s_disc_crc, s_current_crc,
+		s_fast_boot_requested ? 1 : 0, IsFastBootInProgress() ? 1 : 0, reset_speed_limiter ? 1 : 0);
+	std::fflush(stderr);
+#endif
 
 	Console.WriteLn(
 		Color_StrongGreen, fmt::format("ELF {} with entry point at 0x{:08X} is executing.", s_elf_path, s_elf_entry_point));
@@ -2924,6 +3001,15 @@ void VMManager::Internal::EntryPointCompilingOnCPUThread()
 	}
 
 	HandleELFChange(true);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	std::fprintf(stderr,
+		"@@IOS_ELF_ENTRY_END@@ elf=\"%s\" entry=0x%08x serial=\"%s\" disc_crc=0x%08x current_crc=0x%08x fastboot_requested=%d fastboot_in_progress=%d renderer=%s enableGameFixes=%d\n",
+		s_elf_path.c_str(), s_elf_entry_point, s_disc_serial.c_str(), s_disc_crc, s_current_crc,
+		s_fast_boot_requested ? 1 : 0, IsFastBootInProgress() ? 1 : 0,
+		Pcsx2Config::GSOptions::GetRendererName(EmuConfig.GS.Renderer),
+		EmuConfig.EnableGameFixes ? 1 : 0);
+	std::fflush(stderr);
+#endif
 
 	Patch::ApplyBootPatches();
 

@@ -6,6 +6,10 @@
 #include "common/Console.h"
 
 #ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 #include <CoreFoundation/CoreFoundation.h>
 
 #include <IOKit/storage/IOMedia.h>
@@ -18,7 +22,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 
 std::vector<std::string> GetDriveListFromClasses(CFMutableDictionaryRef classes)
 {
@@ -55,7 +59,7 @@ std::vector<std::string> GetDriveListFromClasses(CFMutableDictionaryRef classes)
 
 std::vector<std::string> GetOpticalDriveList()
 {
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 	std::vector<std::string> drives;
 
 	if (CFMutableDictionaryRef cd_classes = IOServiceMatching(kIOCDMediaClass))
@@ -79,7 +83,7 @@ void GetValidDrive(std::string& drive)
 {
 	if (!drive.empty())
 	{
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 		int fd = open(drive.c_str(), O_RDONLY | O_NONBLOCK);
 		if (fd != -1)
 		{

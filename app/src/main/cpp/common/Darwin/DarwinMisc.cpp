@@ -14,19 +14,35 @@
 #include "fmt/format.h"
 
 #include <csignal>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <dlfcn.h>
+#include <setjmp.h>
 #include <optional>
+#include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <thread>
 #include <time.h>
+#include <unistd.h>
 #include <mach/mach_time.h>
 #include <mach/message.h>
 #include <mach/task.h>
 #include <mach/thread_state.h>
+#include <mach/vm_map.h>
 #include <mutex>
+#include <pthread.h>
+#include <TargetConditionals.h>
+#if !TARGET_OS_IPHONE
 #include <ApplicationServices/ApplicationServices.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
+#else
+#include <glob.h>
+#endif
+
+#if TARGET_OS_IPHONE
+extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
+#endif
 
 // Darwin (OSX) is a bit different from Linux when requesting properties of
 // the OS because of its BSD/Mach heritage. Helpfully, most of this code
@@ -136,10 +152,15 @@ std::string GetOSVersionString()
 	return type + " " + release + " " + arch;
 }
 
+#if !TARGET_OS_IPHONE
 static IOPMAssertionID s_pm_assertion;
+#endif
 
 bool Common::InhibitScreensaver(bool inhibit)
 {
+#if TARGET_OS_IPHONE
+	return true;
+#else
 	if (s_pm_assertion)
 	{
 		IOPMAssertionRelease(s_pm_assertion);
@@ -150,10 +171,12 @@ bool Common::InhibitScreensaver(bool inhibit)
 		IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep, kIOPMAssertionLevelOn, CFSTR("Playing a game"), &s_pm_assertion);
 
 	return true;
+#endif
 }
 
 void Common::SetMousePosition(int x, int y)
 {
+#if !TARGET_OS_IPHONE
 	// Little bit ugly but;
 	// Creating mouse move events and posting them wasn't very reliable.
 	// Calling CGWarpMouseCursorPosition without CGAssociateMouseAndMouseCursorPosition(false)
@@ -161,9 +184,11 @@ void Common::SetMousePosition(int x, int y)
 	CGAssociateMouseAndMouseCursorPosition(false);
 	CGWarpMouseCursorPosition(CGPointMake(x, y));
 	CGAssociateMouseAndMouseCursorPosition(true); // The default state
+#endif
 	return;
 }
 
+#if !TARGET_OS_IPHONE
 CFMachPortRef mouseEventTap = nullptr;
 CFRunLoopSourceRef mouseRunLoopSource = nullptr;
 
@@ -177,9 +202,13 @@ CGEventRef mouseMoveCallback(CGEventTapProxy, CGEventType type, CGEventRef event
 	}
 	return event;
 }
+#endif
 
 bool Common::AttachMousePositionCb(std::function<void(int, int)> cb)
 {
+#if TARGET_OS_IPHONE
+	return false;
+#else
 	if (!AXIsProcessTrusted())
 	{
 		Console.Warning("Process isn't trusted with accessibility permissions. Mouse tracking will not work!");
@@ -198,10 +227,12 @@ bool Common::AttachMousePositionCb(std::function<void(int, int)> cb)
 	CFRunLoopAddSource(CFRunLoopGetCurrent(), mouseRunLoopSource, kCFRunLoopCommonModes);
 
 	return true;
+#endif
 }
 
 void Common::DetachMousePositionCb()
 {
+#if !TARGET_OS_IPHONE
 	if (mouseRunLoopSource)
 	{
 		CFRunLoopRemoveSource(CFRunLoopGetCurrent(), mouseRunLoopSource, kCFRunLoopCommonModes);
@@ -213,6 +244,7 @@ void Common::DetachMousePositionCb()
 	}
 	mouseRunLoopSource = nullptr;
 	mouseEventTap = nullptr;
+#endif
 }
 
 void Threading::Sleep(int ms)
@@ -320,19 +352,77 @@ size_t HostSys::GetRuntimeCacheLineSize()
 
 #ifdef ARCH_ARM64
 
+#if TARGET_OS_IPHONE
+static void* s_legacy_code_base = nullptr;
+static size_t s_legacy_code_size = 0;
+static bool s_legacy_is_writable = true;
+#endif
+
 static thread_local int s_code_write_depth = 0;
 
 void HostSys::BeginCodeWrite()
 {
 	if ((s_code_write_depth++) == 0)
+	{
+#if TARGET_OS_IPHONE
+		if (DarwinMisc::g_code_rw_offset == 0 &&
+			DarwinMisc::GetJitMode() == DarwinMisc::JitMode::Legacy && s_legacy_code_base)
+		{
+			if (!s_legacy_is_writable)
+			{
+				if (mprotect(s_legacy_code_base, s_legacy_code_size, PROT_READ | PROT_WRITE) != 0)
+				{
+					static int s_begin_fail_count = 0;
+					if (s_begin_fail_count++ < 5)
+						std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_mprotect_rw_fail err=%d count=%d\n",
+							errno, s_begin_fail_count);
+				}
+				s_legacy_is_writable = true;
+			}
+		}
+		else if (DarwinMisc::g_code_rw_offset == 0)
+		{
+			static auto func = reinterpret_cast<void (*)(int)>(dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+			if (func)
+				func(0);
+		}
+#else
 		pthread_jit_write_protect_np(0);
+#endif
+	}
 }
 
 void HostSys::EndCodeWrite()
 {
 	pxAssert(s_code_write_depth > 0);
 	if ((--s_code_write_depth) == 0)
+	{
+#if TARGET_OS_IPHONE
+		if (DarwinMisc::g_code_rw_offset == 0 &&
+			DarwinMisc::GetJitMode() == DarwinMisc::JitMode::Legacy && s_legacy_code_base)
+		{
+			if (s_legacy_is_writable)
+			{
+				if (mprotect(s_legacy_code_base, s_legacy_code_size, PROT_READ | PROT_EXEC) != 0)
+				{
+					static int s_end_fail_count = 0;
+					if (s_end_fail_count++ < 5)
+						std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_mprotect_rx_fail err=%d count=%d\n",
+							errno, s_end_fail_count);
+				}
+				s_legacy_is_writable = false;
+			}
+		}
+		else if (DarwinMisc::g_code_rw_offset == 0)
+		{
+			static auto func = reinterpret_cast<void (*)(int)>(dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+			if (func)
+				func(1);
+		}
+#else
 		pthread_jit_write_protect_np(1);
+#endif
+	}
 }
 
 [[maybe_unused]] static bool IsStoreInstruction(const void* ptr)
@@ -371,6 +461,389 @@ void HostSys::EndCodeWrite()
 }
 
 #endif // ARCH_ARM64
+
+namespace
+{
+	static int s_user_crash_log_fd = -1;
+	static uintptr_t s_jit_base = 0;
+	static uintptr_t s_jit_end = 0;
+	static u32 s_last_guest_pc = 0;
+	static uintptr_t s_last_rec_ptr = 0;
+	static DarwinMisc::JitMode s_jit_mode = DarwinMisc::JitMode::Simulator;
+	static bool s_jit_mode_detected = false;
+}
+
+int DarwinMisc::iPSX2_CRASH_DIAG = 0;
+int DarwinMisc::iPSX2_REC_DIAG = 0;
+int DarwinMisc::iPSX2_FORCE_EE_INTERP = 0;
+int DarwinMisc::iPSX2_FORCE_JIT_VERIFY = 0;
+int DarwinMisc::iPSX2_CALL_TGT_X9 = 0;
+int DarwinMisc::iPSX2_CRASH_PACK = 0;
+int DarwinMisc::iPSX2_WX_TRACE = 0;
+int DarwinMisc::iPSX2_CALLPROBE = 0;
+int DarwinMisc::iPSX2_JIT_HLE = 1;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_ONLY = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_LOADSTORE = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MMI = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_COP2_VU = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MULTDIV = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_SHIFTS = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MOVES = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_INTEGER_ALU = 0;
+int DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_BRANCHES = 0;
+volatile DarwinMisc::IndirectEvent DarwinMisc::g_ie[8] = {};
+volatile u32 DarwinMisc::g_ie_idx = 0;
+volatile DarwinMisc::WXTraceEvent DarwinMisc::g_wx_events[16] = {};
+volatile u32 DarwinMisc::g_wx_idx = 0;
+volatile DarwinMisc::EmitEvent DarwinMisc::g_emit_events[32] = {};
+volatile u32 DarwinMisc::g_emit_idx = 0;
+volatile int DarwinMisc::g_jit_write_state = 0;
+volatile int DarwinMisc::g_rec_stage = 0;
+ptrdiff_t DarwinMisc::g_code_rw_offset = 0;
+uintptr_t DarwinMisc::g_code_rw_base = 0;
+size_t DarwinMisc::g_code_rw_size = 0;
+
+void DarwinMisc::SetCrashLogFD(int fd)
+{
+	s_user_crash_log_fd = fd;
+}
+
+void DarwinMisc::SetJitRange(void* base, size_t size)
+{
+	s_jit_base = reinterpret_cast<uintptr_t>(base);
+	s_jit_end = s_jit_base + size;
+}
+
+void DarwinMisc::SetLastGuestPC(u32 pc)
+{
+	s_last_guest_pc = pc;
+}
+
+void DarwinMisc::SetLastRecPtr(void* ptr)
+{
+	s_last_rec_ptr = reinterpret_cast<uintptr_t>(ptr);
+}
+
+uintptr_t DarwinMisc::GetJitBase()
+{
+	return s_jit_base;
+}
+
+uintptr_t DarwinMisc::GetJitEnd()
+{
+	return s_jit_end;
+}
+
+u32 DarwinMisc::GetLastGuestPC()
+{
+	return s_last_guest_pc;
+}
+
+uintptr_t DarwinMisc::GetLastRecPtr()
+{
+	return s_last_rec_ptr;
+}
+
+static const char* JitModeName(DarwinMisc::JitMode mode)
+{
+	switch (mode)
+	{
+		case DarwinMisc::JitMode::Simulator:
+			return "Simulator";
+		case DarwinMisc::JitMode::LuckTXM:
+			return "LuckTXM";
+		case DarwinMisc::JitMode::LuckNoTXM:
+			return "LuckNoTXM";
+		case DarwinMisc::JitMode::Legacy:
+			return "Legacy";
+		default:
+			return "Unknown";
+	}
+}
+
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+static bool HasTXM()
+{
+	glob_t g = {};
+	const int ret = glob("/System/Volumes/Preboot/*/boot/*/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4",
+		GLOB_NOSORT, nullptr, &g);
+	const bool found = (ret == 0 && g.gl_pathc > 0);
+	globfree(&g);
+	return found;
+}
+#endif
+
+bool DarwinMisc::IsJITAvailable()
+{
+#if TARGET_OS_SIMULATOR
+	return true;
+#elif TARGET_OS_IPHONE
+	u32 cs_flags = 0;
+	const int rv = csops(getpid(), 0, &cs_flags, sizeof(cs_flags));
+	const bool cs_debugged = (rv == 0) && ((cs_flags & 0x10000000u) != 0);
+	std::fprintf(stderr, "@@JIT_DETECT@@ csops=%d cs_flags=0x%08x CS_DEBUGGED=%d\n",
+		rv, cs_flags, cs_debugged ? 1 : 0);
+	std::fflush(stderr);
+
+	if (!cs_debugged)
+	{
+		s_jit_mode = JitMode::Legacy;
+		s_jit_mode_detected = true;
+		std::fprintf(stderr, "@@JIT_DETECT@@ result=UNAVAILABLE reason=no_cs_debugged\n");
+		std::fflush(stderr);
+		return false;
+	}
+
+	constexpr size_t probe_size = 16 * 1024;
+	constexpr int probe_prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+	constexpr int probe_flags = MAP_PRIVATE | MAP_ANON | MAP_JIT;
+	void* probe = mmap(nullptr, probe_size, probe_prot, probe_flags, -1, 0);
+	if (probe == MAP_FAILED)
+	{
+		const int probe_errno = errno;
+		if (!s_jit_mode_detected)
+			DetectJitMode();
+		std::fprintf(stderr,
+			"@@JIT_DETECT@@ map_jit_probe=0 size=%zu flags=0x%x prot=0x%x err=%d cs_debugged=1 result=AVAILABLE mode=%s\n",
+			probe_size, probe_flags, probe_prot, probe_errno, JitModeName(s_jit_mode));
+		std::fflush(stderr);
+		return true;
+	}
+
+	munmap(probe, probe_size);
+	s_jit_mode = JitMode::Simulator;
+	s_jit_mode_detected = true;
+	std::fprintf(stderr,
+		"@@JIT_DETECT@@ map_jit_probe=1 size=%zu flags=0x%x prot=0x%x cs_debugged=%d result=AVAILABLE mode=%s\n",
+		probe_size, probe_flags, probe_prot, cs_debugged ? 1 : 0, JitModeName(s_jit_mode));
+	std::fflush(stderr);
+	return true;
+#else
+	return true;
+#endif
+}
+
+DarwinMisc::JitMode DarwinMisc::DetectJitMode()
+{
+#if TARGET_OS_SIMULATOR
+	s_jit_mode = JitMode::Simulator;
+#elif TARGET_OS_IPHONE
+	char version[64] = {};
+	size_t version_len = sizeof(version);
+	if (sysctlbyname("kern.osproductversion", version, &version_len, nullptr, 0) != 0)
+		std::snprintf(version, sizeof(version), "0");
+
+	const int major = std::atoi(version);
+	const bool has_txm = HasTXM();
+	if (major >= 26)
+		s_jit_mode = JitMode::LuckTXM;
+	else
+		s_jit_mode = JitMode::Legacy;
+
+	if (const char* force_dual = std::getenv("ARMSX2_FORCE_DUAL_MAP"))
+	{
+		if (std::atoi(force_dual) == 1)
+			s_jit_mode = JitMode::LuckNoTXM;
+	}
+
+	std::fprintf(stderr, "@@JIT_MODE@@ version=%s major=%d txm_probe=%d mode=%s (%d)\n",
+		version, major, has_txm ? 1 : 0, JitModeName(s_jit_mode), static_cast<int>(s_jit_mode));
+	std::fflush(stderr);
+#else
+	s_jit_mode = JitMode::Legacy;
+#endif
+	s_jit_mode_detected = true;
+	return s_jit_mode;
+}
+
+DarwinMisc::JitMode DarwinMisc::GetJitMode()
+{
+	if (!s_jit_mode_detected)
+		DetectJitMode();
+	return s_jit_mode;
+}
+
+void* DarwinMisc::MmapCodeDualMap(size_t size)
+{
+#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+	void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+		MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+	if (ptr == MAP_FAILED)
+	{
+		std::fprintf(stderr, "@@JIT_ALLOC@@ map_jit_fail size=0x%zx err=%d\n", size, errno);
+		std::fflush(stderr);
+		return nullptr;
+	}
+
+	g_code_rw_offset = 0;
+	g_code_rw_base = reinterpret_cast<uintptr_t>(ptr);
+	g_code_rw_size = size;
+	std::fprintf(stderr, "@@JIT_ALLOC@@ map_jit_ok rx=%p rw=%p offset=0 size=0x%zx mode=%s\n",
+		ptr, ptr, size, JitModeName(JitMode::Simulator));
+	std::fflush(stderr);
+	return ptr;
+#else
+	JitMode mode = GetJitMode();
+
+	void* jit_ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+		MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+	if (jit_ptr != MAP_FAILED)
+	{
+		s_jit_mode = JitMode::Simulator;
+		s_jit_mode_detected = true;
+		g_code_rw_offset = 0;
+		g_code_rw_base = reinterpret_cast<uintptr_t>(jit_ptr);
+		g_code_rw_size = size;
+		std::fprintf(stderr, "@@JIT_ALLOC@@ map_jit_ok rx=%p rw=%p offset=0 size=0x%zx mode=%s\n",
+			jit_ptr, jit_ptr, size, JitModeName(s_jit_mode));
+		std::fflush(stderr);
+		return jit_ptr;
+	}
+
+	const int map_jit_errno = errno;
+	if (mode == JitMode::Simulator)
+		mode = DetectJitMode();
+	std::fprintf(stderr, "@@JIT_ALLOC@@ map_jit_fail size=0x%zx err=%d selected_mode=%s\n",
+		size, map_jit_errno, JitModeName(mode));
+	std::fflush(stderr);
+
+	if (mode == JitMode::Legacy)
+	{
+		void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+		if (ptr == MAP_FAILED)
+		{
+			std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_rw_fail size=0x%zx err=%d\n", size, errno);
+			std::fflush(stderr);
+			return nullptr;
+		}
+
+		g_code_rw_offset = 0;
+		g_code_rw_base = reinterpret_cast<uintptr_t>(ptr);
+		g_code_rw_size = size;
+		s_legacy_code_base = ptr;
+		s_legacy_code_size = size;
+		s_legacy_is_writable = true;
+		std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_rw_ok rx=%p rw=%p offset=0 size=0x%zx\n",
+			ptr, ptr, size);
+		std::fflush(stderr);
+		return ptr;
+	}
+
+	void* rx_ptr = mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+	if (rx_ptr == MAP_FAILED)
+	{
+		std::fprintf(stderr, "@@JIT_ALLOC@@ dualmap_rx_fail size=0x%zx err=%d\n", size, errno);
+		std::fflush(stderr);
+		return nullptr;
+	}
+	std::fprintf(stderr, "@@JIT_ALLOC@@ dualmap_rx_ok rx=%p size=0x%zx mode=%s\n",
+		rx_ptr, size, JitModeName(mode));
+	std::fflush(stderr);
+
+	if (mode == JitMode::LuckTXM)
+	{
+		static sigjmp_buf s_alloc_brk_jmp;
+		struct sigaction sa_brk = {};
+		struct sigaction sa_brk_old = {};
+		sa_brk.sa_handler = +[](int) { siglongjmp(s_alloc_brk_jmp, 1); };
+		sigemptyset(&sa_brk.sa_mask);
+		sigaction(SIGTRAP, &sa_brk, &sa_brk_old);
+
+		bool brk_ok = false;
+		std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_begin rx=%p size=0x%zx\n", rx_ptr, size);
+		std::fflush(stderr);
+		if (sigsetjmp(s_alloc_brk_jmp, 1) == 0)
+		{
+			asm volatile("mov x0, %0\n"
+			             "mov x1, %1\n"
+			             "brk #0x69"
+			             :: "r"(rx_ptr), "r"(size) : "x0", "x1");
+			brk_ok = true;
+			std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_ok\n");
+			std::fflush(stderr);
+		}
+		else
+		{
+			std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_sigtrap\n");
+			std::fflush(stderr);
+		}
+		sigaction(SIGTRAP, &sa_brk_old, nullptr);
+
+		if (!brk_ok)
+		{
+			munmap(rx_ptr, size);
+			return nullptr;
+		}
+	}
+
+	vm_address_t rw_region = 0;
+	vm_address_t target = reinterpret_cast<vm_address_t>(rx_ptr);
+	vm_prot_t cur_protection = 0;
+	vm_prot_t max_protection = 0;
+	const kern_return_t kr = vm_remap(mach_task_self(), &rw_region, static_cast<vm_size_t>(size), 0,
+		VM_FLAGS_ANYWHERE, mach_task_self(), target, false, &cur_protection, &max_protection, VM_INHERIT_DEFAULT);
+	if (kr != KERN_SUCCESS)
+	{
+		std::fprintf(stderr, "@@JIT_ALLOC@@ dualmap_remap_fail kr=%d\n", kr);
+		std::fflush(stderr);
+		munmap(rx_ptr, size);
+		return nullptr;
+	}
+
+	u8* const rw_ptr = reinterpret_cast<u8*>(rw_region);
+	if (mprotect(rw_ptr, size, PROT_READ | PROT_WRITE) != 0)
+	{
+		std::fprintf(stderr, "@@JIT_ALLOC@@ dualmap_rw_protect_fail err=%d\n", errno);
+		std::fflush(stderr);
+		vm_deallocate(mach_task_self(), rw_region, static_cast<vm_size_t>(size));
+		munmap(rx_ptr, size);
+		return nullptr;
+	}
+
+	g_code_rw_offset = rw_ptr - static_cast<u8*>(rx_ptr);
+	g_code_rw_base = reinterpret_cast<uintptr_t>(rw_ptr);
+	g_code_rw_size = size;
+	std::fprintf(stderr, "@@JIT_ALLOC@@ dualmap_ok rx=%p rw=%p offset=%td size=0x%zx mode=%s\n",
+		rx_ptr, rw_ptr, g_code_rw_offset, size, JitModeName(mode));
+	std::fflush(stderr);
+	return rx_ptr;
+#endif
+}
+
+void DarwinMisc::MunmapCodeDualMap(void* rx_ptr, size_t size)
+{
+	if (g_code_rw_base && g_code_rw_offset != 0)
+		vm_deallocate(mach_task_self(), static_cast<vm_address_t>(g_code_rw_base), static_cast<vm_size_t>(g_code_rw_size));
+	if (rx_ptr)
+		munmap(rx_ptr, size);
+	g_code_rw_offset = 0;
+	g_code_rw_base = 0;
+	g_code_rw_size = 0;
+#if TARGET_OS_IPHONE
+	s_legacy_code_base = nullptr;
+	s_legacy_code_size = 0;
+	s_legacy_is_writable = true;
+#endif
+}
+
+void DarwinMisc::LegacyEnsureExecutable()
+{
+#if TARGET_OS_IPHONE
+	if (!s_legacy_code_base || !s_legacy_is_writable)
+		return;
+
+	if (mprotect(s_legacy_code_base, s_legacy_code_size, PROT_READ | PROT_EXEC) != 0)
+	{
+		std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_ensure_rx_fail err=%d\n", errno);
+		std::fflush(stderr);
+		return;
+	}
+	s_legacy_is_writable = false;
+#endif
+}
+void DarwinMisc::LogDyldMain() {}
+void DarwinMisc::RecordJitBlock(u32 guest_pc, void* recptr, u32 size) {}
+bool DarwinMisc::FindJitBlock(uintptr_t site, u32* out_guest_pc, void** out_recptr) { return false; }
 
 #define USE_MACH_EXCEPTION_PORTS
 

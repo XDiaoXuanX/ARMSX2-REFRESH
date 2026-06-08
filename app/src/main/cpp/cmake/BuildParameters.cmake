@@ -19,6 +19,9 @@ if(NOT APPLE OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
 	option(USE_OPENGL "Enable OpenGL GS renderer" ON)
 endif()
 option(USE_VULKAN "Enable Vulkan GS renderer" ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	set(USE_VULKAN OFF CACHE BOOL "Enable Vulkan GS renderer" FORCE)
+endif()
 
 #-------------------------------------------------------------------------------
 # Path and lib option
@@ -116,6 +119,7 @@ elseif("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64" OR "${CMAKE_HOST_SYSTEM
 	message(STATUS "Building for Apple Silicon (ARM64).")
 	list(APPEND PCSX2_DEFS _M_ARM64=1)
 	set(_M_ARM64 TRUE)
+	set(ARCH_ARM64 TRUE)
 #	add_compile_options("-march=armv8.4-a" "-mcpu=apple-m1")
 
 	set(CMAKE_POSITION_INDEPENDENT_CODE ON)

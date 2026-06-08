@@ -24,7 +24,32 @@ struct ISOEntry: Identifiable {
 	}
 
 	var coverInfo: CoverGameInfo {
-		CoverGameInfo(name: name, fileURL: isExternal ? nil : fileURL, metadata: metadata, hasCover: coverURL != nil)
+		CoverGameInfo(name: name, fileURL: fileURL, metadata: metadata, hasCover: coverURL != nil)
+	}
+}
+
+@MainActor
+private final class GameLibrarySnapshot {
+	static let shared = GameLibrarySnapshot()
+
+	private var entriesByID: [String: ISOEntry] = [:]
+	private var orderedEntries: [ISOEntry] = []
+
+	var entries: [ISOEntry] {
+		orderedEntries
+	}
+
+	func existingEntries(merging currentEntries: [ISOEntry]) -> [String: ISOEntry] {
+		var merged = entriesByID
+		for entry in currentEntries {
+			merged[entry.id] = entry
+		}
+		return merged
+	}
+
+	func update(_ entries: [ISOEntry]) {
+		orderedEntries = entries
+		entriesByID = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { current, _ in current })
 	}
 }
 
@@ -116,8 +141,10 @@ struct GameListView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
-                            pendingCoverGameName = nil
-                            showCoverImporter = true
+                            presentMenuPanel("cover_import_all") {
+                                pendingCoverGameName = nil
+                                showCoverImporter = true
+                            }
                         } label: {
                             Label(settings.localized("Import Local Covers"), systemImage: "photo.badge.plus")
                         }
@@ -130,16 +157,20 @@ struct GameListView: View {
                         .disabled(coverStore.isDownloadingCovers || games.isEmpty)
 
                         Button {
-                            coverTemplateDraft = coverStore.coverURLTemplate
-                            showCoverTemplateEditor = true
+                            presentMenuPanel("cover_source") {
+                                coverTemplateDraft = coverStore.coverURLTemplate
+                                showCoverTemplateEditor = true
+                            }
                         } label: {
                             Label(settings.localized("Cover Source"), systemImage: "link")
                         }
 
                         Button {
-                            coverStore.coverURLTemplate = CoverStore.defaultCoverURLTemplate
-                            coverStore.lastCoverMessage = "Cover URL template reset to the ARMSX2 Android default."
-                            coverStore.showCoverAlert = true
+                            presentMenuPanel("cover_template_reset") {
+                                coverStore.coverURLTemplate = CoverStore.defaultCoverURLTemplate
+                                coverStore.lastCoverMessage = "Cover URL template reset to the ARMSX2 Android default."
+                                coverStore.showCoverAlert = true
+                            }
                         } label: {
                             Label(settings.localized("Reset Cover Template"), systemImage: "arrow.counterclockwise")
                         }
@@ -361,10 +392,15 @@ struct GameListView: View {
         }
 	        .onAppear {
 			externalLibrary.reload()
+			restoreCachedGamesIfNeeded()
 			loadGames(autoDownloadExternalCovers: true)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: ExternalGameLibrary.didChangeNotification)) { _ in
 			loadGames(autoDownloadExternalCovers: true)
+		}
+		.onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ARMSX2iOSReturnToMenu"))) { _ in
+			restoreCachedGamesIfNeeded()
+			loadGames(autoDownloadExternalCovers: false)
 		}
     }
 
@@ -728,26 +764,34 @@ struct GameListView: View {
 	@ViewBuilder
 	private func gameContextMenu(for game: ISOEntry) -> some View {
         Button {
-            gameInfoTarget = game
+            presentMenuPanel("game_info") {
+                gameInfoTarget = game
+            }
         } label: {
             Label(settings.localized("Game Info"), systemImage: "info.circle")
         }
 
         Button {
-            gameSettingsTarget = game
+            presentMenuPanel("per_game_settings") {
+                gameSettingsTarget = game
+            }
         } label: {
             Label(settings.localized("Per-Game Settings"), systemImage: "slider.horizontal.3")
         }
 
         Button {
-            gameCompatibilityTarget = game
+            presentMenuPanel("compatibility_lab") {
+                gameCompatibilityTarget = game
+            }
         } label: {
             Label(settings.localized("Compatibility Lab"), systemImage: "wand.and.stars")
         }
 
 		Button {
-			pendingPNACHGameName = game.bootName
-			showPNACHImporter = true
+			presentMenuPanel("pnach_import") {
+				pendingPNACHGameName = game.bootName
+				showPNACHImporter = true
+			}
 		} label: {
             Label(settings.localized("Import PNACH / 60 FPS Patch"), systemImage: "wand.and.stars")
         }
@@ -761,15 +805,19 @@ struct GameListView: View {
             .disabled(coverStore.isDownloadingCovers)
 
             Button {
-                pendingCoverPhotoGameName = game.name
-                showCoverPhotoPicker = true
+                presentMenuPanel("cover_photos") {
+                    pendingCoverPhotoGameName = game.name
+                    showCoverPhotoPicker = true
+                }
             } label: {
                 Label(settings.localized("Choose from Photos"), systemImage: "photo.on.rectangle")
             }
 
             Button {
-                pendingCoverGameName = game.name
-                showCoverImporter = true
+                presentMenuPanel("cover_files") {
+                    pendingCoverGameName = game.name
+                    showCoverImporter = true
+                }
             } label: {
                 Label(settings.localized("Choose from Files"), systemImage: "folder")
             }
@@ -796,14 +844,18 @@ struct GameListView: View {
             }
 
             Button(role: .destructive) {
-                pendingDeleteDataGame = game
+                presentMenuPanel("delete_game_data") {
+                    pendingDeleteDataGame = game
+                }
             } label: {
                 Label(settings.localized("Delete Game Data"), systemImage: "externaldrive.badge.xmark")
             }
 
 			if !game.isExternal {
 				Button(role: .destructive) {
-					pendingDeleteGame = game
+					presentMenuPanel("delete_game") {
+						pendingDeleteGame = game
+					}
 				} label: {
 					Label(settings.localized("Delete Game"), systemImage: "trash")
 				}
@@ -813,10 +865,33 @@ struct GameListView: View {
 		}
 	}
 
+	private func presentMenuPanel(_ name: String, _ action: @escaping () -> Void) {
+		NSLog("[ARMSX2 iOS GameListMenu] present \(name)")
+		DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+			action()
+		}
+	}
+
 	private func open(_ game: ISOEntry) {
 		if isRunning(game) {
 			appState.returnToGame()
-		} else if appState.runningGameName != nil {
+			return
+		}
+
+		guard ARMSX2Bridge.hasBIOS() else {
+			gameActionTitle = settings.localized("BIOS Required")
+			gameActionMessage = settings.localized("Import a valid PS2 BIOS before starting games.")
+			return
+		}
+
+		guard ARMSX2Bridge.canResolveISO(game.bootName) else {
+			gameActionTitle = settings.localized("Game Not Found")
+			gameActionMessage = settings.localized("This game file is no longer available. Refresh the library or import it again.")
+			loadGames()
+			return
+		}
+
+		if appState.runningGameName != nil {
 			pendingGameName = game.bootName
 			showRestartAlert = true
 		} else {
@@ -857,7 +932,7 @@ struct GameListView: View {
 
 		let fm = FileManager.default
 		let allowFullMetadata = appState.runningGameName == nil
-		let existingGames = Dictionary(games.map { ($0.id, $0) }, uniquingKeysWith: { current, _ in current })
+		let existingGames = GameLibrarySnapshot.shared.existingEntries(merging: games)
 		externalLibrary.reload()
 		games = ARMSX2Bridge.availableISOEntries().compactMap { rawEntry -> ISOEntry? in
 			guard let name = rawEntry["name"] as? String,
@@ -880,14 +955,15 @@ struct GameListView: View {
 			} else {
 				metadata = ["fileTitle": (name as NSString).deletingPathExtension]
 			}
-			let coverSearchURL = external ? nil : fileURL
-			let coverURL = coverStore.coverURL(forGameName: name, gamePath: coverSearchURL, metadata: metadata)
-			let coverSignature = CoverThumbnailCache.signature(for: coverURL)
+			let coverURL = coverStore.coverURL(forGameName: name, gamePath: fileURL, metadata: metadata)
+			let existingCover = retainedCover(from: existingGames[entryID])
+			let resolvedCoverURL = coverURL ?? existingCover?.url
+			let coverSignature = CoverThumbnailCache.signature(for: resolvedCoverURL) ?? existingCover?.signature
 			return ISOEntry(
 				name: name,
 				fileURL: fileURL,
 				bootPath: external ? path : nil,
-				coverURL: coverURL,
+				coverURL: resolvedCoverURL,
 				coverSignature: coverSignature,
 				metadata: metadata,
 				size: size,
@@ -904,9 +980,25 @@ struct GameListView: View {
 			NSLog("[ARMSX2 iOS GameList] skipped full ISO metadata refresh while VM is active")
 		}
 
+		GameLibrarySnapshot.shared.update(games)
+
 		if autoDownloadExternalCovers {
 			autoDownloadExternalCoversIfNeeded()
 		}
+	}
+
+	private func restoreCachedGamesIfNeeded() {
+		guard games.isEmpty else { return }
+		let cachedGames = GameLibrarySnapshot.shared.entries
+		if !cachedGames.isEmpty {
+			games = cachedGames
+		}
+	}
+
+	private func retainedCover(from entry: ISOEntry?) -> (url: URL, signature: String?)? {
+		guard let url = entry?.coverURL else { return nil }
+		guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+		return (url, entry?.coverSignature)
 	}
 
     private func downloadMissingCovers() {

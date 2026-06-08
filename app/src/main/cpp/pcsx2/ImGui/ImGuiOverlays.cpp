@@ -32,6 +32,10 @@
 #include "VMManager.h"
 
 #include "common/BitUtils.h"
+#if defined(__APPLE__)
+#include "common/Darwin/DarwinMisc.h"
+#include <TargetConditionals.h>
+#endif
 #include "common/Error.h"
 #include "common/FileSystem.h"
 #include "common/Path.h"
@@ -67,6 +71,10 @@ SmallString s_hardware_info_gpu_line;
 SmallString s_cpu_usage_ee_line;
 SmallString s_cpu_usage_gs_line;
 SmallString s_cpu_usage_vu_line;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+SmallString s_ios_runtime_line;
+SmallString s_ios_device_stats_line;
+#endif
 std::vector<SmallString> s_software_thread_lines;
 SmallString s_capture_line;
 SmallString s_gpu_usage_line;
@@ -74,6 +82,33 @@ SmallString s_gpu_debug_info_line;
 SmallString s_speed_icon;
 
 constexpr ImU32 white_color = IM_COL32(255, 255, 255, 255);
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+extern "C" bool ARMSX2_iOSShouldShowDeviceStatsOverlay();
+extern "C" int ARMSX2_iOSGetDeviceStatsOverlaySeverity();
+extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine();
+
+static constexpr const char* ARMSX2_IOS_OSD_BRAND = "ARMSX2 iOS 2.0";
+static constexpr const char* ARMSX2_IOS_PCSX2_CORE_VERSION_FALLBACK = "2.7.394";
+
+static const char* ARMSX2IOSJitState(bool enabled)
+{
+	return enabled ? "JIT" : "INT";
+}
+
+static ImU32 ARMSX2IOSDeviceStatsColor()
+{
+	switch (ARMSX2_iOSGetDeviceStatsOverlaySeverity())
+	{
+		case 2:
+			return IM_COL32(255, 100, 100, 255);
+		case 1:
+			return IM_COL32(255, 220, 100, 255);
+		default:
+			return white_color;
+	}
+}
+#endif
 
 // OSD positioning funcs
 ImVec2 CalculateOSDPosition(OsdOverlayPos position, float margin, const ImVec2& text_size, float window_width, float window_height)
@@ -375,11 +410,29 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 					s_speed_line.append_format(" (T: {:.0f}%)", target_speed * 100.0f);
 			}
 
-			if (GSConfig.OsdShowVersion)
-				s_speed_line.append_format("{}PCSX2 {}", s_speed_line.empty() ? "" : " | ", BuildVersion::GitRev);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+				if (GSConfig.OsdShowVersion)
+				{
+					if (BuildVersion::GitTagHi > 0)
+					{
+						s_speed_line.append_format("{}{} | Core: {}.{}.{}",
+							s_speed_line.empty() ? "" : " | ", ARMSX2_IOS_OSD_BRAND,
+							BuildVersion::GitTagHi, BuildVersion::GitTagMid, BuildVersion::GitTagLo);
+					}
+					else
+					{
+						s_speed_line.append_format("{}{} | Core: {}",
+							s_speed_line.empty() ? "" : " | ", ARMSX2_IOS_OSD_BRAND,
+							ARMSX2_IOS_PCSX2_CORE_VERSION_FALLBACK);
+					}
+				}
+#else
+				if (GSConfig.OsdShowVersion)
+					s_speed_line.append_format("{}PCSX2 {}", s_speed_line.empty() ? "" : " | ", BuildVersion::GitRev);
+#endif
 
-			if (!s_speed_line.empty())
-			{
+				if (!s_speed_line.empty())
+				{
 				if (speed < 95.0f)
 					s_speed_line_color = IM_COL32(255, 100, 100, 255); // red
 				else if (speed > 105.0f)
@@ -387,12 +440,33 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 				else
 					s_speed_line_color = white_color;
 
-				DRAW_LINE(osd_font, font_size, s_speed_line.c_str(), s_speed_line_color);
-			}
+					DRAW_LINE(osd_font, font_size, s_speed_line.c_str(), s_speed_line_color);
+				}
 
-			if (GSConfig.OsdShowGSStats)
-			{
-				GSgetStats(s_gs_stats_line);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+				if (GSConfig.OsdShowCPU)
+				{
+					const bool ee_jit = EmuConfig.Cpu.Recompiler.EnableEE && !DarwinMisc::iPSX2_FORCE_EE_INTERP;
+					s_ios_runtime_line.format("EE:{} | IOP:{} | VU0:{} | VU1:{}",
+						ARMSX2IOSJitState(ee_jit),
+						ARMSX2IOSJitState(EmuConfig.Cpu.Recompiler.EnableIOP),
+						ARMSX2IOSJitState(EmuConfig.Cpu.Recompiler.EnableVU0),
+						ARMSX2IOSJitState(EmuConfig.Cpu.Recompiler.EnableVU1));
+					DRAW_LINE(osd_font, font_size, s_ios_runtime_line.c_str(), white_color);
+				}
+
+				if (ARMSX2_iOSShouldShowDeviceStatsOverlay())
+				{
+					const char* stats_line = ARMSX2_iOSGetDeviceStatsOverlayLine();
+					s_ios_device_stats_line.assign(stats_line ? stats_line : "");
+					if (!s_ios_device_stats_line.empty())
+						DRAW_LINE(osd_font, font_size, s_ios_device_stats_line.c_str(), ARMSX2IOSDeviceStatsColor());
+				}
+#endif
+
+				if (GSConfig.OsdShowGSStats)
+				{
+					GSgetStats(s_gs_stats_line);
 				GSgetMemoryStats(s_gs_memory_stats_line);
 				s_gs_frame_times_line.format("{} QF | Min: {:.2f}ms | Avg: {:.2f}ms | Max: {:.2f}ms",
 					MTGS::GetCurrentVsyncQueueSize() - 1, // subtract one for the current frame
@@ -508,12 +582,20 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 		// No refresh yet. Display cached lines.
 		else
 		{
-			if (GSConfig.OsdShowFPS || GSConfig.OsdShowVPS || GSConfig.OsdShowSpeed || GSConfig.OsdShowVersion)
-				DRAW_LINE(osd_font, font_size, s_speed_line.c_str(), s_speed_line_color);
+				if (GSConfig.OsdShowFPS || GSConfig.OsdShowVPS || GSConfig.OsdShowSpeed || GSConfig.OsdShowVersion)
+					DRAW_LINE(osd_font, font_size, s_speed_line.c_str(), s_speed_line_color);
 
-			if (GSConfig.OsdShowGSStats)
-			{
-				if (!s_gs_stats_line.empty())
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+				if (GSConfig.OsdShowCPU && !s_ios_runtime_line.empty())
+					DRAW_LINE(osd_font, font_size, s_ios_runtime_line.c_str(), white_color);
+
+				if (ARMSX2_iOSShouldShowDeviceStatsOverlay() && !s_ios_device_stats_line.empty())
+					DRAW_LINE(osd_font, font_size, s_ios_device_stats_line.c_str(), ARMSX2IOSDeviceStatsColor());
+#endif
+
+				if (GSConfig.OsdShowGSStats)
+				{
+					if (!s_gs_stats_line.empty())
 					DRAW_LINE(osd_font, font_size, s_gs_stats_line.c_str(), white_color);
 				if (!s_gs_memory_stats_line.empty())
 					DRAW_LINE(osd_font, font_size, s_gs_memory_stats_line.c_str(), white_color);

@@ -203,12 +203,6 @@ static void VMThreadFunc() {
         return;
     }
 
-    // Set ImGui font path
-    std::string fontPath = Path::Combine(EmuFolders::Resources, "fonts/Roboto-Regular.ttf");
-    if (!FileSystem::FileExists(fontPath.c_str()))
-        fontPath = Path::Combine(EmuFolders::DataRoot, "fonts/Roboto-Regular.ttf");
-    ImGuiManager::SetFontPathAndRange(std::move(fontPath), {});
-
     // Persistent boot loop — handles VM restart after PS2LOGO→game transitions
     while (!s_vm_quit.load()) {
         if (EmuConfig.BaseFilenames.Bios.empty() ||
@@ -220,7 +214,7 @@ static void VMThreadFunc() {
         VMBootParameters boot_params = BuildBootParams();
         Console.WriteLn("[P63] Booting with BIOS=%s", EmuConfig.BaseFilenames.Bios.c_str());
 
-        if (VMManager::Initialize(boot_params)) {
+        if (VMManager::Initialize(boot_params) == VMBootResult::StartupSuccess) {
             Console.WriteLn("[P63] VM initialized, entering run loop...");
             VMManager::SetState(VMState::Running);
 
@@ -450,10 +444,13 @@ int main(int argc, char* argv[]) {
 #include <chrono>
 
 #include "common/ProgressCallback.h"
+#include "common/Error.h"
 #include "pcsx2/Input/InputManager.h"
 #include "pcsx2/SIO/Pad/Pad.h"
 #include "pcsx2/SIO/Pad/PadDualshock2.h"
 #include "pcsx2/Counters.h" // g_FrameCount
+#include "pcsx2/PerformanceMetrics.h"
+#include "pcsx2/R5900.h"
 #include "pcsx2/Achievements.h"
 #include "pcsx2/CDVD/CDVDdiscReader.h"
 #include "common/Console.h"
@@ -483,6 +480,8 @@ int main(int argc, char* argv[]) {
 #include <deque>
 #include <memory>
 #include <optional>
+#include <span>
+#include <vector>
 #include <sys/stat.h> // For mkdir
 
 struct rc_client_event_t;
@@ -503,7 +502,36 @@ static UITextView* g_logView = nil;
 // Game render view with CAMetalLayer as backing layer (like MTKView)
 // Game render view — backing layer (CAMetalLayer), manual landscape toggle
 #include "pcsx2/MTGS.h"
-extern void GSResizeDisplayWindow(int width, int height, float scale);
+extern void GSResizeDisplayWindow(u32 width, u32 height, float scale);
+
+static std::vector<u8> s_imguiStandardFontData;
+
+static void ARMSX2ConfigureImGuiFonts(const char* reason)
+{
+    const std::string fontPath =
+        EmuFolders::GetOverridableResourcePath("fonts" FS_OSPATH_SEPARATOR_STR "Roboto-Regular.ttf");
+    std::optional<std::vector<u8>> fontData = FileSystem::ReadBinaryFile(fontPath.c_str());
+    if (!fontData.has_value()) {
+        std::fprintf(stderr, "@@IMGUI_FONT@@ ok=0 reason=%s path=\"%s\"\n", reason, fontPath.c_str());
+        std::fflush(stderr);
+        ImGuiManager::SetFonts({});
+        return;
+    }
+
+    s_imguiStandardFontData = std::move(fontData.value());
+    std::vector<ImGuiManager::FontInfo> fonts;
+    fonts.push_back({
+        std::span<const u8>(s_imguiStandardFontData.data(), s_imguiStandardFontData.size()),
+        std::span<const u32>(),
+        nullptr,
+        false,
+    });
+    ImGuiManager::SetFonts(std::move(fonts));
+
+    std::fprintf(stderr, "@@IMGUI_FONT@@ ok=1 reason=%s path=\"%s\" size=%zu\n",
+        reason, fontPath.c_str(), s_imguiStandardFontData.size());
+    std::fflush(stderr);
+}
 
 @interface ARMSX2GameView : UIView
 @end
@@ -551,6 +579,17 @@ extern void GSResizeDisplayWindow(int width, int height, float scale);
 @end
 ARMSX2GameView* g_gameRenderView = nil;  // non-static: accessed from ARMSX2Bridge.mm
 static INISettingsInterface* s_settings_interface = nullptr;
+static INISettingsInterface* s_secrets_settings_interface = nullptr;
+
+static bool ARMSX2GetConfiguredFastBoot()
+{
+    if (!s_settings_interface)
+        return true;
+
+    return s_settings_interface->GetBoolValue(
+        "GameISO", "FastBoot",
+        s_settings_interface->GetBoolValue("EmuCore", "EnableFastBoot", true));
+}
 
 static double ARMSX2IOSGetAppRAMGB()
 {
@@ -719,14 +758,16 @@ static void ARMSX2ApplyIOSOsdPresetFromConfig(const char* reason)
         return;
 
     const int preset = std::clamp(s_settings_interface->GetIntValue("ARMSX2iOS/UI", "OsdPreset", 0), 0, 3);
-    int position = s_settings_interface->GetIntValue("EmuCore/GS", "OsdPerformancePos", 2);
+    int position = s_settings_interface->GetIntValue("EmuCore/GS", "OsdPerformancePos", static_cast<int>(OsdOverlayPos::TopRight));
+    if (position == static_cast<int>(OsdOverlayPos::TopCenter))
+        position = static_cast<int>(OsdOverlayPos::TopRight);
 
     switch (preset) {
     case 1:
-        ARMSX2SetIOSOsdFlags(true, false, true, true, true, false, false, true, false, false, false, false, false);
+        ARMSX2SetIOSOsdFlags(true, false, true, true, true, false, false, true, false, false, false, true, false);
         break;
     case 2:
-        ARMSX2SetIOSOsdFlags(true, true, true, true, true, true, false, true, false, false, false, false, false);
+        ARMSX2SetIOSOsdFlags(true, true, true, true, true, true, false, true, false, false, false, true, false);
         break;
     case 3:
         ARMSX2SetIOSOsdFlags(true, true, true, true, true, true, true, true, true, true, true, true, true);
@@ -737,8 +778,8 @@ static void ARMSX2ApplyIOSOsdPresetFromConfig(const char* reason)
         break;
     }
 
-    if (preset != 0 && (position < 1 || position > 2))
-        position = 2;
+    if (preset != 0 && (position < static_cast<int>(OsdOverlayPos::TopLeft) || position > static_cast<int>(OsdOverlayPos::TopRight)))
+        position = static_cast<int>(OsdOverlayPos::TopRight);
 
     EmuConfig.GS.OsdPerformancePos = static_cast<OsdOverlayPos>(position);
     GSConfig.OsdPerformancePos = static_cast<OsdOverlayPos>(position);
@@ -772,6 +813,7 @@ static bool s_vmThreadCreated = false;               // guarded by s_vmMutex
 
 struct CPUThreadTask
 {
+    unsigned long long id = 0;
     std::function<void()> function;
     std::mutex mutex;
     std::condition_variable cv;
@@ -779,6 +821,7 @@ struct CPUThreadTask
 };
 
 static std::thread::id s_cpuThreadId;
+static std::atomic<unsigned long long> s_cpuTaskNextId{1};
 static std::mutex s_cpuTaskMutex;
 static std::deque<std::shared_ptr<CPUThreadTask>> s_cpuTasks;
 
@@ -795,8 +838,11 @@ static void ARMSX2DrainCPUThreadTasks()
             s_cpuTasks.pop_front();
         }
 
-        if (task && task->function)
+        if (task && task->function) {
+            std::fprintf(stderr, "@@CPU_TASK_RUN@@ id=%llu\n", task->id);
+            std::fflush(stderr);
             task->function();
+        }
 
         {
             std::lock_guard<std::mutex> lock(task->mutex);
@@ -2244,7 +2290,7 @@ namespace Host
         }
         
         __block WindowInfo wi = {};
-        wi.type = WindowInfo::Type::iOS;
+        wi.type = WindowInfo::Type::MacOS;
         
         // SDL calls that interact with UIKit must run on the main thread
         dispatch_sync(dispatch_get_main_queue(), ^{
@@ -2323,6 +2369,7 @@ namespace Host
         }
 
         auto task = std::make_shared<CPUThreadTask>();
+        task->id = s_cpuTaskNextId.fetch_add(1, std::memory_order_relaxed);
         task->function = std::move(function);
 
         {
@@ -2334,7 +2381,17 @@ namespace Host
             return;
 
         std::unique_lock<std::mutex> lock(task->mutex);
-        task->cv.wait(lock, [&task] { return task->complete; });
+        std::fprintf(stderr, "@@CPU_TASK_WAIT@@ id=%llu state=%d\n",
+            task->id, static_cast<int>(VMManager::GetState()));
+        std::fflush(stderr);
+        if (!task->cv.wait_for(lock, std::chrono::seconds(1), [&task] { return task->complete; })) {
+            std::fprintf(stderr, "@@CPU_TASK_TIMEOUT@@ id=%llu state=%d queued=1\n",
+                task->id, static_cast<int>(VMManager::GetState()));
+            std::fflush(stderr);
+            return;
+        }
+        std::fprintf(stderr, "@@CPU_TASK_WAIT_OK@@ id=%llu\n", task->id);
+        std::fflush(stderr);
     }
     void ReportInfoAsync(std::string_view, std::string_view) {}
     void ReportErrorAsync(std::string_view title, std::string_view msg) {
@@ -2471,17 +2528,42 @@ namespace Host
     {
         if (s_settings_interface)
             s_settings_interface->Save();
+        if (s_secrets_settings_interface)
+            s_secrets_settings_interface->Save();
     }
     void OnInputDeviceDisconnected(InputBindingKey, std::string_view) {}
     void OpenHostFileSelectorAsync(std::string_view, bool, std::function<void(const std::string&)>, std::vector<std::string>, std::string_view) {}
     std::unique_ptr<ProgressCallback> CreateHostProgressCallback() { return nullptr; }
     void OnAchievementsLoginSuccess(char const*, u32, u32, u32) { ARMSX2_PostRetroAchievementsStateChanged(); }
-    void OnPerformanceMetricsUpdated() {}
+    void OnPerformanceMetricsUpdated()
+    {
+        static std::atomic<uint> s_last_metrics_frame{0};
+        const uint frame = ::g_FrameCount;
+        uint last = s_last_metrics_frame.load(std::memory_order_relaxed);
+        if (frame < last + 60 && frame != 1)
+            return;
+        if (!s_last_metrics_frame.compare_exchange_strong(last, frame, std::memory_order_relaxed))
+            return;
+
+        std::fprintf(stderr,
+            "@@PERF@@ frame=%u pm_frame=%llu fps=%.2f internal_fps=%.2f speed=%.2f cpu=%.2f gs=%.2f state=%d\n",
+            frame,
+            static_cast<unsigned long long>(PerformanceMetrics::GetFrameNumber()),
+            PerformanceMetrics::GetFPS(),
+            PerformanceMetrics::GetInternalFPS(),
+            PerformanceMetrics::GetSpeed(),
+            PerformanceMetrics::GetCPUThreadUsage(),
+            PerformanceMetrics::GetGSThreadUsage(),
+            static_cast<int>(VMManager::GetState()));
+        std::fflush(stderr);
+    }
     void OnAchievementsLoginRequested(Achievements::LoginRequestReason) { ARMSX2_PostRetroAchievementsStateChanged(); }
     bool ShouldPreferHostFileSelector() { return false; }
     void OnCoverDownloaderOpenRequested() {}
     void OnCreateMemoryCardOpenRequested() {}
     void OnAchievementsHardcoreModeChanged(bool) { ARMSX2_PostRetroAchievementsStateChanged(); }
+    void SetMouseLock(bool) {}
+    int LocaleSensitiveCompare(std::string_view lhs, std::string_view rhs) { return lhs.compare(rhs); }
     void OpenURL(std::string_view) {}
 }
 
@@ -2793,8 +2875,6 @@ namespace CocoaTools {
 
 // ... AudioStream Stub ...
 #include "pcsx2/Host/AudioStream.h"
-std::unique_ptr<AudioStream> AudioStream::CreateOboeAudioStream(unsigned int, AudioStreamParameters const&, bool, Error*) { return nullptr; }
-
 // ... PCAP Stub ...
 PCAPAdapter::PCAPAdapter() {}
 PCAPAdapter::~PCAPAdapter() {}
@@ -2874,8 +2954,8 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             Console.WriteLn("Creating new config at %s", iniPath.c_str());
             
             // [iPSX2] Standard Defaults: JIT Enabled (if supported), EE/IOP/VU Recompilers ON
-            s_settings_interface->SetIntValue("EmuCore/CPU", "CoreType", 0); // Recompiler
-            s_settings_interface->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
+            s_settings_interface->SetIntValue("EmuCore/CPU", "CoreType", 2); // ARM64 JIT in the Swift UI model
+            s_settings_interface->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
             s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
             s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
             s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
@@ -2892,6 +2972,8 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             // Normal console-speed frame limiter. Do not save reduced nominal
             // speed here; that is not a safe FPS cap for iOS.
             s_settings_interface->SetFloatValue("Framerate", "NominalScalar", 1.0f);
+            s_settings_interface->SetBoolValue("GameISO", "FastBoot", true);
+            s_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", true);
 
             // Speedhacks
             s_settings_interface->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
@@ -2903,16 +2985,44 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             // iOS controller defaults.
             s_settings_interface->SetIntValue("ARMSX2iOS/Gamepad", "MultitapMode", 0);
             
-            Console.WriteLn("@@CFG_DEFAULTS@@ created=1 CoreType=0 UseArm64Dynarec=false EnableEE=1");
+            Console.WriteLn("@@CFG_DEFAULTS@@ created=1 CoreType=2 UseArm64Dynarec=true EnableEE=1 FastBoot=1");
             s_settings_interface->Save();
         }
         Host::Internal::SetBaseSettingsLayer(s_settings_interface);
+        std::string secretsPath = dataRoot + "/PCSX2-iOS-secrets.ini";
+        s_secrets_settings_interface = new INISettingsInterface(secretsPath);
+        s_secrets_settings_interface->Load();
+        Host::Internal::SetSecretsSettingsLayer(s_secrets_settings_interface);
         g_p44_settings_interface = s_settings_interface; // expose to Bridge
-// Load gamepad button mapping from INI
+	// Load gamepad button mapping from INI
         for (int i = 0; i < 16; i++) {
             char key[32]; snprintf(key, sizeof(key), "Button%d", i);
             int val = s_settings_interface->GetIntValue("ARMSX2iOS/GamepadMapping", key, s_defaultMap[i]);
             s_buttonMap[i] = val;
+        }
+    }
+    {
+        const int coreType = s_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2);
+        const bool useArm64 = s_settings_interface->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", coreType == 2);
+#if TARGET_OS_SIMULATOR
+        const bool jitAvailableForDefaults = false;
+#else
+        const bool jitAvailableForDefaults = DarwinMisc::IsJITAvailable();
+#endif
+        if (jitAvailableForDefaults && (coreType != 2 || !useArm64)) {
+            s_settings_interface->SetIntValue("EmuCore/CPU", "CoreType", 2);
+            s_settings_interface->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
+            const bool fastBoot = ARMSX2GetConfiguredFastBoot();
+            s_settings_interface->SetBoolValue("GameISO", "FastBoot", fastBoot);
+            s_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", fastBoot);
+            s_settings_interface->Save();
+            std::fprintf(stderr, "@@CPU_DEFAULT_FIX@@ old_core=%d old_arm64=%d new_core=2 new_arm64=1 fast_boot=%d\n",
+                coreType, useArm64 ? 1 : 0, fastBoot ? 1 : 0);
+            std::fflush(stderr);
         }
     }
     // One-time migration for existing INI (runs once, then conditions are false)
@@ -3034,6 +3144,14 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                                                       object:nil
                                                        queue:nil
                                                   usingBlock:^(NSNotification * _Nonnull note) {
+        std::string bootISO;
+        if (s_settings_interface)
+            bootISO = s_settings_interface->GetStringValue("GameISO", "BootISO", "");
+        const std::string biosPath = Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios);
+        std::fprintf(stderr, "@@BOOT_NOTIFY@@ received=1 has_bios=%d bios=\"%s\" boot_iso=\"%s\"\n",
+            (!EmuConfig.BaseFilenames.Bios.empty() && FileSystem::FileExists(biosPath.c_str())) ? 1 : 0,
+            EmuConfig.BaseFilenames.Bios.c_str(), bootISO.c_str());
+        std::fflush(stderr);
         Console.WriteLn("[UI] VM boot requested from UI (rootVC=%p)", s_rootVC);
         ARMSX2ApplyIOSMultitapConfig("boot-request");
         if (s_rootVC) s_rootVC.view.backgroundColor = [UIColor blackColor];
@@ -3338,20 +3456,27 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     }
 }
 
-// JIT availability check for real device — fallback to Interpreter if JIT unavailable
-// CS_DEBUGGED check only (DolphiniOS approach) — no blocking, runs on main thread
+// JIT availability check for real devices. The allocation path can use MAP_JIT,
+// dual-map, or legacy mprotect depending on what iOS/LiveContainer permits.
 - (void)checkJITAndStartVM {
 #if !TARGET_OS_SIMULATOR
     if (DarwinMisc::IsJITAvailable()) {
-        Console.WriteLn("@@JIT_GATE@@ JIT available — starting VM in JIT mode");
+        std::fprintf(stderr, "@@BOOT_JIT_GATE@@ available=1 mode=jit_alloc\n");
+        std::fflush(stderr);
+        Console.WriteLn("@@JIT_GATE@@ JIT channel available; starting VM");
         [self startVMThread];
         return;
     }
 
-    Console.Warning("@@JIT_GATE@@ JIT NOT available — falling back to Interpreter mode");
-    DarwinMisc::iPSX2_FORCE_EE_INTERP = 1;
-    Console.WriteLn("@@JIT_GATE@@ iPSX2_FORCE_EE_INTERP forced to 1");
-    [self startVMThread];
+    std::fprintf(stderr, "@@BOOT_JIT_GATE@@ available=0 mode=blocked reason=no_debug_jit_channel\n");
+    std::fflush(stderr);
+    Console.Error("@@JIT_GATE@@ No debug/JIT channel; VM boot blocked because this build requires JIT.");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (s_rootVC)
+            s_rootVC.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSReturnToMenu" object:nil];
+    });
+    Host::ReportErrorAsync("JIT Unavailable", "Launch through the debugger/JIT enabler so iOS marks this process as debugged.");
 #else
     [self startVMThread];
 #endif
@@ -3361,6 +3486,8 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     {
         std::lock_guard<std::mutex> lk(s_vmMutex);
         if (s_vmThreadActive.load()) {
+            std::fprintf(stderr, "@@BOOT_START_THREAD@@ active=1 action=ignored\n");
+            std::fflush(stderr);
             Console.WriteLn("[VM] startVMThread: VM already active, ignoring");
             return;
         }
@@ -3370,6 +3497,8 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
         s_requestVMStop.store(false);
 
         if (s_vmThreadCreated) {
+            std::fprintf(stderr, "@@BOOT_START_THREAD@@ active=0 created=1 action=signal\n");
+            std::fflush(stderr);
             Console.WriteLn("[VM] startVMThread: signaling existing VM thread");
             s_vmCV.notify_one();
             return;
@@ -3379,22 +3508,27 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
         s_vmThreadCreated = true;
     }
 
+    std::fprintf(stderr, "@@BOOT_START_THREAD@@ active=0 created=0 action=create\n");
+    std::fflush(stderr);
     Console.WriteLn("[VM] Creating persistent VM thread...");
 
     std::thread vmThread([]() {
         // === ONE-TIME INIT (runs once per app lifetime) ===
         s_cpuThreadId = std::this_thread::get_id();
+        std::fprintf(stderr, "@@BOOT_THREAD_INIT@@ begin=1\n");
+        std::fflush(stderr);
+        ARMSX2ConfigureImGuiFonts("vm-thread");
         Console.WriteLn("[VM] VM Thread: CPUThreadInitialize (once)...");
         if (!VMManager::Internal::CPUThreadInitialize()) {
+            std::fprintf(stderr, "@@BOOT_THREAD_INIT@@ ok=0\n");
+            std::fflush(stderr);
             Console.Error("VM Thread: CPUThreadInitialize failed.");
             std::lock_guard<std::mutex> lk(s_vmMutex);
             s_vmThreadCreated = false;
             return;
         }
-
-        // Set ImGui font path (once)
-        std::string fontPath = Path::Combine(EmuFolders::Resources, "fonts/Roboto-Regular.ttf");
-        ImGuiManager::SetFontPathAndRange(std::move(fontPath), {});
+        std::fprintf(stderr, "@@BOOT_THREAD_INIT@@ ok=1\n");
+        std::fflush(stderr);
 
         // === PERSISTENT BOOT LOOP ===
         bool auto_boot_first = (getenv("ARMSX2_AUTO_BOOT") && atoi(getenv("ARMSX2_AUTO_BOOT")) == 1)
@@ -3407,12 +3541,16 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                     Console.WriteLn("[AutoBoot] @@AUTO_BOOT@@ skipping UI wait, auto-boot enabled");
                     auto_boot_first = false;
                 } else {
+                    std::fprintf(stderr, "@@BOOT_THREAD_WAIT@@ waiting=1\n");
+                    std::fflush(stderr);
                     Console.WriteLn("[VM] VM Thread: waiting for boot request...");
                     s_vmCV.wait(lk, [] { return s_requestVMBoot.load(); });
                 }
                 s_requestVMBoot.store(false);
             }
 
+            std::fprintf(stderr, "@@BOOT_THREAD_SIGNAL@@ received=1\n");
+            std::fflush(stderr);
             Console.WriteLn("[VM] VM Thread: boot signal received, preparing boot params...");
             s_vmThreadActive.store(true);
 
@@ -3422,21 +3560,28 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             {
                 std::string isoDir = EmuFolders::DataRoot + "/iso";
                 std::string defaultISO = "";
-	                std::string isoFilename = s_settings_interface->GetStringValue("GameISO", "BootISO", defaultISO.c_str());
-	                bool fastBoot = s_settings_interface->GetBoolValue("GameISO", "FastBoot", false);
-	                s_settings_interface->SetStringValue("GameISO", "BootISO", isoFilename.c_str());
-	                s_settings_interface->SetBoolValue("GameISO", "FastBoot", fastBoot);
-	                s_settings_interface->Save();
-	                std::string isoPath = (!isoFilename.empty() && isoFilename.front() == '/') ? isoFilename : (isoDir + "/" + isoFilename);
-	                // Fallback: check Documents/ root if not found in iso/.
-	                if (!isoFilename.empty() && isoFilename.front() != '/' && !FileSystem::FileExists(isoPath.c_str())) {
+                std::string isoFilename = s_settings_interface->GetStringValue("GameISO", "BootISO", defaultISO.c_str());
+                bool fastBoot = ARMSX2GetConfiguredFastBoot();
+                s_settings_interface->SetStringValue("GameISO", "BootISO", isoFilename.c_str());
+                s_settings_interface->SetBoolValue("GameISO", "FastBoot", fastBoot);
+                s_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", fastBoot);
+                s_settings_interface->Save();
+                std::fprintf(stderr, "@@BOOT_FASTBOOT_READ@@ selected=%d\n", fastBoot ? 1 : 0);
+                std::fflush(stderr);
+                std::string isoPath = (!isoFilename.empty() && isoFilename.front() == '/') ? isoFilename : (isoDir + "/" + isoFilename);
+                // Fallback: check Documents/ root if not found in iso/.
+                if (!isoFilename.empty() && isoFilename.front() != '/' && !FileSystem::FileExists(isoPath.c_str())) {
                     std::string rootPath = EmuFolders::DataRoot + "/" + isoFilename;
                     if (FileSystem::FileExists(rootPath.c_str())) {
                         isoPath = rootPath;
                         Console.WriteLn("ISO found in Documents/ root: %s", isoPath.c_str());
                     }
                 }
-                if (!isoFilename.empty() && FileSystem::FileExists(isoPath.c_str())) {
+                const bool isoExists = !isoFilename.empty() && FileSystem::FileExists(isoPath.c_str());
+                std::fprintf(stderr, "@@BOOT_PARAMS@@ ini_iso=\"%s\" resolved=\"%s\" exists=%d fast_boot=%d\n",
+                    isoFilename.c_str(), isoPath.c_str(), isoExists ? 1 : 0, fastBoot ? 1 : 0);
+                std::fflush(stderr);
+                if (isoExists) {
                     std::string suffix = isoFilename.size() >= 4 ? isoFilename.substr(isoFilename.size() - 4) : "";
                     std::transform(suffix.begin(), suffix.end(), suffix.begin(), ::tolower);
                     bool isElf = (suffix == ".elf");
@@ -3444,14 +3589,23 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                         boot_params.elf_override = isoPath;
                         boot_params.source_type = CDVD_SourceType::NoDisc;
                         boot_params.fast_boot = true;
+                        std::fprintf(stderr, "@@ISO_BOOT@@ path=%s fast_boot=1 mode=ELF INI=\"%s\"\n",
+                            isoPath.c_str(), isoFilename.c_str());
+                        std::fflush(stderr);
                         Console.WriteLn("@@ISO_BOOT@@ path=%s fast_boot=1 mode=ELF (INI: %s)", isoPath.c_str(), isoFilename.c_str());
                     } else {
                         boot_params.filename = isoPath;
                         boot_params.source_type = CDVD_SourceType::Iso;
                         boot_params.fast_boot = fastBoot;
+                        std::fprintf(stderr, "@@ISO_BOOT@@ path=%s fast_boot=%d mode=ISO INI=\"%s\"\n",
+                            isoPath.c_str(), fastBoot ? 1 : 0, isoFilename.c_str());
+                        std::fflush(stderr);
                         Console.WriteLn("@@ISO_BOOT@@ path=%s fast_boot=%d (INI: %s)", isoPath.c_str(), fastBoot ? 1 : 0, isoFilename.c_str());
                     }
                 } else {
+                    std::fprintf(stderr, "@@ISO_BOOT_MISSING@@ ini_iso=\"%s\" attempted=\"%s\"\n",
+                        isoFilename.c_str(), isoPath.c_str());
+                    std::fflush(stderr);
                     Console.WriteLn("@@ISO_BOOT@@ no ISO='%s', falling back to BIOS only", isoFilename.c_str());
                 }
             }
@@ -3469,7 +3623,14 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             }
 
             // BIOS sanity check
-            if (EmuConfig.BaseFilenames.Bios.empty() || !FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str())) {
+            const std::string biosPath = Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios);
+            const bool biosExists = !EmuConfig.BaseFilenames.Bios.empty() && FileSystem::FileExists(biosPath.c_str());
+            std::fprintf(stderr, "@@BOOT_BIOS_CHECK@@ bios=\"%s\" path=\"%s\" exists=%d\n",
+                EmuConfig.BaseFilenames.Bios.c_str(), biosPath.c_str(), biosExists ? 1 : 0);
+            std::fflush(stderr);
+            if (!biosExists) {
+                std::fprintf(stderr, "@@BOOT_BIOS_FAIL@@ action=abort_to_menu\n");
+                std::fflush(stderr);
                 Console.Error("CRITICAL: BIOS verification failed inside VM thread.");
                 Host::ReportErrorAsync("BIOS Error", "Validation failed.");
                 s_vmThreadActive.store(false);
@@ -3481,6 +3642,18 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
             ARMSX2SanitizeFrameLimiterConfig("pre-vm-initialize");
             ARMSX2ApplyIOSOsdPresetFromConfig("pre-vm-initialize");
+            const int configuredCoreType = s_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2);
+            const bool configuredUseArm64 = s_settings_interface->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", configuredCoreType == 2);
+            std::fprintf(stderr,
+                "@@CPU_CONFIG@@ core=%d use_arm64=%d ee=%d iop=%d vu0=%d vu1=%d fastmem=%d forced_interp=%d\n",
+                configuredCoreType, configuredUseArm64 ? 1 : 0,
+                EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0,
+                EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0,
+                EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0,
+                EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0,
+                EmuConfig.Cpu.Recompiler.EnableFastmem ? 1 : 0,
+                DarwinMisc::iPSX2_FORCE_EE_INTERP ? 1 : 0);
+            std::fflush(stderr);
             Console.WriteLn("@@FRAMELIMIT@@ boot nominal=%.3f turbo=%.3f slomo=%.3f ntsc=%.3f pal=%.3f",
                 EmuConfig.EmulationSpeed.NominalScalar,
                 EmuConfig.EmulationSpeed.TurboScalar,
@@ -3489,10 +3662,49 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                 EmuConfig.GS.FrameratePAL);
 
             // --- Initialize & Execute VM ---
-            if (VMManager::Initialize(boot_params)) {
+            Error bootError;
+            const VMBootResult bootResult = VMManager::Initialize(boot_params, &bootError);
+            const std::string bootErrorText = bootError.GetDescription();
+            std::fprintf(stderr, "@@BOOT_VM_INIT@@ result=%d success=%d error=\"%s\"\n",
+                static_cast<int>(bootResult), bootResult == VMBootResult::StartupSuccess ? 1 : 0,
+                bootErrorText.c_str());
+            std::fflush(stderr);
+            if (bootResult == VMBootResult::StartupSuccess) {
+                std::fprintf(stderr, "@@BOOT_POST_INIT@@ stage=before_osd state=%d frame=%u\n",
+                    static_cast<int>(VMManager::GetState()), ::g_FrameCount);
+                std::fflush(stderr);
                 ARMSX2ApplyIOSOsdPresetFromConfig("post-vm-initialize");
+                std::fprintf(stderr, "@@BOOT_POST_INIT@@ stage=after_osd state=%d frame=%u\n",
+                    static_cast<int>(VMManager::GetState()), ::g_FrameCount);
+                std::fflush(stderr);
                 Console.WriteLn("[VM] VM initialized successfully");
                 VMManager::SetState(VMState::Running);
+                std::fprintf(stderr, "@@BOOT_POST_INIT@@ stage=after_set_running state=%d frame=%u\n",
+                    static_cast<int>(VMManager::GetState()), ::g_FrameCount);
+                std::fflush(stderr);
+
+                std::thread([]() {
+                    for (int sec = 1; sec <= 30; sec++) {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        if (!s_vmThreadActive.load(std::memory_order_relaxed))
+                            break;
+                        std::fprintf(stderr,
+                            "@@VM_HEARTBEAT@@ sec=%d state=%d frame=%u pm_frame=%llu fps=%.2f internal_fps=%.2f speed=%.2f cpu=%.2f gs=%.2f ee_pc=0x%08x ee_cycle=%lld ee_next=%lld\n",
+                            sec,
+                            static_cast<int>(VMManager::GetState()),
+                            ::g_FrameCount,
+                            static_cast<unsigned long long>(PerformanceMetrics::GetFrameNumber()),
+                            PerformanceMetrics::GetFPS(),
+                            PerformanceMetrics::GetInternalFPS(),
+                            PerformanceMetrics::GetSpeed(),
+                            PerformanceMetrics::GetCPUThreadUsage(),
+                            PerformanceMetrics::GetGSThreadUsage(),
+                            cpuRegs.pc,
+                            static_cast<long long>(cpuRegs.cycle),
+                            static_cast<long long>(cpuRegs.nextEventCycle));
+                        std::fflush(stderr);
+                    }
+                }).detach();
 
                 while (true) {
                     Host::PumpMessagesOnCPUThread();
@@ -3506,6 +3718,9 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                         Console.WriteLn("[VM] VM Thread: shutdown signal received.");
                         break;
                     } else if (state == VMState::Running) {
+                        std::fprintf(stderr, "@@BOOT_EXEC_ENTER@@ state=%d frame=%u\n",
+                            static_cast<int>(state), ::g_FrameCount);
+                        std::fflush(stderr);
                         VMManager::Execute();
                     } else {
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -3654,7 +3869,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_1_3_1_black_beforedraw_release\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_pcsx2_27_gamedb_force_builtin_cover_return_v1\n");
     
     // [iPSX2] Unification Validation
     // @@BIOS_GATE@@ build_id=2026-01-14_13-30-00 bundle=(from_nsbundle)
@@ -3662,6 +3877,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
     const char* cBundle = bID ? [bID UTF8String] : "(null)";
     fprintf(stderr, "@@BIOS_GATE@@ build_id=2026-01-17_PROBE bundle=%s\n", cBundle);
     fprintf(stderr, "@@LOG_UNIFIED@@ pcsx2_log.txt includes emulog output; emulog.txt disabled=1\n");
+    ARMSX2ConfigureImGuiFonts("app-launch");
     
 // DYLD Map — debug builds only
 #if DEBUG

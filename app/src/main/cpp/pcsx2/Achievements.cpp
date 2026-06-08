@@ -421,6 +421,55 @@ const std::string& Achievements::GetGameIconURL()
 	return s_game_icon_url;
 }
 
+bool Achievements::GetCurrentUserStats(UserStats* stats)
+{
+	auto lock = GetLock();
+	if (!s_client)
+		return false;
+
+	const rc_client_user_t* user = rc_client_get_user_info(s_client);
+	if (!user)
+		return false;
+
+	if (stats)
+	{
+		stats->username = user->username ? user->username : "";
+		stats->display_name = user->display_name ? user->display_name : stats->username;
+		stats->avatar_path = GetLoggedInUserBadgePath();
+		stats->points = user->score;
+		stats->softcore_points = user->score_softcore;
+		stats->unread_messages = user->num_unread_messages;
+	}
+
+	return true;
+}
+
+bool Achievements::GetCurrentGameStats(GameStats* stats)
+{
+	auto lock = GetLock();
+	if (!s_client || s_game_id == 0)
+		return false;
+
+	UpdateGameSummary();
+	if (stats)
+	{
+		stats->title = s_game_title;
+		stats->rich_presence = s_rich_presence_string;
+		stats->icon_path = s_game_icon;
+		stats->icon_url = s_game_icon_url;
+		stats->game_id = s_game_id;
+		stats->unlocked_achievements = s_game_summary.num_unlocked_achievements;
+		stats->total_achievements = s_game_summary.num_core_achievements;
+		stats->unlocked_points = s_game_summary.points_unlocked;
+		stats->total_points = s_game_summary.points_core;
+		stats->has_achievements = s_has_achievements;
+		stats->has_leaderboards = s_has_leaderboards;
+		stats->has_rich_presence = s_has_rich_presence;
+	}
+
+	return true;
+}
+
 bool Achievements::Initialize()
 {
 	if (IsUsingRAIntegration())

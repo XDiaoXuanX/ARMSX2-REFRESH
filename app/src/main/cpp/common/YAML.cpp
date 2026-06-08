@@ -73,9 +73,6 @@ std::optional<ryml::Tree> ParseYAMLFromString(ryml::csubstr yaml, ryml::csubstr 
 	};
 #endif
 
-	ryml::EventHandlerTree event_handler(callbacks);
-	ryml::Parser parser(&event_handler);
-
 	ryml::Tree tree;
 
 	// The only options RapidYAML provides for recovering from errors are
@@ -84,7 +81,14 @@ std::optional<ryml::Tree> ParseYAMLFromString(ryml::csubstr yaml, ryml::csubstr 
 	if (setjmp(context.env))
 		return std::nullopt;
 
+#if RYML_VERSION_MAJOR > 0 || RYML_VERSION_MINOR >= 11
+	ryml::EventHandlerTree event_handler(callbacks);
+	ryml::Parser parser(&event_handler);
 	ryml::parse_in_arena(&parser, file_name, yaml, &tree);
+#else
+	ryml::Parser parser(callbacks);
+	parser.parse_in_arena(file_name, yaml, &tree);
+#endif
 
 	return tree;
 }

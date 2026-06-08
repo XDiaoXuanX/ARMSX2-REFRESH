@@ -247,7 +247,9 @@ struct GameScreenView: View {
                 Label(settings.localized("Hide Menu Button"), systemImage: "eye.slash")
             }
             Button {
-                showPadLayoutEditor = true
+                presentQuickMenuPanel("pad_layout") {
+                    showPadLayoutEditor = true
+                }
             } label: {
                 Label(settings.localized("Edit Virtual Pad Layout"), systemImage: "square.resize")
             }
@@ -255,15 +257,19 @@ struct GameScreenView: View {
             Divider()
 
             Button {
-                refreshCompatibilityState()
-                showCompatibilityLab = true
+                presentQuickMenuPanel("compatibility_lab") {
+                    refreshCompatibilityState()
+                    showCompatibilityLab = true
+                }
             } label: {
                 Label(settings.localized("Compatibility Lab"), systemImage: "wand.and.stars")
             }
 
             if gameMenuAvailable {
                 Button {
-                    openPerGameSettingsForCurrentGame()
+                    presentQuickMenuPanel("per_game_settings") {
+                        openPerGameSettingsForCurrentGame()
+                    }
                 } label: {
                     Label(settings.localized("Per-Game Settings"), systemImage: "slider.horizontal.3")
                 }
@@ -271,13 +277,17 @@ struct GameScreenView: View {
 
             if vmMenuAvailable {
                 Button {
-                    showSpeedControl = true
+                    presentQuickMenuPanel("speed_control") {
+                        showSpeedControl = true
+                    }
                 } label: {
                     Label(settings.localized("Speed / FPS Target"), systemImage: "speedometer")
                 }
 
                 Button {
-                    showResetConfirmation = true
+                    presentQuickMenuPanel("reset_rom") {
+                        showResetConfirmation = true
+                    }
                 } label: {
                     Label(settings.localized("Reset ROM"), systemImage: "arrow.counterclockwise.circle")
                 }
@@ -285,7 +295,9 @@ struct GameScreenView: View {
 
             if gameMenuAvailable || vmMenuAvailable {
                 Button {
-                    showSaveStates = true
+                    presentQuickMenuPanel("save_states") {
+                        showSaveStates = true
+                    }
                 } label: {
                     Label(settings.localized("Save / Load States"), systemImage: "square.stack.3d.up.fill")
                 }
@@ -334,7 +346,9 @@ struct GameScreenView: View {
 
             if gameMenuAvailable {
                 Button {
-                    showPNACHImporter = true
+                    presentQuickMenuPanel("pnach_import") {
+                        showPNACHImporter = true
+                    }
                 } label: {
                     Label(settings.localized("Import PNACH / 60 FPS Patch"), systemImage: "wand.and.stars")
                 }
@@ -358,6 +372,13 @@ struct GameScreenView: View {
                 .foregroundStyle(.white.opacity(0.5))
                 .padding(6)
                 .background(.black.opacity(0.15), in: Circle())
+        }
+    }
+
+    private func presentQuickMenuPanel(_ name: String, _ action: @escaping () -> Void) {
+        NSLog("[ARMSX2 iOS QuickMenu] present \(name)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            action()
         }
     }
 

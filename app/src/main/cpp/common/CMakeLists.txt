@@ -144,19 +144,29 @@ if(WIN32)
 	)
 elseif(APPLE)
 	target_sources(common PRIVATE
-		CocoaTools.mm
-		CocoaTools.h
 		Darwin/DarwinThreads.cpp
 		Darwin/DarwinMisc.cpp
 		Darwin/DarwinMisc.h
 		Linux/LnxHostSys.cpp
 	)
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		target_sources(common PRIVATE
+			CocoaTools.mm
+			CocoaTools.h
+		)
+		target_link_libraries(common PRIVATE
+			"-framework Foundation"
+			"-framework IOKit"
+			"-framework AppKit"
+		)
+	else()
+		target_link_libraries(common PRIVATE
+			"-framework Foundation"
+			"-framework UIKit"
+		)
+	endif()
 	target_compile_options(common PRIVATE -fobjc-arc)
 	target_link_options(common PRIVATE -fobjc-link-runtime)
-	target_link_libraries(common PRIVATE
-		"-framework Foundation"
-		"-framework IOKit"
-	)
 else()
 	target_sources(common PRIVATE
 		Linux/LnxHostSys.cpp
@@ -191,27 +201,51 @@ endif()
 
 if(NOT WIN32)
 	# libcurl-based HTTPDownloader
-	target_sources(common PRIVATE
-		HTTPDownloaderCurl.cpp
-		HTTPDownloaderCurl.h
-	)
-	target_link_libraries(common PRIVATE
-		CURL::libcurl
-	)
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT iPSX2_MACOS_BUILD)
+		target_sources(common PRIVATE
+			HTTPDownloaderCurl.cpp
+			HTTPDownloaderCurl.h
+		)
+		if(ANDROID)
+			target_link_libraries(common PRIVATE curl ssl crypto nghttp2 pcap)
+		else()
+			target_link_libraries(common PRIVATE
+				CURL::libcurl
+			)
+		endif()
+	endif()
 endif()
 
-target_link_libraries(common PRIVATE
-	${LIBC_LIBRARIES}
-	JPEG::JPEG
-	PNG::PNG
-	WebP::libwebp
-	cpuinfo
-)
+if(ANDROID)
+	target_link_libraries(common PRIVATE
+		${LIBC_LIBRARIES}
+		jpeg
+		png16
+		webp
+		cpuinfo
+	)
+else()
+	target_link_libraries(common PRIVATE
+		${LIBC_LIBRARIES}
+		cpuinfo
+	)
+	if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		target_link_libraries(common PRIVATE
+			webp
+		)
+	elseif(NOT iPSX2_MACOS_BUILD)
+		target_link_libraries(common PRIVATE
+			WebP::libwebp
+			JPEG::JPEG
+			PNG::PNG
+		)
+	endif()
+endif()
 
 target_link_libraries(common PUBLIC
 	fmt::fmt
 	fast_float
-	ryml::ryml
+	rapidyaml::rapidyaml
 )
 
 fixup_file_properties(common)

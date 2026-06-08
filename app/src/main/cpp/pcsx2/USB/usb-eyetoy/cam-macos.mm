@@ -8,6 +8,7 @@
 #include "usb-eyetoy-webcam.h"
 #include "jo_mpeg.h"
 
+#include <TargetConditionals.h>
 #include <thread>
 
 @interface CameraDelegate : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
@@ -212,8 +213,13 @@ namespace usb_eyetoy
 
 			@autoreleasepool
 			{
+			#if TARGET_OS_IPHONE
+				NSArray<AVCaptureDeviceType>* deviceTypes = @[ AVCaptureDeviceTypeBuiltInWideAngleCamera ];
+			#else
+				NSArray<AVCaptureDeviceType>* deviceTypes = @[ AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeExternalUnknown ];
+			#endif
 				AVCaptureDeviceDiscoverySession* discoverySession = [AVCaptureDeviceDiscoverySession
-					discoverySessionWithDeviceTypes:@[ AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeExternalUnknown ]
+					discoverySessionWithDeviceTypes:deviceTypes
 					                      mediaType:AVMediaTypeVideo
 					                       position:AVCaptureDevicePositionUnspecified];
 				NSArray<AVCaptureDevice*>* devices = discoverySession.devices;

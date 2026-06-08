@@ -40,12 +40,15 @@ BIOS
 #include "common/AlignedMalloc.h"
 #include "common/Error.h"
 
+#include <cstdio>
+
 #ifdef ENABLECACHE
 #include "Cache.h"
 #endif
 
 #ifdef __APPLE__
 #include "common/Darwin/DarwinMisc.h"
+#include <TargetConditionals.h>
 #endif
 
 namespace Ps2MemSize
@@ -93,45 +96,113 @@ namespace HostMemoryMap
 
 bool SysMemory::AllocateMemoryMap()
 {
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ create_shared_begin main=%zu code=%zu\n",
+		static_cast<size_t>(HostMemoryMap::MainSize), static_cast<size_t>(HostMemoryMap::CodeSize));
+	std::fflush(stderr);
 	s_data_memory_file_handle = HostSys::CreateSharedMemory(HostSys::GetFileMappingName("pcsx2").c_str(), HostMemoryMap::MainSize);
 	if (!s_data_memory_file_handle)
 	{
+		std::fprintf(stderr, "@@MEMMAP_STAGE@@ create_shared_fail\n");
+		std::fflush(stderr);
 		Host::ReportErrorAsync("Error", "Failed to create shared memory file.");
 		ReleaseMemoryMap();
 		return false;
 	}
 
-	if (!(s_memory_mapping_area = SharedMemoryMappingArea::Create(HostMemoryMap::MainSize + HostMemoryMap::CodeSize, true)))
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ create_shared_ok handle=%p\n", s_data_memory_file_handle);
+	std::fflush(stderr);
+	const size_t main_area_size =
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+		HostMemoryMap::MainSize;
+#else
+		HostMemoryMap::MainSize + HostMemoryMap::CodeSize;
+#endif
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ area_create_begin size=%zu jit=0 split_code_jit=%d\n",
+		main_area_size,
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+		1
+#else
+		0
+#endif
+	);
+	std::fflush(stderr);
+	if (!(s_memory_mapping_area = SharedMemoryMappingArea::Create(main_area_size, false)))
 	{
-		Host::ReportErrorAsync("Error", "Failed to map main memory.");
-		ReleaseMemoryMap();
-		return false;
-	}
-
-	if ((s_data_memory = s_memory_mapping_area->Map(s_data_memory_file_handle, 0, s_memory_mapping_area->BasePointer(), HostMemoryMap::MainSize, PageAccess_ReadWrite())) == nullptr)
-	{
+		std::fprintf(stderr, "@@MEMMAP_STAGE@@ area_create_fail\n");
+		std::fflush(stderr);
 		Host::ReportErrorAsync("Error", "Failed to map data memory.");
 		ReleaseMemoryMap();
 		return false;
 	}
 
-	if ((s_code_memory = s_memory_mapping_area->Map(nullptr, 0, s_memory_mapping_area->OffsetPointer(HostMemoryMap::MainSize), HostMemoryMap::CodeSize, PageAccess_Any())) == nullptr)
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ area_create_ok base=%p size=%zu\n",
+		s_memory_mapping_area->BasePointer(), s_memory_mapping_area->GetSize());
+	std::fflush(stderr);
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ data_map_begin base=%p size=%zu\n",
+		s_memory_mapping_area->BasePointer(), static_cast<size_t>(HostMemoryMap::MainSize));
+	std::fflush(stderr);
+	if ((s_data_memory = s_memory_mapping_area->Map(s_data_memory_file_handle, 0, s_memory_mapping_area->BasePointer(), HostMemoryMap::MainSize, PageAccess_ReadWrite())) == nullptr)
 	{
-		Host::ReportErrorAsync("Error", "Failed to allocate code memory.");
+		std::fprintf(stderr, "@@MEMMAP_STAGE@@ data_map_fail\n");
+		std::fflush(stderr);
+		Host::ReportErrorAsync("Error", "Failed to map data memory.");
 		ReleaseMemoryMap();
 		return false;
 	}
 
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ data_map_ok ptr=%p\n", s_data_memory);
+	std::fflush(stderr);
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ code_dualmap_begin size=%zu\n", static_cast<size_t>(HostMemoryMap::CodeSize));
+	std::fflush(stderr);
+	if ((s_code_memory = static_cast<u8*>(DarwinMisc::MmapCodeDualMap(HostMemoryMap::CodeSize))) == nullptr)
+	{
+		std::fprintf(stderr, "@@MEMMAP_STAGE@@ code_dualmap_fail\n");
+		std::fflush(stderr);
+		Host::ReportErrorAsync("Error", "Failed to allocate iOS executable code memory.");
+		ReleaseMemoryMap();
+		return false;
+	}
+
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ code_dualmap_ok rx=%p rw_offset=%td rw_base=%p size=%zu\n",
+		s_code_memory, DarwinMisc::g_code_rw_offset,
+		reinterpret_cast<void*>(DarwinMisc::g_code_rw_base), DarwinMisc::g_code_rw_size);
+	std::fflush(stderr);
+#else
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ code_map_begin base=%p size=%zu\n",
+		s_memory_mapping_area->OffsetPointer(HostMemoryMap::MainSize), static_cast<size_t>(HostMemoryMap::CodeSize));
+	std::fflush(stderr);
+	if ((s_code_memory = s_memory_mapping_area->Map(nullptr, 0, s_memory_mapping_area->OffsetPointer(HostMemoryMap::MainSize), HostMemoryMap::CodeSize, PageAccess_Any())) == nullptr)
+	{
+		std::fprintf(stderr, "@@MEMMAP_STAGE@@ code_map_fail\n");
+		std::fflush(stderr);
+		Host::ReportErrorAsync("Error", "Failed to allocate code memory.");
+		ReleaseMemoryMap();
+		return false;
+	}
+#endif
+
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ code_map_ok ptr=%p\n", s_code_memory);
+	std::fflush(stderr);
 	HostMemoryMap::EEmem = (uptr)(s_data_memory + HostMemoryMap::EEmemOffset);
 	HostMemoryMap::IOPmem = (uptr)(s_data_memory + HostMemoryMap::IOPmemOffset);
 	HostMemoryMap::VUmem = (uptr)(s_data_memory + HostMemoryMap::VUmemOffset);
 
 #ifdef __APPLE__
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ set_jit_range_begin ptr=%p size=%zu\n",
+		s_code_memory, static_cast<size_t>(HostMemoryMap::CodeSize));
+	std::fflush(stderr);
 	DarwinMisc::SetJitRange(s_code_memory, HostMemoryMap::CodeSize);
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ set_jit_range_ok\n");
+	std::fflush(stderr);
 	// [P43] Log dual-mapping state
 	Console.WriteLn("@@P43_OFFSET@@ g_code_rw_offset=%ld", (long)DarwinMisc::g_code_rw_offset);
 #endif
 
+	std::fprintf(stderr, "@@MEMMAP_STAGE@@ allocate_memory_map_ok eemem=%p iop=%p vu=%p\n",
+		reinterpret_cast<void*>(HostMemoryMap::EEmem), reinterpret_cast<void*>(HostMemoryMap::IOPmem),
+		reinterpret_cast<void*>(HostMemoryMap::VUmem));
+	std::fflush(stderr);
 	DumpMemoryMap();
 	return true;
 }
@@ -165,7 +236,11 @@ void SysMemory::ReleaseMemoryMap()
 {
 	if (s_code_memory)
 	{
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+		DarwinMisc::MunmapCodeDualMap(s_code_memory, HostMemoryMap::CodeSize);
+#else
 		s_memory_mapping_area->Unmap(s_code_memory, HostMemoryMap::CodeSize, false);
+#endif
 		s_code_memory = nullptr;
 	}
 

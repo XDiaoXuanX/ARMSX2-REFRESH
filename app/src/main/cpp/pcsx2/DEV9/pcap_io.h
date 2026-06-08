@@ -14,13 +14,13 @@ void unload_pcap();
 class PCAPAdapter : public NetAdapter
 {
 private:
-//	pcap_t* hpcap = nullptr;
-//
-//	bool switched;
-//	bool blocking;
-//
-//	PacketReader::IP::IP_Address ps2IP{};
-//	PacketReader::MAC_Address hostMAC;
+	pcap_t* hpcap = nullptr;
+
+	bool switched;
+	bool blocking;
+
+	PacketReader::IP::IP_Address ps2IP{};
+	PacketReader::MAC_Address hostMAC;
 
 public:
 	PCAPAdapter();

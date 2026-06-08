@@ -8,6 +8,9 @@ IPA_NAME="${IPA_NAME:-ARMSX2-iOS-unsigned.ipa}"
 APP_PATH="$BUILD_DIR/Release-iphoneos/ARMSX2iOS.app"
 STAGING_DIR="$BUILD_DIR/ipa-staging"
 BUILD_LOG="$BUILD_DIR/xcodebuild.log"
+ENTITLEMENTS_FILE="${ENTITLEMENTS_FILE:-$ROOT_DIR/app/src/main/cpp/Entitlements.plist}"
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+AD_HOC_SIGN="${AD_HOC_SIGN:-0}"
 
 if [[ ! -d "$PROJECT" ]]; then
 	"$ROOT_DIR/scripts/generate-ios-xcode.sh"
@@ -67,7 +70,40 @@ fi
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR/Payload"
 ditto "$APP_PATH" "$STAGING_DIR/Payload/ARMSX2iOS.app"
+STAGED_APP="$STAGING_DIR/Payload/ARMSX2iOS.app"
+
+if [[ -n "$SIGN_IDENTITY" || "$AD_HOC_SIGN" == "1" ]]; then
+	if [[ ! -f "$ENTITLEMENTS_FILE" ]]; then
+		echo "error: entitlements file was not found at $ENTITLEMENTS_FILE" >&2
+		exit 1
+	fi
+
+	IDENTITY="$SIGN_IDENTITY"
+	if [[ -z "$IDENTITY" ]]; then
+		IDENTITY="-"
+	fi
+
+	echo "Signing staged app with identity '$IDENTITY' and entitlements:"
+	echo "  $ENTITLEMENTS_FILE"
+
+	if [[ -d "$STAGED_APP/Frameworks" ]]; then
+		while IFS= read -r -d '' nested; do
+			codesign --force --sign "$IDENTITY" --timestamp=none "$nested"
+		done < <(find "$STAGED_APP/Frameworks" -type d -name '*.framework' -print0)
+		while IFS= read -r -d '' nested; do
+			codesign --force --sign "$IDENTITY" --timestamp=none "$nested"
+		done < <(find "$STAGED_APP/Frameworks" -type f \( -name '*.dylib' -o -perm -111 \) -print0)
+	fi
+
+	codesign --force --sign "$IDENTITY" --entitlements "$ENTITLEMENTS_FILE" --timestamp=none "$STAGED_APP"
+	codesign -d --entitlements :- "$STAGED_APP" 2>&1 | sed -n '1,80p'
+fi
+
 (cd "$STAGING_DIR" && zip -qry "$BUILD_DIR/$IPA_NAME" Payload)
 
-echo "Created unsigned IPA:"
+if [[ -n "$SIGN_IDENTITY" || "$AD_HOC_SIGN" == "1" ]]; then
+	echo "Created signed IPA:"
+else
+	echo "Created unsigned IPA:"
+fi
 echo "  $BUILD_DIR/$IPA_NAME"

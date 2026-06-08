@@ -1556,7 +1556,7 @@ namespace GSCapture
 {
 	bool BeginCapture(float fps, GSVector2i recommendedResolution, float aspect, std::string filename) { return false; }
 	bool DeliverVideoFrame(GSTexture* stex) { return false; }
-	void DeliverAudioPacket(const s16* frames) {}
+	void DeliverAudioPacket(const float* frames) {}
 	void EndCapture() {}
 
 	bool IsCapturing() { return false; }

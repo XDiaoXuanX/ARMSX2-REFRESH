@@ -24,6 +24,13 @@
 #include "common/FastJmp.h"
 #include "common/Pcsx2Defs.h"
 
+#if defined(__APPLE__)
+#include "common/Darwin/DarwinMisc.h"
+#include <TargetConditionals.h>
+#endif
+
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -89,6 +96,28 @@ static __fi uptr* recPtrToBlock(u32 pc)
 	return reinterpret_cast<uptr*>(recLUT[pc >> 16] + pc * (sizeof(uptr) / 4));
 }
 
+static __fi u32 recHWAddr(u32 pc)
+{
+	// Match the x86 recompiler's HWADDR() comparisons for RAM/BIOS mirrors. Fast
+	// Boot EELOAD and ELF-entry checks are stored as physical addresses.
+	const u32 ram_offset = pc & (Ps2MemSize::ExposedRam - 1);
+	const u32 ram_base = pc - ram_offset;
+	switch (ram_base)
+	{
+		case 0x00000000u:
+		case 0x20000000u:
+		case 0x30000000u:
+		case 0x80000000u:
+		case 0xa0000000u:
+		case 0xb0000000u:
+		case 0xc0000000u:
+		case 0xd0000000u:
+			return ram_offset;
+		default:
+			return pc;
+	}
+}
+
 // Hard cap on instructions per block, so straight-line code can't run the emit
 // cursor away before we get a chance to reset. (x86 uses page/branch boundaries;
 // this is a simpler bring-up bound.)
@@ -139,6 +168,32 @@ static void recEventTest();
 static void recClear(u32 addr, u32 size);
 static void dyna_block_discard(u32 start, u32 sz);
 static void dyna_page_reset(u32 start, u32 sz);
+
+static void recDumpCodeBytes(const char* label, const void* rx_ptr, size_t len)
+{
+	const size_t dump_len = std::min<size_t>(len, 32);
+	char rx_hex[65] = {};
+	char rw_hex[65] = {};
+	const u8* const rx = static_cast<const u8*>(rx_ptr);
+
+	for (size_t i = 0; i < dump_len; i++)
+		std::snprintf(&rx_hex[i * 2], sizeof(rx_hex) - (i * 2), "%02x", rx[i]);
+
+#if defined(__APPLE__)
+	const ptrdiff_t rw_offset = DarwinMisc::g_code_rw_offset;
+	const u8* const rw = rw_offset != 0 ? (rx + rw_offset) : rx;
+	for (size_t i = 0; i < dump_len; i++)
+		std::snprintf(&rw_hex[i * 2], sizeof(rw_hex) - (i * 2), "%02x", rw[i]);
+
+	std::fprintf(stderr,
+		"@@EE_REC_BYTES@@ label=%s rx=%p rw=%p len=%zu cmp=%d rx=%s rw=%s\n",
+		label, rx, rw, dump_len, std::memcmp(rx, rw, dump_len), rx_hex, rw_hex);
+#else
+	std::fprintf(stderr, "@@EE_REC_BYTES@@ label=%s rx=%p len=%zu rx=%s\n",
+		label, rx, dump_len, rx_hex);
+#endif
+	std::fflush(stderr);
+}
 
 // Associate one 64 KB guest page `pagebase+pageidx` with the slot array `mapbase`,
 // biased so recPtrToBlock(pc) lands at &mapbase[mappage<<14 + (pc&0xffff)/4]. Direct
@@ -249,6 +304,24 @@ static void recResetRaw()
 	recPtr = SysMemory::GetEERec();
 	s_const_pool.Reset();
 	recGenDispatchers();
+	static int s_reset_dump_count = 0;
+	if (s_reset_dump_count++ < 2)
+	{
+		std::fprintf(stderr,
+			"@@EE_REC_RESET@@ base=%p end=%p recPtr=%p dispatch=%p event=%p compile=%p enter=%p unmapped=%p rw_offset=%td\n",
+			SysMemory::GetEERec(), SysMemory::GetEERecEnd(), recPtr, DispatcherReg, DispatcherEvent,
+			JITCompile, EnterRecompiledCode, UnmappedRecLUTPage,
+#if defined(__APPLE__)
+			DarwinMisc::g_code_rw_offset
+#else
+			static_cast<ptrdiff_t>(0)
+#endif
+		);
+		std::fflush(stderr);
+		recDumpCodeBytes("dispatcher", DispatcherReg, 32);
+		recDumpCodeBytes("jitcompile", JITCompile, 32);
+		recDumpCodeBytes("enter", EnterRecompiledCode, 32);
+	}
 	recClearLUT();
 
 	// Drop all SMC manual-protection state — every block is being thrown away, so the
@@ -309,6 +382,248 @@ enum : u32
 
 // Defined below (block-compile helpers) — used by recTranslateOp's COP2 inline path.
 static void recEmitInterpInline(u32 op);
+
+#if defined(__APPLE__)
+static bool recIOSJITProfileWantsCOP1()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_ONLY ||
+		DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_LOADSTORE ||
+		DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MMI ||
+		DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_COP2_VU ||
+		DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MULTDIV ||
+		DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_SHIFTS ||
+		DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MOVES ||
+		DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_INTEGER_ALU ||
+		DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_BRANCHES;
+}
+
+static bool recIOSJITProfileWantsLoadStore()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_LOADSTORE != 0;
+}
+
+static bool recIOSJITProfileWantsMMI()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MMI != 0;
+}
+
+static bool recIOSJITProfileWantsCOP2VU()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_COP2_VU != 0;
+}
+
+static bool recIOSJITProfileWantsMultDiv()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MULTDIV != 0;
+}
+
+static bool recIOSJITProfileWantsShifts()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_SHIFTS != 0;
+}
+
+static bool recIOSJITProfileWantsMoves()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_MOVES != 0;
+}
+
+static bool recIOSJITProfileWantsIntegerALU()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_INTEGER_ALU != 0;
+}
+
+static bool recIOSJITProfileWantsBranches()
+{
+	return DarwinMisc::iPSX2_BISECT_COP1_EVERYTHING_PLUS_BRANCHES != 0;
+}
+
+static bool recIOSJITProfileIsLoadStore(u32 opcode)
+{
+	switch (opcode)
+	{
+		case OP_LQ:
+		case OP_SQ:
+		case OP_LB:
+		case OP_LH:
+		case OP_LW:
+		case OP_LBU:
+		case OP_LHU:
+		case OP_LWU:
+		case OP_SB:
+		case OP_SH:
+		case OP_SW:
+		case OP_LD:
+		case OP_SD:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool recIOSJITProfileIsSpecialShift(u32 funct)
+{
+	switch (funct)
+	{
+		case 0x00: // SLL
+		case 0x02: // SRL
+		case 0x03: // SRA
+		case 0x04: // SLLV
+		case 0x06: // SRLV
+		case 0x07: // SRAV
+		case 0x14: // DSLLV
+		case 0x16: // DSRLV
+		case 0x17: // DSRAV
+		case 0x38: // DSLL
+		case 0x3A: // DSRL
+		case 0x3B: // DSRA
+		case 0x3C: // DSLL32
+		case 0x3E: // DSRL32
+		case 0x3F: // DSRA32
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool recIOSJITProfileIsSpecialMove(u32 funct)
+{
+	switch (funct)
+	{
+		case 0x0A: // MOVZ
+		case 0x0B: // MOVN
+		case 0x10: // MFHI
+		case 0x11: // MTHI
+		case 0x12: // MFLO
+		case 0x13: // MTLO
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool recIOSJITProfileIsSpecialMultDiv(u32 funct)
+{
+	switch (funct)
+	{
+		case 0x18: // MULT
+		case 0x19: // MULTU
+		case 0x1A: // DIV
+		case 0x1B: // DIVU
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool recIOSJITProfileIsSpecialIntegerALU(u32 funct)
+{
+	switch (funct)
+	{
+		case 0x20: // ADD
+		case 0x21: // ADDU
+		case 0x22: // SUB
+		case 0x23: // SUBU
+		case 0x24: // AND
+		case 0x25: // OR
+		case 0x26: // XOR
+		case 0x27: // NOR
+		case 0x2A: // SLT
+		case 0x2B: // SLTU
+		case 0x2C: // DADD
+		case 0x2D: // DADDU
+		case 0x2E: // DSUB
+		case 0x2F: // DSUBU
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool recIOSJITProfileIsImmediateIntegerALU(u32 opcode)
+{
+	switch (opcode)
+	{
+		case 0x08: // ADDI
+		case 0x09: // ADDIU
+		case 0x0A: // SLTI
+		case 0x0B: // SLTIU
+		case 0x0C: // ANDI
+		case 0x0D: // ORI
+		case 0x0E: // XORI
+		case 0x0F: // LUI
+		case 0x18: // DADDI
+		case 0x19: // DADDIU
+			return true;
+		default:
+			return false;
+	}
+}
+
+static const char* recIOSJITProfileFallbackReason(u32 op)
+{
+	const u32 opcode = op >> 26;
+	const u32 funct = op & 0x3f;
+
+	if (recIOSJITProfileWantsCOP1() && (opcode == 0x11 || opcode == OP_LWC1 || opcode == OP_SWC1))
+		return "cop1";
+
+	if (recIOSJITProfileWantsCOP2VU() && (opcode == 0x12 || opcode == OP_LQC2 || opcode == OP_SQC2))
+		return "cop2vu";
+
+	if (recIOSJITProfileWantsMMI() && opcode == 0x1C)
+		return "mmi";
+
+	if (recIOSJITProfileWantsLoadStore() && recIOSJITProfileIsLoadStore(opcode))
+		return "loadstore";
+
+	if (recIOSJITProfileWantsMultDiv() &&
+		((opcode == 0x00 && recIOSJITProfileIsSpecialMultDiv(funct)) ||
+		 (opcode == 0x1C && recIOSJITProfileIsSpecialMultDiv(funct))))
+		return "multdiv";
+
+	if (recIOSJITProfileWantsShifts() &&
+		((opcode == 0x00 && recIOSJITProfileIsSpecialShift(funct)) ||
+		 (opcode == 0x1C && (funct == 0x34 || funct == 0x36 || funct == 0x37 || funct == 0x3C || funct == 0x3E || funct == 0x3F))))
+		return "shifts";
+
+	if (recIOSJITProfileWantsMoves() && opcode == 0x00 && recIOSJITProfileIsSpecialMove(funct))
+		return "moves";
+
+	if (recIOSJITProfileWantsIntegerALU() &&
+		((opcode == 0x00 && recIOSJITProfileIsSpecialIntegerALU(funct)) || recIOSJITProfileIsImmediateIntegerALU(opcode)))
+		return "integeralu";
+
+	return nullptr;
+}
+
+static bool recShouldIOSJITProfileFallback(u32 op)
+{
+	const char* reason = recIOSJITProfileFallbackReason(op);
+	if (!reason)
+		return false;
+
+	static int s_profile_fallback_log_count = 0;
+	if (s_profile_fallback_log_count < 48)
+	{
+		std::fprintf(stderr,
+			"@@IOS_JIT_PROFILE_FALLBACK@@ idx=%d pc=0x%08x op=0x%08x reason=%s cop1=%d ls=%d mmi=%d cop2vu=%d multdiv=%d shifts=%d moves=%d ialu=%d branches=%d\n",
+			s_profile_fallback_log_count, cpuRegs.pc, op, reason,
+			recIOSJITProfileWantsCOP1() ? 1 : 0,
+			recIOSJITProfileWantsLoadStore() ? 1 : 0,
+			recIOSJITProfileWantsMMI() ? 1 : 0,
+			recIOSJITProfileWantsCOP2VU() ? 1 : 0,
+			recIOSJITProfileWantsMultDiv() ? 1 : 0,
+			recIOSJITProfileWantsShifts() ? 1 : 0,
+			recIOSJITProfileWantsMoves() ? 1 : 0,
+			recIOSJITProfileWantsIntegerALU() ? 1 : 0,
+			recIOSJITProfileWantsBranches() ? 1 : 0);
+		std::fflush(stderr);
+		s_profile_fallback_log_count++;
+	}
+
+	return true;
+}
+#endif
 
 // Translate a single guest instruction (cpuRegs.code) into the open block. Returns
 // true if a real generator handled it, false if it fell through to a placeholder.
@@ -440,6 +755,11 @@ static bool recTranslateOp(u32 op)
 	const s32 imm = static_cast<s16>(op);
 
 	const u32 sa = (op >> 6) & 0x1f;
+
+#if defined(__APPLE__)
+	if (recShouldIOSJITProfileFallback(op))
+		return false;
+#endif
 
 	switch (opcode)
 	{
@@ -741,6 +1061,11 @@ static bool recEmitBranch(u32 op, u32 branchpc)
 // interpreter fallback.)
 static bool recIsHandledBranch(u32 op)
 {
+#if defined(__APPLE__)
+	if (recIOSJITProfileWantsBranches())
+		return false;
+#endif
+
 	const u32 opcode = op >> 26;
 	const u32 funct = op & 0x3f;
 	const u32 rs = (op >> 21) & 0x1f;
@@ -980,6 +1305,16 @@ static void recGenDispatchers()
 	armAsm->B(&dispatcher_reg);
 
 	recPtr = armEndBlock();
+
+	static int s_dispatcher_log_count = 0;
+	if (s_dispatcher_log_count++ < 2)
+	{
+		std::fprintf(stderr,
+			"@@EE_REC_DISPATCHERS@@ base=%p recPtr=%p dispatch=%p event=%p compile=%p enter=%p unmapped=%p discard=%p page_reset=%p\n",
+			SysMemory::GetEERec(), recPtr, DispatcherReg, DispatcherEvent, JITCompile,
+			EnterRecompiledCode, UnmappedRecLUTPage, DispatchBlockDiscard, DispatchPageReset);
+		std::fflush(stderr);
+	}
 }
 
 // Emit a block's tail: charge the block's scaled guest cycles, then the inline event
@@ -1019,17 +1354,101 @@ static void recEmitEventTestAndDispatch(u32 scaled_cycles, bool add_cycles)
 //     so the next dispatch resumes there.
 static void recRecompile(u32 startpc)
 {
+	static int s_recompile_log_count = 0;
+	int recompile_log_index = -1;
+	const u32 hw_startpc = recHWAddr(startpc);
+	if (s_recompile_log_count < 16)
+	{
+		recompile_log_index = s_recompile_log_count++;
+		const u32 op = memRead32(startpc);
+		uptr* const slot = recPtrToBlock(startpc);
+		std::fprintf(stderr,
+			"@@EE_REC_RECOMPILE_BEGIN@@ idx=%d pc=0x%08x op=0x%08x recPtr=%p recEnd=%p slot=%p slot_before=%p cycle=%lld next=%lld\n",
+			recompile_log_index, startpc, op, recPtr, recPtrEnd, slot,
+			reinterpret_cast<void*>(*slot), static_cast<long long>(cpuRegs.cycle),
+			static_cast<long long>(cpuRegs.nextEventCycle));
+		std::fflush(stderr);
+	}
+
 	// Reset the whole cache if the emit cursor has run within one block's worth of the
 	// constant-pool tail. Doing it here (before emitting) is safe: the dispatcher stubs
 	// regenerate byte-identically at the same addresses, so the JITCompile stub this
 	// call returns into is unchanged. Mirrors x86 recRecompile.
 	if (recPtr >= recPtrEnd - RECOMPILE_HEADROOM)
 		eeRecNeedsReset = true;
+
+	if (hw_startpc == VMManager::Internal::GetCurrentELFEntryPoint())
+	{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		std::fprintf(stderr,
+			"@@IOS_ELF_ENTRY_COMPILE@@ pc=0x%08x hw=0x%08x entry=0x%08x fastboot_in_progress=%d booted=%d\n",
+			startpc, hw_startpc, VMManager::Internal::GetCurrentELFEntryPoint(),
+			VMManager::Internal::IsFastBootInProgress() ? 1 : 0,
+			VMManager::Internal::HasBootedELF() ? 1 : 0);
+		std::fflush(stderr);
+#endif
+		VMManager::Internal::EntryPointCompilingOnCPUThread();
+	}
+
 	if (eeRecNeedsReset)
 		recResetRaw();
 
 	armSetAsmPtr(recPtr, recPtrEnd - recPtr, &s_const_pool);
 	u8* const entry = armStartBlock();
+
+	if (hw_startpc == EELOAD_START)
+	{
+		const u32 mainjump = memRead32(EELOAD_START + 0x9c);
+		if (mainjump >> 26 == 3) // JAL
+			g_eeloadMain = ((EELOAD_START + 0xa0) & 0xf0000000U) | ((mainjump << 2) & 0x0fffffffu);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		std::fprintf(stderr,
+			"@@IOS_FASTBOOT_HOOK@@ stage=eeload_start pc=0x%08x hw=0x%08x main=0x%08x fastboot_in_progress=%d\n",
+			startpc, hw_startpc, g_eeloadMain, VMManager::Internal::IsFastBootInProgress() ? 1 : 0);
+		std::fflush(stderr);
+#endif
+	}
+
+	if (g_eeloadMain && hw_startpc == recHWAddr(g_eeloadMain))
+	{
+		armEmitCall(reinterpret_cast<const void*>(eeloadHook));
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		std::fprintf(stderr,
+			"@@IOS_FASTBOOT_HOOK@@ stage=eeload_main pc=0x%08x hw=0x%08x main=0x%08x fastboot_in_progress=%d\n",
+			startpc, hw_startpc, g_eeloadMain, VMManager::Internal::IsFastBootInProgress() ? 1 : 0);
+		std::fflush(stderr);
+#endif
+		if (VMManager::Internal::IsFastBootInProgress())
+		{
+			const u32 typeAexecjump = memRead32(EELOAD_START + 0x470);
+			const u32 typeBexecjump = memRead32(EELOAD_START + 0x5b0);
+			const u32 typeCexecjump = memRead32(EELOAD_START + 0x618);
+			const u32 typeDexecjump = memRead32(EELOAD_START + 0x600);
+			if ((typeBexecjump >> 26 == 3) || (typeCexecjump >> 26 == 3) || (typeDexecjump >> 26 == 3))
+				g_eeloadExec = EELOAD_START + 0x2b8;
+			else if (typeAexecjump >> 26 == 3)
+				g_eeloadExec = EELOAD_START + 0x170;
+			else
+				Console.WriteLn("recRecompile: Could not enable launch arguments for fast boot mode; unidentified BIOS version! Please report this to the PCSX2 developers.");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			std::fprintf(stderr,
+				"@@IOS_FASTBOOT_HOOK@@ stage=eeload_exec_detect pc=0x%08x exec=0x%08x typeA=0x%08x typeB=0x%08x typeC=0x%08x typeD=0x%08x\n",
+				startpc, g_eeloadExec, typeAexecjump, typeBexecjump, typeCexecjump, typeDexecjump);
+			std::fflush(stderr);
+#endif
+		}
+	}
+
+	if (g_eeloadExec && hw_startpc == recHWAddr(g_eeloadExec))
+	{
+		armEmitCall(reinterpret_cast<const void*>(eeloadHook2));
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		std::fprintf(stderr,
+			"@@IOS_FASTBOOT_HOOK@@ stage=eeload_exec pc=0x%08x hw=0x%08x exec=0x%08x fastboot_in_progress=%d\n",
+			startpc, hw_startpc, g_eeloadExec, VMManager::Internal::IsFastBootInProgress() ? 1 : 0);
+		std::fflush(stderr);
+#endif
+	}
 
 	u32 pc = startpc;
 	u32 endpc = startpc;
@@ -1123,10 +1542,30 @@ static void recRecompile(u32 startpc)
 	// Install the block so subsequent dispatches to startpc (and its address mirrors)
 	// branch straight into it instead of recompiling.
 	*recPtrToBlock(startpc) = reinterpret_cast<uptr>(block_entry);
+	if (recompile_log_index >= 0)
+	{
+		std::fprintf(stderr,
+			"@@EE_REC_RECOMPILE_END@@ idx=%d pc=0x%08x endpc=0x%08x entry=%p block_entry=%p recPtr=%p compiled=%u interp=%d raw_cycles=%u slot_after=%p\n",
+			recompile_log_index, startpc, endpc, entry, block_entry, recPtr, compiled,
+			interp_step ? 1 : 0, raw_cycles, reinterpret_cast<void*>(*recPtrToBlock(startpc)));
+		std::fflush(stderr);
+		recDumpCodeBytes("block", block_entry, 32);
+	}
 }
 
 static void recEventTest()
 {
+	static int s_event_log_count = 0;
+	if (s_event_log_count < 16)
+	{
+		std::fprintf(stderr,
+			"@@EE_REC_EVENT@@ idx=%d pc=0x%08x cycle=%lld next=%lld state=%d exit_requested=%d\n",
+			s_event_log_count++, cpuRegs.pc, static_cast<long long>(cpuRegs.cycle),
+			static_cast<long long>(cpuRegs.nextEventCycle), static_cast<int>(VMManager::GetState()),
+			eeRecExitRequested ? 1 : 0);
+		std::fflush(stderr);
+	}
+
 	_cpuEventTest_Shared();
 
 	if (eeRecExitRequested)
@@ -1145,15 +1584,44 @@ static void recExecute()
 	if (eeRecNeedsReset || !EnterRecompiledCode)
 		recResetRaw();
 
+#if defined(__APPLE__)
+	DarwinMisc::LegacyEnsureExecutable();
+#endif
+
 	if (fastjmp_set(&s_jmp_buf) != 0)
 	{
 		eeRecExecuting = false;
+		std::fprintf(stderr, "@@EE_REC_EXEC_EXIT@@ pc=0x%08x cycle=%lld next=%lld state=%d\n",
+			cpuRegs.pc, static_cast<long long>(cpuRegs.cycle),
+			static_cast<long long>(cpuRegs.nextEventCycle), static_cast<int>(VMManager::GetState()));
+		std::fflush(stderr);
 		return;
+	}
+
+	static int s_exec_log_count = 0;
+	if (s_exec_log_count++ < 4)
+	{
+		std::fprintf(stderr,
+			"@@EE_REC_EXEC_ENTER@@ pc=0x%08x enter=%p dispatch=%p compile=%p recPtr=%p recEnd=%p jitBase=0x%llx jitEnd=0x%llx rw_offset=%td state=%d cycle=%lld next=%lld\n",
+			cpuRegs.pc, EnterRecompiledCode, DispatcherReg, JITCompile, recPtr, recPtrEnd,
+#if defined(__APPLE__)
+			static_cast<unsigned long long>(DarwinMisc::GetJitBase()),
+			static_cast<unsigned long long>(DarwinMisc::GetJitEnd()),
+			DarwinMisc::g_code_rw_offset,
+#else
+			0ull, 0ull, static_cast<ptrdiff_t>(0),
+#endif
+			static_cast<int>(VMManager::GetState()), static_cast<long long>(cpuRegs.cycle),
+			static_cast<long long>(cpuRegs.nextEventCycle));
+		std::fflush(stderr);
+		recDumpCodeBytes("exec_enter", EnterRecompiledCode, 32);
 	}
 
 	eeRecExecuting = true;
 	reinterpret_cast<void (*)()>(reinterpret_cast<uintptr_t>(EnterRecompiledCode))();
 	// EnterRecompiledCode never returns; the only way out is the fastjmp above.
+	std::fprintf(stderr, "@@EE_REC_EXEC_RETURN_UNEXPECTED@@ pc=0x%08x\n", cpuRegs.pc);
+	std::fflush(stderr);
 }
 
 static void recSafeExitExecution()

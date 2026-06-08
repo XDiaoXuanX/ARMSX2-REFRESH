@@ -52,6 +52,8 @@
 
 #include "fmt/format.h"
 
+#include <cerrno>
+#include <cstring>
 #include <fstream>
 
 Pcsx2Config::GSOptions GSConfig;
@@ -985,12 +987,75 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#include <mach/mach.h>
+#include <mach/vm_map.h>
+#endif
 
 static int s_shm_fd = -1;
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+static bool s_ios_mach_wrapped_memory = false;
+#endif
 
 void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 {
 	pxAssert(s_shm_fd == -1);
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	const size_t total_size = size * repeat;
+	std::fprintf(stderr, "@@GS_WRAP_IOS_BEGIN@@ size=%zu repeat=%zu total=%zu\n", size, repeat, total_size);
+
+	void* const reserved = mmap(nullptr, total_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (reserved == MAP_FAILED)
+	{
+		std::fprintf(stderr, "@@GS_WRAP_IOS_RESERVE_FAIL@@ total=%zu err=%d\n", total_size, errno);
+		return nullptr;
+	}
+
+	void* const first = mmap(reserved, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	if (first != reserved)
+	{
+		const int first_errno = errno;
+		std::fprintf(stderr, "@@GS_WRAP_IOS_FIRST_FAIL@@ base=%p size=%zu ptr=%p err=%d\n",
+			reserved, size, first, first_errno);
+		munmap(reserved, total_size);
+		return nullptr;
+	}
+
+	for (size_t i = 1; i < repeat; i++)
+	{
+		vm_address_t target_address = reinterpret_cast<vm_address_t>(static_cast<u8*>(reserved) + (size * i));
+		vm_prot_t cur_protection = VM_PROT_READ | VM_PROT_WRITE;
+		vm_prot_t max_protection = VM_PROT_READ | VM_PROT_WRITE;
+		const kern_return_t kr = vm_remap(
+			mach_task_self(),
+			&target_address,
+			static_cast<vm_size_t>(size),
+			0,
+			VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+			mach_task_self(),
+			reinterpret_cast<vm_address_t>(reserved),
+			false,
+			&cur_protection,
+			&max_protection,
+			VM_INHERIT_NONE);
+		const vm_address_t expected_address =
+			reinterpret_cast<vm_address_t>(static_cast<u8*>(reserved) + (size * i));
+		if (kr != KERN_SUCCESS || target_address != expected_address)
+		{
+			std::fprintf(stderr, "@@GS_WRAP_IOS_REMAP_FAIL@@ index=%zu kr=%d target=%p expected=%p source=%p\n",
+				i, kr, reinterpret_cast<void*>(target_address), reinterpret_cast<void*>(expected_address), reserved);
+			munmap(reserved, total_size);
+			return nullptr;
+		}
+	}
+
+	s_ios_mach_wrapped_memory = true;
+	std::fprintf(stderr, "@@GS_WRAP_IOS_OK@@ base=%p size=%zu repeat=%zu total=%zu\n",
+		reserved, size, repeat, total_size);
+	return reserved;
+#endif
 
 	const char* file_name = "/GS.mem";
 	s_shm_fd = shm_open(file_name, O_RDWR | O_CREAT | O_EXCL, 0600);
@@ -1022,6 +1087,17 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 
 void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	if (s_ios_mach_wrapped_memory)
+	{
+		std::fprintf(stderr, "@@GS_WRAP_IOS_FREE@@ base=%p size=%zu repeat=%zu total=%zu\n",
+			ptr, size, repeat, size * repeat);
+		munmap(ptr, size * repeat);
+		s_ios_mach_wrapped_memory = false;
+		return;
+	}
+#endif
+
 	pxAssert(s_shm_fd >= 0);
 
 	if (s_shm_fd < 0)

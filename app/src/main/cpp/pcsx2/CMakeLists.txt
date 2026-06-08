@@ -1169,6 +1169,12 @@ if(APPLE OR BSD)
 		${pcsx2LinuxHeaders})
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR iPSX2_MACOS_BUILD)
+	set(PNG_LINK "")
+else()
+	set(PNG_LINK PNG::PNG)
+endif()
+
 target_link_libraries(PCSX2_FLAGS INTERFACE
 	common
 	imgui
@@ -1186,7 +1192,7 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 	ZLIB::ZLIB
 	LZ4::LZ4
 	SoundTouch::SoundTouch
-	PNG::PNG
+	${PNG_LINK}
 	LZMA::LZMA
 	Zstd::Zstd
 	demanglegnu
@@ -1220,9 +1226,11 @@ if(WIN32)
 		OneCore.lib
 	)
 else()
-	target_link_libraries(PCSX2_FLAGS INTERFACE
-		PCAP::PCAP
-	)
+	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT iPSX2_MACOS_BUILD)
+		target_link_libraries(PCSX2_FLAGS INTERFACE
+			PCAP::PCAP
+		)
+	endif()
 endif()
 
 # additonal include directories
@@ -1271,20 +1279,28 @@ fixup_file_properties(PCSX2)
 force_include_last(PCSX2_FLAGS "/(usr|local)/include/?$")
 
 if (APPLE)
-	find_library(APPKIT_LIBRARY AppKit)
 	find_library(IOKIT_LIBRARY IOKit)
 	find_library(METAL_LIBRARY Metal)
 	find_library(QUARTZCORE_LIBRARY QuartzCore)
 	find_library(AVFOUNDATION_LIBRARY AVFoundation)
 	find_library(COREMEDIA_LIBRARY CoreMedia)
+	if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		find_library(UIKIT_LIBRARY UIKit)
+	else()
+		find_library(APPKIT_LIBRARY AppKit)
+	endif()
 	target_link_libraries(PCSX2_FLAGS INTERFACE
-		${APPKIT_LIBRARY}
 		${IOKIT_LIBRARY}
 		${METAL_LIBRARY}
 		${QUARTZCORE_LIBRARY}
 		${AVFOUNDATION_LIBRARY}
 		${COREMEDIA_LIBRARY}
 	)
+	if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+		target_link_libraries(PCSX2_FLAGS INTERFACE ${UIKIT_LIBRARY})
+	else()
+		target_link_libraries(PCSX2_FLAGS INTERFACE ${APPKIT_LIBRARY})
+	endif()
 endif()
 
 set_property(GLOBAL PROPERTY PCSX2_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})

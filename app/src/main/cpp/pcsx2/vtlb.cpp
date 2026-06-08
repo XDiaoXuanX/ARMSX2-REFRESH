@@ -2013,6 +2013,13 @@ bool vtlb_Core_Alloc()
 	vtlbdata.vmap = reinterpret_cast<VTLBVirtual*>(SysMemory::GetVTLBVirtualMap());
 
 	pxAssert(!s_fastmem_area);
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	Console.Warning("@@FASTMEM_SKIP@@ real iOS device: anonymous memory fallback forces fastmem OFF");
+	std::fprintf(stderr, "@@FASTMEM_SKIP@@ real_iOS_anonymous_memory_force_off\n");
+	std::fflush(stderr);
+	vtlbdata.fastmem_base = 0;
+	EmuConfig.Cpu.Recompiler.EnableFastmem = false;
+#else
 	s_fastmem_area = SharedMemoryMappingArea::Create(FASTMEM_AREA_SIZE);
 	if (!s_fastmem_area)
 	{
@@ -2051,9 +2058,10 @@ bool vtlb_Core_Alloc()
 		DevCon.WriteLn(Color_StrongGreen, "Fastmem area: %p - %p",
 			vtlbdata.fastmem_base, vtlbdata.fastmem_base + (FASTMEM_AREA_SIZE - 1));
 	}
+#endif
 
 	Error error;
-	if (!PageFaultHandler::Install_Fresh(&error))
+	if (!PageFaultHandler::Install(&error))
 	{
 		Host::ReportErrorAsync("Failed to install page fault handler.", error.GetDescription());
 		return false;

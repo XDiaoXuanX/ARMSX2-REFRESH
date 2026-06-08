@@ -29,6 +29,7 @@ final class SettingsStore: @unchecked Sendable {
     static let defaultTargetFPS: Float = 60.0
     static let textureOffsetRange = -4096...4096
     static let skipDrawRange = 0...5000
+    static let defaultOsdPerformancePosition = 3
 
     @ObservationIgnored private var suppressINIWrites = false
 
@@ -427,6 +428,11 @@ final class SettingsStore: @unchecked Sendable {
         }
     }
 
+    private static func loadedFastBoot() -> Bool {
+        let coreFastBoot = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableFastBoot", defaultValue: true)
+        return ARMSX2Bridge.getINIBool("GameISO", key: "FastBoot", defaultValue: coreFastBoot)
+    }
+
     // ── Init from INI ──
     private init() {
         // CPU
@@ -434,7 +440,7 @@ final class SettingsStore: @unchecked Sendable {
         iopRecompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableIOP", defaultValue: true)
         vu0Recompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableVU0", defaultValue: true)
         vu1Recompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableVU1", defaultValue: true)
-        fastBoot = ARMSX2Bridge.getINIBool("GameISO", key: "FastBoot", defaultValue: false)
+        fastBoot = Self.loadedFastBoot()
         fastmem = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableFastmem", defaultValue: true)
         let loadedNTSCFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FramerateNTSC", defaultValue: 59.94)
         ntscFramerate = loadedNTSCFramerate
@@ -504,7 +510,9 @@ final class SettingsStore: @unchecked Sendable {
         // OSD
         let loadedOsdPreset = OsdPreset(rawValue: Int(ARMSX2Bridge.getINIInt("ARMSX2iOS/UI", key: "OsdPreset", defaultValue: 0))) ?? .off
         osdPreset = loadedOsdPreset
-        osdPerformancePosition = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "OsdPerformancePos", defaultValue: 2))
+        osdPerformancePosition = Self.normalizedOsdPerformancePosition(
+            Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "OsdPerformancePos", defaultValue: Int32(Self.defaultOsdPerformancePosition)))
+        )
         osdShowFPS = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowFPS", defaultValue: false)
         osdShowVPS = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowVPS", defaultValue: false)
         osdShowSpeed = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowSpeed", defaultValue: false)
@@ -537,6 +545,7 @@ final class SettingsStore: @unchecked Sendable {
         dev9InterceptDHCP = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "InterceptDHCP", defaultValue: false)
         dev9EthLogDHCP = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthLogDHCP", defaultValue: false)
         dev9EthLogDNS = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthLogDNS", defaultValue: false)
+        normalizeDEV9Settings()
         ARMSX2Bridge.setINIString("EmuCore/GS", key: "AspectRatio", value: Self.aspectRatioName(for: aspectRatio))
         // Apply OSD preset
         ARMSX2Bridge.applyOsdPreset(Int32(osdPreset.rawValue))
@@ -551,7 +560,7 @@ final class SettingsStore: @unchecked Sendable {
         iopRecompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableIOP", defaultValue: true)
         vu0Recompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableVU0", defaultValue: true)
         vu1Recompiler = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableVU1", defaultValue: true)
-        fastBoot = ARMSX2Bridge.getINIBool("GameISO", key: "FastBoot", defaultValue: false)
+        fastBoot = Self.loadedFastBoot()
         fastmem = ARMSX2Bridge.getINIBool("EmuCore/CPU/Recompiler", key: "EnableFastmem", defaultValue: true)
         ntscFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FramerateNTSC", defaultValue: 59.94)
         palFramerate = ARMSX2Bridge.getINIFloat("EmuCore/GS", key: "FrameratePAL", defaultValue: 50.0)
@@ -614,7 +623,9 @@ final class SettingsStore: @unchecked Sendable {
         dumpDirectTextures = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "DumpDirectTextures", defaultValue: true)
         dumpPaletteTextures = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "DumpPaletteTextures", defaultValue: true)
         osdPreset = OsdPreset(rawValue: Int(ARMSX2Bridge.getINIInt("ARMSX2iOS/UI", key: "OsdPreset", defaultValue: 0))) ?? .off
-        osdPerformancePosition = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "OsdPerformancePos", defaultValue: 2))
+        osdPerformancePosition = Self.normalizedOsdPerformancePosition(
+            Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "OsdPerformancePos", defaultValue: Int32(Self.defaultOsdPerformancePosition)))
+        )
         osdShowFPS = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowFPS", defaultValue: false)
         osdShowVPS = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowVPS", defaultValue: false)
         osdShowSpeed = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "OsdShowSpeed", defaultValue: false)
@@ -646,6 +657,7 @@ final class SettingsStore: @unchecked Sendable {
         dev9InterceptDHCP = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "InterceptDHCP", defaultValue: false)
         dev9EthLogDHCP = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthLogDHCP", defaultValue: false)
         dev9EthLogDNS = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthLogDNS", defaultValue: false)
+        normalizeDEV9Settings()
     }
 
     private static func frameLimiterEnabled(fromNominalScalar scalar: Float) -> Bool {
@@ -694,12 +706,34 @@ final class SettingsStore: @unchecked Sendable {
         ARMSX2Bridge.setINIFloat("Framerate", key: "NominalScalar", value: sanitized)
     }
 
+    private static func normalizedOsdPerformancePosition(_ value: Int) -> Int {
+        switch value {
+        case 0, 1, 3:
+            return value
+        case 2:
+            return defaultOsdPerformancePosition
+        default:
+            return defaultOsdPerformancePosition
+        }
+    }
+
     private func applyFrameLimiterSettings() {
         guard !suppressINIWrites else { return }
         let scalar: Float = frameLimiterEnabled ? Self.sanitizedNominalScalar(targetFPS / max(ntscFramerate, 1.0)) : 10.0
         NSLog("[ARMSX2 iOS Settings] Frame limiter %@ targetFPS=%.0f NominalScalar=%.3f",
               frameLimiterEnabled ? "ON" : "OFF", targetFPS, scalar)
         ARMSX2Bridge.setINIFloat("Framerate", key: "NominalScalar", value: scalar)
+    }
+
+    private func normalizeDEV9Settings() {
+        if dev9HddEnabled {
+            ARMSX2Bridge.setINIString("DEV9/Hdd", key: "HddFile", value: dev9HddFile.isEmpty ? "DEV9hdd.raw" : dev9HddFile)
+        }
+
+        if dev9EthernetEnabled {
+            ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthApi", value: "Sockets")
+            ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthDevice", value: dev9EthDevice.isEmpty ? "Auto" : dev9EthDevice)
+        }
     }
 
     private static func supportedIOSRenderer(_ value: Int) -> Int {
@@ -725,7 +759,7 @@ final class SettingsStore: @unchecked Sendable {
         if preset == .off {
             osdPerformancePosition = 0
         } else if osdPerformancePosition == 0 {
-            osdPerformancePosition = 2
+            osdPerformancePosition = Self.defaultOsdPerformancePosition
         }
         let isSimple = preset == .simple
         let isDetail = preset == .detail
@@ -741,7 +775,7 @@ final class SettingsStore: @unchecked Sendable {
         osdShowSettings = isFull
         osdShowInputs = isFull
         osdShowFrameTimes = isFull
-        osdShowVersion = isFull
+        osdShowVersion = isSimple || isDetail || isFull
         osdShowHardwareInfo = isFull
         osdShowDeviceStats = isSimple || isDetail || isFull
     }

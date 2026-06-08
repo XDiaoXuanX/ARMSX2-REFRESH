@@ -927,9 +927,10 @@ struct Pcsx2Config
 		int VideoCaptureHeight = DEFAULT_VIDEO_CAPTURE_HEIGHT;
 		int AudioCaptureBitrate = DEFAULT_AUDIO_CAPTURE_BITRATE;
 
-		std::string Adapter;
-		std::string HWDumpDirectory;
-		std::string SWDumpDirectory;
+			std::string Adapter;
+			std::string CustomDriverPath;
+			std::string HWDumpDirectory;
+			std::string SWDumpDirectory;
 
 		GSOptions();
 

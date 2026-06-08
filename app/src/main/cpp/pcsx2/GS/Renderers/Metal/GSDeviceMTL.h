@@ -17,7 +17,16 @@
 #include "GS/GS.h"
 #include "GSMTLDeviceInfo.h"
 #include "GSMTLSharedHeader.h"
+#include <TargetConditionals.h>
+#if defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
+#define PCSX2_MTL_USES_UIVIEW 1
+#include <UIKit/UIKit.h>
+using GSMTLView = UIView;
+#else
+#define PCSX2_MTL_USES_UIVIEW 0
 #include <AppKit/AppKit.h>
+using GSMTLView = NSView;
+#endif
 #include <Metal/Metal.h>
 #include <QuartzCore/QuartzCore.h>
 #include <atomic>
@@ -224,7 +233,7 @@ public:
 	MTLResourceOptions m_resource_options_shared_wc;
 
 	// Previously in MetalHostDisplay.
-	MRCOwned<NSView*> m_view;
+	MRCOwned<GSMTLView*> m_view;
 	MRCOwned<CAMetalLayer*> m_layer;
 	MRCOwned<id<CAMetalDrawable>> m_current_drawable;
 	MRCOwned<MTLRenderPassDescriptor*> m_pass_desc;

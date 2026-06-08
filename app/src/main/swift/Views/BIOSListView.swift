@@ -37,14 +37,18 @@ struct BIOSListView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
-                            NSLog("[ARMSX2 iOS BIOS] opening primary BIOS picker")
-                            showBIOSImporter = true
+                            presentMenuPanel("bios_import") {
+                                NSLog("[ARMSX2 iOS BIOS] opening primary BIOS picker")
+                                showBIOSImporter = true
+                            }
                         } label: {
                             Label(settings.localized("Import BIOS"), systemImage: "doc.badge.plus")
                         }
                         Button {
-                            NSLog("[ARMSX2 iOS BIOS] opening compatibility BIOS picker")
-                            showBIOSCompatibilityImporter = true
+                            presentMenuPanel("bios_compatibility_import") {
+                                NSLog("[ARMSX2 iOS BIOS] opening compatibility BIOS picker")
+                                showBIOSCompatibilityImporter = true
+                            }
                         } label: {
                             Label(settings.localized("Compatibility Picker"), systemImage: "folder.badge.plus")
                         }
@@ -91,6 +95,13 @@ struct BIOSListView: View {
             }
         }
         .onAppear { loadBIOSes() }
+    }
+
+    private func presentMenuPanel(_ name: String, _ action: @escaping () -> Void) {
+        NSLog("[ARMSX2 iOS BIOSMenu] present \(name)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            action()
+        }
     }
 
     private func biosRow(_ bios: ARMSX2BIOSInfo) -> some View {

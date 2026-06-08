@@ -181,6 +181,7 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 + (void)ejectDiscWithCompletion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(ejectDisc(completion:));
 
 // [P44] ISO boot
++ (BOOL)canResolveISO:(nonnull NSString *)isoName NS_SWIFT_NAME(canResolveISO(_:));
 + (void)bootISO:(nonnull NSString *)isoName;
 
 // [P44] BIOS management

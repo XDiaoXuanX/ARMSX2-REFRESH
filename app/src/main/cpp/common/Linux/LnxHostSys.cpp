@@ -11,10 +11,15 @@
 #include <cstdio>
 #include <csignal>
 #include <cerrno>
+#include <cstdlib>
 #include <fcntl.h>
 #include <mutex>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <libkern/OSCacheControl.h>
+#include <TargetConditionals.h>
+#endif
 #ifndef __APPLE__
 #include <ucontext.h>
 #endif
@@ -23,6 +28,15 @@
 
 #if defined(__FreeBSD__)
 #include "cpuinfo.h"
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+static constexpr intptr_t IOS_SHARED_MEMORY_DUMMY_HANDLE = static_cast<intptr_t>(0xDEADBEEF);
+
+static bool IsIOSSharedMemoryDummyHandle(void* ptr)
+{
+	return reinterpret_cast<intptr_t>(ptr) == IOS_SHARED_MEMORY_DUMMY_HANDLE;
+}
 #endif
 
 static __ri uint LinuxProt(const PageProtectionMode& mode)
@@ -66,7 +80,13 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
 	const int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
 	if (fd < 0)
 	{
-		std::fprintf(stderr, "shm_open failed: %d\n", errno);
+		const int shm_errno = errno;
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+		std::fprintf(stderr, "@@IOS_SHM_FALLBACK@@ shm_open_errno=%d using anonymous MAP_FIXED backing for %zu bytes\n",
+			shm_errno, size);
+		return reinterpret_cast<void*>(IOS_SHARED_MEMORY_DUMMY_HANDLE);
+#endif
+		std::fprintf(stderr, "shm_open failed: %d\n", shm_errno);
 		return nullptr;
 	}
 
@@ -77,6 +97,7 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
 	if (ftruncate(fd, static_cast<off_t>(size)) < 0)
 	{
 		std::fprintf(stderr, "ftruncate(%zu) failed: %d\n", size, errno);
+		close(fd);
 		return nullptr;
 	}
 
@@ -85,6 +106,10 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
 
 void HostSys::DestroySharedMemory(void* ptr)
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+	if (IsIOSSharedMemoryDummyHandle(ptr))
+		return;
+#endif
 	close(static_cast<int>(reinterpret_cast<intptr_t>(ptr)));
 }
 
@@ -158,13 +183,29 @@ std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t 
 	pxAssertRel(Common::IsAlignedPow2(size, __pagesize), "Size is page aligned");
 
 	uint flags = MAP_ANONYMOUS | MAP_PRIVATE;
+	uint prot = PROT_NONE;
 #ifdef __APPLE__
-	if (jit)
+	if (jit) {
 		flags |= MAP_JIT;
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+		// iOS rejects PROT_NONE MAP_JIT reservations on the LiveContainer/JIT path.
+		// Code memory must be born as an actual JIT mapping; callers can mprotect it
+		// afterward, but we never fall back to a non-MAP_JIT executable region.
+		prot = PROT_READ | PROT_WRITE | PROT_EXEC;
 #endif
-	void* alloc = mmap(nullptr, size, PROT_NONE, flags, -1, 0);
+	}
+#endif
+	void* alloc = mmap(nullptr, size, prot, flags, -1, 0);
 	if (alloc == MAP_FAILED)
+	{
+		const int map_jit_errno = errno;
+		std::fprintf(stderr, "@@SMA_CREATE_FAIL@@ size=%zu jit=%d flags=0x%x prot=0x%x err=%d\n",
+			size, static_cast<int>(jit), flags, prot, map_jit_errno);
 		return nullptr;
+	}
+
+	std::fprintf(stderr, "@@SMA_CREATE_OK@@ base=%p size=%zu jit=%d flags=0x%x prot=0x%x\n",
+		alloc, size, static_cast<int>(jit), flags, prot);
 
 	return std::unique_ptr<SharedMemoryMappingArea>(new SharedMemoryMappingArea(static_cast<u8*>(alloc), size, size / __pagesize));
 }
@@ -174,13 +215,36 @@ u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* ma
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
 
 	const uint lnxmode = LinuxProt(mode);
+	std::fprintf(stderr, "@@SMA_MAP_BEGIN@@ file=%d offset=%zu base=%p size=%zu prot=0x%x\n",
+		file_handle ? 1 : 0, file_offset, map_base, map_size, lnxmode);
 	if (file_handle)
 	{
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+		if (IsIOSSharedMemoryDummyHandle(file_handle))
+		{
+			void* const ptr = mmap(map_base, map_size, lnxmode, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+			if (ptr == MAP_FAILED)
+			{
+				std::fprintf(stderr, "@@IOS_SHM_MAP_FAIL@@ offset=%zu base=%p size=%zu prot=0x%x err=%d\n",
+					file_offset, map_base, map_size, lnxmode, errno);
+				return nullptr;
+			}
+
+			m_num_mappings++;
+			std::fprintf(stderr, "@@IOS_SHM_MAP_OK@@ ptr=%p offset=%zu size=%zu prot=0x%x mappings=%zu\n",
+				ptr, file_offset, map_size, lnxmode, m_num_mappings);
+			return static_cast<u8*>(ptr);
+		}
+#endif
 		const int fd = static_cast<int>(reinterpret_cast<intptr_t>(file_handle));
 		// MAP_FIXED is okay here, since we've reserved the entire region, and *want* to overwrite the mapping.
 		void* const ptr = mmap(map_base, map_size, lnxmode, MAP_SHARED | MAP_FIXED, fd, static_cast<off_t>(file_offset));
 		if (ptr == MAP_FAILED)
+		{
+			std::fprintf(stderr, "@@SMA_MAP_FAIL@@ file=1 offset=%zu base=%p size=%zu prot=0x%x err=%d\n",
+				file_offset, map_base, map_size, lnxmode, errno);
 			return nullptr;
+		}
 	}
 	else
 	{
@@ -188,10 +252,17 @@ u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* ma
 		// So we do the MAP_JIT in the allocation, and just mprotect here
 		// Note that this will only work the first time for a given region
 		if (mprotect(map_base, map_size, lnxmode) < 0)
+		{
+			const int mprotect_errno = errno;
+			std::fprintf(stderr, "@@SMA_MAP_FAIL@@ file=0 offset=%zu base=%p size=%zu prot=0x%x err=%d\n",
+				file_offset, map_base, map_size, lnxmode, mprotect_errno);
 			return nullptr;
+		}
 	}
 
 	m_num_mappings++;
+	std::fprintf(stderr, "@@SMA_MAP_OK@@ file=%d base=%p size=%zu prot=0x%x mappings=%zu\n",
+		file_handle ? 1 : 0, map_base, map_size, lnxmode, m_num_mappings);
 	return static_cast<u8*>(map_base);
 }
 
@@ -210,7 +281,11 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size, bool is_fil
 
 void HostSys::FlushInstructionCache(void* address, u32 size)
 {
+#ifdef __APPLE__
+	sys_icache_invalidate(address, size);
+#else
 	__builtin___clear_cache(reinterpret_cast<char*>(address), reinterpret_cast<char*>(address) + size);
+#endif
 }
 
 #endif

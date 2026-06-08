@@ -21,6 +21,7 @@
 #include "fmt/format.h"
 #include "fmt/ranges.h"
 #include <fstream>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 
@@ -688,8 +689,8 @@ static void LogIOSGameFixSnapshot(
 	Console.WriteLn("@@IOS_GAMEFIX_SNAPSHOT@@ stage=%s game=\"%s\" region=\"%s\" compat=\"%s\" renderer=%s gamedb_entries=%zu",
 		stage, entry.name.c_str(), entry.region.c_str(), entry.compatAsString(),
 		Pcsx2Config::GSOptions::GetRendererName(gs_config.Renderer), GameDatabase::entryCount());
-	Console.WriteLn("@@IOS_GAMEFIX_CPU@@ CoreType=%d UseArm64Dynarec=%d EE=%s IOP=%s VU0=%s VU1=%s Fastmem=%s EECache=%s EERound=%u EEDivRound=%u VU0Round=%u VU1Round=%u EEClamp=%u VUClamp=%u",
-		EmuConfig.Cpu.CoreType, use_arm64_dynarec, IOSBool(EmuConfig.Cpu.Recompiler.EnableEE),
+	Console.WriteLn("@@IOS_GAMEFIX_CPU@@ UseArm64Dynarec=%d EE=%s IOP=%s VU0=%s VU1=%s Fastmem=%s EECache=%s EERound=%u EEDivRound=%u VU0Round=%u VU1Round=%u EEClamp=%u VUClamp=%u",
+		use_arm64_dynarec, IOSBool(EmuConfig.Cpu.Recompiler.EnableEE),
 		IOSBool(EmuConfig.Cpu.Recompiler.EnableIOP), IOSBool(EmuConfig.Cpu.Recompiler.EnableVU0),
 		IOSBool(EmuConfig.Cpu.Recompiler.EnableVU1), IOSBool(EmuConfig.Cpu.Recompiler.EnableFastmem),
 		IOSBool(EmuConfig.Cpu.Recompiler.EnableEECache), static_cast<unsigned>(EmuConfig.Cpu.FPUFPCR.GetRoundMode()),
@@ -718,6 +719,28 @@ static void LogIOSGameFixSnapshot(
 	Console.WriteLn("@@IOS_GAMEDB_REQUESTS@@ gamefixes=\"%s\" speedhacks=\"%s\" gs_hw=\"%s\" patches=%zu dyna_patches=%zu",
 		FormatIOSGameFixList(entry).c_str(), FormatIOSSpeedHackList(entry).c_str(),
 		FormatIOSGSHWFixList(entry).c_str(), entry.patches.size(), entry.dynaPatches.size());
+
+	const std::string gamefixes = FormatIOSGameFixList(entry);
+	const std::string speedhacks = FormatIOSSpeedHackList(entry);
+	const std::string gs_hw_fixes = FormatIOSGSHWFixList(entry);
+	std::fprintf(stderr,
+		"@@IOS_GAMEFIX_SNAPSHOT_STDERR@@ stage=%s game=\"%s\" region=\"%s\" compat=\"%s\" renderer=%s gamedb_entries=%zu enableGameFixes=%d manualUserHacks=%d upscale=%.2f\n",
+		stage, entry.name.c_str(), entry.region.c_str(), entry.compatAsString(),
+		Pcsx2Config::GSOptions::GetRendererName(gs_config.Renderer), GameDatabase::entryCount(),
+		EmuConfig.EnableGameFixes ? 1 : 0, gs_config.ManualUserHacks ? 1 : 0, gs_config.UpscaleMultiplier);
+	std::fprintf(stderr,
+		"@@IOS_GAMEFIX_GS_STDERR@@ autoFlush=%d textureInsideRT=%d halfPixelOffset=%d nativeScaling=%d alignSprite=%d cpuSpriteBW=%u cpuSpriteLevel=%u cpuCLUT=%u gpuTargetCLUT=%d skipStart=%d skipEnd=%d getSkipCount=%d beforeDraw=%d moveHandler=%d\n",
+		static_cast<int>(gs_config.UserHacks_AutoFlush), static_cast<int>(gs_config.UserHacks_TextureInsideRt),
+		static_cast<int>(gs_config.UserHacks_HalfPixelOffset), static_cast<int>(gs_config.UserHacks_NativeScaling),
+		gs_config.UserHacks_AlignSpriteX ? 1 : 0, static_cast<unsigned>(gs_config.UserHacks_CPUSpriteRenderBW),
+		static_cast<unsigned>(gs_config.UserHacks_CPUSpriteRenderLevel), static_cast<unsigned>(gs_config.UserHacks_CPUCLUTRender),
+		static_cast<int>(gs_config.UserHacks_GPUTargetCLUTMode), gs_config.SkipDrawStart, gs_config.SkipDrawEnd,
+		static_cast<int>(gs_config.GetSkipCountFunctionId), static_cast<int>(gs_config.BeforeDrawFunctionId),
+		static_cast<int>(gs_config.MoveHandlerFunctionId));
+	std::fprintf(stderr,
+		"@@IOS_GAMEDB_REQUESTS_STDERR@@ gamefixes=\"%s\" speedhacks=\"%s\" gs_hw=\"%s\" patches=%zu dyna_patches=%zu\n",
+		gamefixes.c_str(), speedhacks.c_str(), gs_hw_fixes.c_str(), entry.patches.size(), entry.dynaPatches.size());
+	std::fflush(stderr);
 }
 #endif
 
