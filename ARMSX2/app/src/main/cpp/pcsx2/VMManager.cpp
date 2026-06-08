@@ -46,8 +46,9 @@
 #include "VMManager.h"
 #if defined(__aarch64__) || defined(_M_ARM64)
 #include "arm64/arm64Emitter.h"
-#include "arm64/iVU0micro_arm64.h"
-#include "arm64/microVU_arm/microVU.h"
+#include "arm64/aVU0.h"
+#include "arm64/aVU.h"
+#include "arm64/mac/MacBackend.h"
 #endif
 #include "ps2/BiosTools.h"
 
@@ -2709,6 +2710,11 @@ void VMManager::InitializeCPUProviders()
 #ifndef INTERP_VU1
 	CpuArmVU1.Reserve();
 #endif
+	// Reserve the macOS-port backends too; UpdateCPUImplementations picks per-CPU.
+	pcsx2_macrec::recCpu.Reserve();
+	pcsx2_macrec::psxRec.Reserve();
+	pcsx2_macrec::CpuMicroVU0.Reserve();
+	pcsx2_macrec::CpuMicroVU1.Reserve();
 	// Despite not having MTVU on ARM64, we still need the thread alive.
 	// Otherwise the read and write positions of the ring buffer wont match,
 	// and various systems in the emulator end up deadlocked.
@@ -2741,6 +2747,10 @@ void VMManager::ShutdownCPUProviders()
 #ifndef INTERP_EE
 	recCpu.Shutdown();
 #endif
+	pcsx2_macrec::CpuMicroVU1.Shutdown();
+	pcsx2_macrec::CpuMicroVU0.Shutdown();
+	pcsx2_macrec::psxRec.Shutdown();
+	pcsx2_macrec::recCpu.Shutdown();
 	if (vu1Thread.IsOpen())
 		vu1Thread.WaitVU();
 #else
@@ -2771,29 +2781,37 @@ void VMManager::UpdateCPUImplementations()
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 #elif defined(__aarch64__) || defined(_M_ARM64)
+	// Per-CPU A/B between the original arm64 backend and the macOS-port backend
+	// (namespaced as pcsx2_macrec). UseMac* flags live in EmuConfig.Cpu.Recompiler.
 #ifdef INTERP_EE
 	Cpu = &intCpu;
 #else
-	Cpu = CHECK_EEREC ? &recCpu : &intCpu;
+	R5900cpu* eeRec = EmuConfig.Cpu.Recompiler.UseMacEE ? &pcsx2_macrec::recCpu : &recCpu;
+	Cpu = CHECK_EEREC ? eeRec : &intCpu;
 #endif
 #ifdef INTERP_VU0
 	CpuVU0 = static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 #else
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0
-		? static_cast<BaseVUmicroCPU*>(&CpuArmVU0)
+		? (EmuConfig.Cpu.Recompiler.UseMacVU0
+			? static_cast<BaseVUmicroCPU*>(&pcsx2_macrec::CpuMicroVU0)
+			: static_cast<BaseVUmicroCPU*>(&CpuArmVU0))
 		: static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 #endif
 #ifdef INTERP_VU1
 	CpuVU1 = static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 #else
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1
-		? static_cast<BaseVUmicroCPU*>(&CpuArmVU1)
+		? (EmuConfig.Cpu.Recompiler.UseMacVU1
+			? static_cast<BaseVUmicroCPU*>(&pcsx2_macrec::CpuMicroVU1)
+			: static_cast<BaseVUmicroCPU*>(&CpuArmVU1))
 		: static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 #endif
 #ifdef INTERP_IOP
 	psxCpu = &psxInt;
 #else
-	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+	R3000Acpu* iopRec = EmuConfig.Cpu.Recompiler.UseMacIOP ? &pcsx2_macrec::psxRec : &psxRec;
+	psxCpu = CHECK_IOPREC ? iopRec : &psxInt;
 #endif
 #else
 	Cpu = &intCpu;

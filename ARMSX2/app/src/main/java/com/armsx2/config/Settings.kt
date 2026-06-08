@@ -72,6 +72,20 @@ data class Settings(
      *  path on every memory op. */
     val enableFastmem: Boolean = true,
 
+    // ---- macOS-port arm64 backend A/B toggles ----
+    // Per-CPU switch between our original arm64 backend (default) and the
+    // namespaced macOS-port backend (pcsx2_macrec). VMManager picks at VM
+    // init; flipping requires a VM restart. Bisect a mac regression by
+    // flipping individual CPUs to original.
+    /** EmuCore/CPU/Recompiler/UseMacEE — mac arm64 EE recompiler. */
+    val useMacEE: Boolean = false,
+    /** EmuCore/CPU/Recompiler/UseMacIOP — mac arm64 IOP recompiler. */
+    val useMacIOP: Boolean = false,
+    /** EmuCore/CPU/Recompiler/UseMacVU0 — mac arm64 VU0 recompiler. */
+    val useMacVU0: Boolean = false,
+    /** EmuCore/CPU/Recompiler/UseMacVU1 — mac arm64 VU1 recompiler. */
+    val useMacVU1: Boolean = false,
+
     // ---- EmuCore/GS — renderer accuracy / quality ----
     /** EmuCore/GS/hw_mipmap. */
     val hwMipmap: Boolean = true,
@@ -130,6 +144,10 @@ data class Settings(
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableVU0", "bool", recVU0.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableVU1", "bool", recVU1.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableFastmem", "bool", enableFastmem.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacEE", "bool", useMacEE.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacIOP", "bool", useMacIOP.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacVU0", "bool", useMacVU0.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacVU1", "bool", useMacVU1.toString())
         // GS renderer
         NativeApp.setSetting("EmuCore/GS", "hw_mipmap", "bool", hwMipmap.toString())
         NativeApp.setSetting("EmuCore/GS", "accurate_blending_unit", "int", accurateBlendingUnit.toString())
@@ -167,6 +185,10 @@ data class Settings(
         put("recVU0", recVU0)
         put("recVU1", recVU1)
         put("enableFastmem", enableFastmem)
+        put("useMacEE", useMacEE)
+        put("useMacIOP", useMacIOP)
+        put("useMacVU0", useMacVU0)
+        put("useMacVU1", useMacVU1)
         put("hwMipmap", hwMipmap)
         put("accurateBlendingUnit", accurateBlendingUnit)
         put("textureFiltering", textureFiltering)
@@ -201,6 +223,10 @@ data class Settings(
                 recVU0 = json.optBoolean("recVU0", def.recVU0),
                 recVU1 = json.optBoolean("recVU1", def.recVU1),
                 enableFastmem = json.optBoolean("enableFastmem", def.enableFastmem),
+                useMacEE = json.optBoolean("useMacEE", def.useMacEE),
+                useMacIOP = json.optBoolean("useMacIOP", def.useMacIOP),
+                useMacVU0 = json.optBoolean("useMacVU0", def.useMacVU0),
+                useMacVU1 = json.optBoolean("useMacVU1", def.useMacVU1),
                 hwMipmap = json.optBoolean("hwMipmap", def.hwMipmap),
                 accurateBlendingUnit = json.optInt("accurateBlendingUnit", def.accurateBlendingUnit),
                 textureFiltering = json.optInt("textureFiltering", def.textureFiltering),
@@ -241,6 +267,10 @@ data class Settings(
             if (current.recVU0              != base.recVU0)              j.put("recVU0", current.recVU0)
             if (current.recVU1              != base.recVU1)              j.put("recVU1", current.recVU1)
             if (current.enableFastmem       != base.enableFastmem)       j.put("enableFastmem", current.enableFastmem)
+            if (current.useMacEE            != base.useMacEE)            j.put("useMacEE", current.useMacEE)
+            if (current.useMacIOP           != base.useMacIOP)           j.put("useMacIOP", current.useMacIOP)
+            if (current.useMacVU0           != base.useMacVU0)           j.put("useMacVU0", current.useMacVU0)
+            if (current.useMacVU1           != base.useMacVU1)           j.put("useMacVU1", current.useMacVU1)
             if (current.hwMipmap            != base.hwMipmap)            j.put("hwMipmap", current.hwMipmap)
             if (current.accurateBlendingUnit!= base.accurateBlendingUnit)j.put("accurateBlendingUnit", current.accurateBlendingUnit)
             if (current.textureFiltering    != base.textureFiltering)    j.put("textureFiltering", current.textureFiltering)
@@ -271,6 +301,10 @@ data class Settings(
             recVU0 = if (overrides.has("recVU0")) overrides.getBoolean("recVU0") else base.recVU0,
             recVU1 = if (overrides.has("recVU1")) overrides.getBoolean("recVU1") else base.recVU1,
             enableFastmem = if (overrides.has("enableFastmem")) overrides.getBoolean("enableFastmem") else base.enableFastmem,
+            useMacEE = if (overrides.has("useMacEE")) overrides.getBoolean("useMacEE") else base.useMacEE,
+            useMacIOP = if (overrides.has("useMacIOP")) overrides.getBoolean("useMacIOP") else base.useMacIOP,
+            useMacVU0 = if (overrides.has("useMacVU0")) overrides.getBoolean("useMacVU0") else base.useMacVU0,
+            useMacVU1 = if (overrides.has("useMacVU1")) overrides.getBoolean("useMacVU1") else base.useMacVU1,
             hwMipmap = if (overrides.has("hwMipmap")) overrides.getBoolean("hwMipmap") else base.hwMipmap,
             accurateBlendingUnit = if (overrides.has("accurateBlendingUnit")) overrides.getInt("accurateBlendingUnit") else base.accurateBlendingUnit,
             textureFiltering = if (overrides.has("textureFiltering")) overrides.getInt("textureFiltering") else base.textureFiltering,

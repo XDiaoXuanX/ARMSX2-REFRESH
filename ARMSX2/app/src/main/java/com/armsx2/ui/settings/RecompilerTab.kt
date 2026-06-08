@@ -49,9 +49,10 @@ fun RecompilerTab(state: MutableState<Settings>) {
             modifier = Modifier.padding(bottom = 8.dp),
         )
         // 4-wide toggle grid, matching the Playing-Now + Performance look.
-        // Row 1 groups the four CPU/COP recompilers; Row 2 holds Fastmem
-        // with three trailing spacers so cell widths stay uniform across
-        // both rows.
+        // Row 1: the four CPU/COP recompilers (original-vs-interpreter).
+        // Row 2: Fastmem + spacers.
+        // Row 3: per-CPU A/B toggle between original arm64 backend (off, default)
+        //        and the macOS-port arm64 backend (on). VM restart required.
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             BubbleGridRow {
                 ToggleBubble("EE (R5900)", s.recEE, modifier = Modifier.weight(1f)) {
@@ -74,6 +75,26 @@ fun RecompilerTab(state: MutableState<Settings>) {
                 Spacer(Modifier.weight(1f))
                 Spacer(Modifier.weight(1f))
                 Spacer(Modifier.weight(1f))
+            }
+            Text(
+                "Mac backend A/B — flip individual CPUs to the macOS-port JIT to bisect regressions. VM restart applies.",
+                color = Color(0xFFB0B0B0),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+            )
+            BubbleGridRow {
+                ToggleBubble("Mac EE", s.useMacEE, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(useMacEE = it))
+                }
+                ToggleBubble("Mac IOP", s.useMacIOP, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(useMacIOP = it))
+                }
+                ToggleBubble("Mac VU0", s.useMacVU0, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(useMacVU0 = it))
+                }
+                ToggleBubble("Mac VU1", s.useMacVU1, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(useMacVU1 = it))
+                }
             }
         }
     }

@@ -7,7 +7,7 @@
 
 #include "IPU/IPUdma.h"
 #include "ps2/HwInternal.h"
-#include "arm64/iDMAC_arm64.h"
+#include "arm64/aDMAC.h"
 
 bool DMACh::transfer(const char *s, tDMA_TAG* ptag)
 {

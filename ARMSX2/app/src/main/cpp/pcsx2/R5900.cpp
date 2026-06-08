@@ -15,7 +15,7 @@
 
 #include "Hardware.h"
 #include "IPU/IPUdma.h"
-#include "arm64/iDMAC_arm64.h"
+#include "arm64/aDMAC.h"
 
 #include "Elfheader.h"
 #include "CDVD/CDVD.h"

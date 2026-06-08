@@ -5,37 +5,15 @@
 // Integer ALU, load/store, branches, FDIV, flag ops,
 // move/transfer, random, EFU, special (XITOP/XTOP/XGKICK)
 
-#include "Common.h"
-#include "VUops.h"
-#include "VU.h"
-#include "Vif.h"
-#include "Vif_Dma.h"
-#include "Gif_Unit.h"
-#include "arm64/arm64Emitter.h"
-#include "arm64/AsmHelpers.h"
-#include "arm64/microVU_arm/microVU.h" // emitVU1InterpBL
-#include "MTVU.h"
-#include <cmath>
-
-using namespace vixl::aarch64;
+// Included from aVU.cpp. All headers and `using namespace vixl::aarch64;` are
+// already in effect there. VU1_BASE_REG / VU1_STATUSFLAG_REG / VU1_CLIPFLAG_REG
+// / vfOff / viOff come from the parent.
 
 extern void _vuXGKICKTransfer(s32 cycles, bool flush);
 
 // ============================================================================
 //  Native codegen helpers
 // ============================================================================
-
-// VU1_BASE_REG — mirrors the definition in iVU1micro_arm64.cpp.
-// At runtime, x23 always holds &VU1 throughout a compiled block.
-static const auto VU1_BASE_REG = x23;
-
-// Phase-7 pinned flag regs. Must match the aliases in iVU1micro_arm64.cpp.
-// Block prologue primes them from memory; block epilogue flushes back.
-// Lower ops only touch statusflag (FDIV/SQRT/RSQRT/FSSET) and clipflag
-// (FCSET). FMAND/FMEQ/FMOR read VI[REG_MAC_FLAG] (the committed pipe-
-// delayed slot), not VU->macflag (live), so w19 isn't needed here.
-static const auto VU1_STATUSFLAG_REG = w20;
-static const auto VU1_CLIPFLAG_REG   = w28;
 
 // Compile-time current pair PC. Set by the per-pair dispatch loop in
 // iVU1micro_arm64.cpp before each lower-op emit. Used by native branch
@@ -51,17 +29,7 @@ u32 g_vu1CurrentPC = 0;
 // stays correct.
 bool g_vu1NeedsVIBackup = true;
 
-// Compute byte offset of VI[reg] within VURegs.
-static constexpr int64_t viOff(u32 reg)
-{
-	return static_cast<int64_t>(offsetof(VURegs, VI)) + reg * static_cast<int64_t>(sizeof(REG_VI));
-}
-
-// Compute byte offset of VF[reg] within VURegs.
-static constexpr int64_t vfOff(u32 reg)
-{
-	return static_cast<int64_t>(offsetof(VURegs, VF)) + reg * static_cast<int64_t>(sizeof(VECTOR));
-}
+// vfOff / viOff are provided by the parent aVU.cpp.
 
 // Non-inline VI backup wrapper — retained for the vu1_*-prefixed C wrappers
 // below (used by the REC_VU1_LOWER_CALL interp path when the per-op ISTUB is

@@ -11,9 +11,16 @@
 #include "Vif.h"
 #include "VUmicro.h"
 #include "VUops.h"
+// .inl-side headers — pulled in here (BEFORE `using namespace vixl::aarch64;`)
+// so the s8/s16 typedefs in MTVU.h → Vif_Unpack.h aren't ambiguous with the
+// vixl::aarch64 namespace once it's brought into scope below.
+#include "MTVU.h"
+#include "VU.h"
+#include "VUflags.h"
+#include <cmath>
 #include "arm64/AsmHelpers.h"
 #include "arm64/arm64Emitter.h"
-#include "arm64/iVU0micro_arm64.h"
+#include "arm64/aVU0.h"
 #include "common/Perf.h"
 
 #include <algorithm>
@@ -31,6 +38,27 @@
 
 using namespace vixl::aarch64;
 
+// ============================================================================
+//  Shared file-statics used by the parent driver AND the included
+//  aVU0_Upper.inl / aVU0_Lower.inl op-emitters.
+//
+//  VU0_BASE_REG is pinned to &VU0 throughout a compiled block (x23 in our
+//  AAPCS64 callee-saved set). vfOff / viOff are byte offsets into VURegs
+//  for VF[reg] / VI[reg], used by every reg-relative LDR/STR the emitters
+//  build.
+// ============================================================================
+static const auto VU0_BASE_REG = x23;
+
+static constexpr int64_t vfOff(u32 reg)
+{
+	return static_cast<int64_t>(offsetof(VURegs, VF)) + reg * static_cast<int64_t>(sizeof(VECTOR));
+}
+
+static constexpr int64_t viOff(u32 reg)
+{
+	return static_cast<int64_t>(offsetof(VURegs, VI)) + reg * static_cast<int64_t>(sizeof(REG_VI));
+}
+
 // Global instance
 recArmVU0 CpuArmVU0;
 
@@ -41,20 +69,14 @@ extern void vu0Exec(VURegs* VU);
 extern void _vuFlushAll(VURegs* VU);
 
 // ============================================================================
-//  Rec emitter dispatch tables — reuse VU1's tables since the instruction
-//  set is identical. The tables emit code that operates through a pinned
-//  base register (x23), which we point at &VU0 instead of &VU1.
-//  The only caveat: interpreter-stub entries call VU1_UPPER/LOWER_OPCODE.
-//  For VU0 we need VU0_UPPER/LOWER_OPCODE. We define VU0-specific tables.
+//  Native NEON codegen — aligned with arm64/mac/aVU.cpp's #include layout.
+//  Upper.inl emits FMAC / float-vector ops + recVU0_UpperTable. Lower.inl
+//  emits integer ALU / LSU / branches / FDIV / EFU / specials + table. Both
+//  consume VU0_BASE_REG / vfOff / viOff defined just above.
 // ============================================================================
-
 using VU0RecFn = void (*)();
-extern VU0RecFn recVU0_UpperTable[64];
-extern VU0RecFn recVU0_LowerTable[128];
-
-// The generic "unknown lower opcode" emitter, exposed from iVU0Lower_arm64.cpp.
-// Used for pointer-compare bad-op detection at block-analysis time.
-extern void recVU0_Lower_Unknown();
+#include "arm64/aVU0_Upper.inl"
+#include "arm64/aVU0_Lower.inl"
 
 // ============================================================================
 //  Block cache
@@ -1777,7 +1799,8 @@ static u8* vu0_indirect_dispatch(u32 tpc)
 //  Block compilation
 // ============================================================================
 
-static const auto VU0_BASE_REG = x23;
+// VU0_BASE_REG = x23; defined near the top of this file, shared with the
+// included aVU0_Upper.inl / aVU0_Lower.inl emitters.
 
 // VU0_PROFILE_OPS scaffolding (toggle in arm64/InterpFlags.h). Same shape
 // as the VU1 macros — register the emit cursor span around per-pair sections.

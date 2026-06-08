@@ -1073,46 +1073,85 @@ set(pcsx2x86Headers
 	)
 
 # ARM64
+# File layout aligned with arm64/mac/ for direct apples-to-apples comparison.
+# Mac-only files (aR5900FPU = our COP1, aR5900Arith = our ALU+Move+Shift
+# combined). Android-port-only files keep their Android names with the
+# new aXxx prefix (aR5900COP0/COP2/Backprop/Misc/Trap, aR3000Atables, aDMAC,
+# aVTLB, aVU0*).
 set(pcsx2arm64Sources
 	arm64/AsmHelpers.cpp
 	arm64/Vif_Dynarec.cpp
 	arm64/Vif_UnpackNEON.cpp
 	arm64/RecStubs.cpp
-	arm64/recVTLB_arm64.cpp
-	arm64/iR5900_arm64.cpp
-	arm64/iR5900Branch_arm64.cpp
-	arm64/iR5900Move_arm64.cpp
-	arm64/iR5900ALU_arm64.cpp
-	arm64/iR5900MultDiv_arm64.cpp
-	arm64/iR5900Shift_arm64.cpp
-	arm64/iR5900COP0_arm64.cpp
-	arm64/iR5900COP1_arm64.cpp
-	arm64/iR5900COP2_arm64.cpp
-	arm64/iR5900MMI_arm64.cpp
-	arm64/iR5900LoadStore_arm64.cpp
-	arm64/iR5900Trap_arm64.cpp
-	arm64/iR5900Misc_arm64.cpp
-	arm64/iVU0micro_arm64.cpp
-	arm64/iVU0Upper_arm64.cpp
-	arm64/iVU0Lower_arm64.cpp
-	arm64/microVU_arm/microVU.cpp
-	arm64/microVU_arm/microVU_Upper.cpp
-	arm64/microVU_arm/microVU_Lower.cpp
-	arm64/iDMAC_arm64.cpp
-	arm64/iR3000A_arm64.cpp
-	arm64/iR3000Atables_arm64.cpp
-	arm64/iR5900Backprop_arm64.cpp
+	arm64/aVTLB.cpp
+	arm64/aR5900.cpp
+	arm64/aR5900Arith.cpp
+	arm64/aR5900Branch.cpp
+	arm64/aR5900LoadStore.cpp
+	arm64/aR5900MultDiv.cpp
+	arm64/aR5900FPU.cpp
+	arm64/aR5900MMI.cpp
+	arm64/aR5900Misc.cpp
+	arm64/aR5900Trap.cpp
+	arm64/aR5900COP0.cpp
+	arm64/aR5900COP2.cpp
+	arm64/aR5900Backprop.cpp
+	arm64/aVU0.cpp
+	arm64/aVU.cpp
+	arm64/aDMAC.cpp
+	arm64/aR3000A.cpp
+	arm64/aR3000Atables.cpp
 	x86/BaseblockEx.cpp
+	# macOS-port arm64 EE/IOP/VU recompiler, namespaced into pcsx2_macrec.
+	# Lives alongside the original native backend so VMManager can route per CPU.
+	arm64/mac/AsmHelpers.cpp
+	arm64/mac/RecStubs.cpp
+	arm64/mac/Vif_Dynarec.cpp
+	arm64/mac/Vif_UnpackNEON.cpp
+	arm64/mac/aR3000A.cpp
+	arm64/mac/aR5900.cpp
+	arm64/mac/aR5900Arith.cpp
+	arm64/mac/aR5900Branch.cpp
+	arm64/mac/aR5900FPU.cpp
+	arm64/mac/aR5900LoadStore.cpp
+	arm64/mac/aR5900MMI.cpp
+	arm64/mac/aR5900MultDiv.cpp
+	arm64/mac/aVU.cpp
 	)
 
 set(pcsx2arm64Headers
 	arm64/AsmHelpers.h
 	arm64/arm64Emitter.h
-	arm64/iVU0micro_arm64.h
-	arm64/microVU_arm/microVU.h
-	arm64/microVU_arm/microVU_IR.h
-	arm64/iDMAC_arm64.h
-	arm64/iR3000A_arm64.h
+	arm64/InterpFlags.h
+	arm64/TraceBlocks.h
+	arm64/Vif_UnpackNEON.h
+	arm64/aR3000A.h
+	arm64/aDMAC.h
+	arm64/aVU0.h
+	arm64/aVU0_Upper.inl
+	arm64/aVU0_Lower.inl
+	arm64/aVU.h
+	arm64/aVU_IR.h
+	arm64/aVU_Upper.inl
+	arm64/aVU_Lower.inl
+	arm64/mac/AsmHelpers.h
+	arm64/mac/Vif_UnpackNEON.h
+	arm64/mac/aR3000A.h
+	arm64/mac/aR5900.h
+	arm64/mac/aVU.h
+	arm64/mac/aVU_IR.h
+	arm64/mac/aVU_Misc.h
+	arm64/mac/aVU_Alloc.inl
+	arm64/mac/aVU_Analyze.inl
+	arm64/mac/aVU_Branch.inl
+	arm64/mac/aVU_Clamp.inl
+	arm64/mac/aVU_Compile.inl
+	arm64/mac/aVU_Flags.inl
+	arm64/mac/aVU_Lower.inl
+	arm64/mac/aVU_Misc.inl
+	arm64/mac/aVU_Tables.inl
+	arm64/mac/aVU_Upper.inl
+	arm64/mac/MacBackend.h
 )
 
 # These ones benefit a lot from LTO

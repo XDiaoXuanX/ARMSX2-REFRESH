@@ -459,6 +459,13 @@ Pcsx2Config::RecompilerOptions::RecompilerOptions()
 	EnableFastmem = true;
 	PauseOnTLBMiss = false;
 
+	// Default to the original arm64 backend on every CPU; flip to bisect against
+	// the macOS-port backend (see Config.h).
+	UseMacEE = false;
+	UseMacIOP = false;
+	UseMacVU0 = false;
+	UseMacVU1 = false;
+
 	// vu and fpu clamping default to standard overflow.
 	vu0Overflow = true;
 	//vu0ExtraOverflow = false;
@@ -536,6 +543,11 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(EnableVU1);
 	SettingsWrapBitBool(EnableFastmem);
 	SettingsWrapBitBool(PauseOnTLBMiss);
+
+	SettingsWrapBitBool(UseMacEE);
+	SettingsWrapBitBool(UseMacIOP);
+	SettingsWrapBitBool(UseMacVU0);
+	SettingsWrapBitBool(UseMacVU1);
 
 	SettingsWrapBitBool(vu0Overflow);
 	SettingsWrapBitBool(vu0ExtraOverflow);

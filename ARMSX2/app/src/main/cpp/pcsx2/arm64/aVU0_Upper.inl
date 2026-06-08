@@ -10,31 +10,14 @@
 // at runtime, same layout as VU1. ISTUB_VU0_* macros shadow ISTUB_VU_* so
 // the two units bisect independently.
 
-#include "Common.h"
-#include "VUops.h"
-#include "VU.h"
-#include "VUflags.h"
-#include "arm64/arm64Emitter.h"
-#include "arm64/AsmHelpers.h"
-
-using namespace vixl::aarch64;
+// Included from aVU0.cpp. All headers (Common.h / VUops.h / VU.h / VUflags.h /
+// arm64/arm64Emitter.h / arm64/AsmHelpers.h) and `using namespace vixl::aarch64`
+// are already in effect in the parent. VU0_BASE_REG / vfOff / viOff also come
+// from the parent; accOff is used only here.
 
 // ============================================================================
 //  Native NEON codegen helpers
 // ============================================================================
-
-static const auto VU0_BASE_REG = x23;
-
-static constexpr int64_t vfOff(u32 reg)
-{
-	return static_cast<int64_t>(offsetof(VURegs, VF)) + reg * static_cast<int64_t>(sizeof(VECTOR));
-}
-
-static constexpr int64_t viOff(u32 reg)
-{
-	return static_cast<int64_t>(offsetof(VURegs, VI)) + reg * static_cast<int64_t>(sizeof(REG_VI));
-}
-
 static constexpr int64_t accOff()
 {
 	return static_cast<int64_t>(offsetof(VURegs, ACC));

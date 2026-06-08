@@ -13,35 +13,14 @@
 // when isVU0).
 // ISTUB_VU0_* macros shadow ISTUB_VU_* so both units bisect independently.
 
-#include "Common.h"
-#include "VUops.h"
-#include "VU.h"
-#include "MTVU.h"
-#include "arm64/arm64Emitter.h"
-#include "arm64/AsmHelpers.h"
-#include <cmath>
-
-using namespace vixl::aarch64;
+// Included from aVU0.cpp. All headers (Common.h / VUops.h / VU.h / MTVU.h /
+// arm64/arm64Emitter.h / arm64/AsmHelpers.h / <cmath>) and
+// `using namespace vixl::aarch64` are already in effect in the parent.
+// VU0_BASE_REG / viOff / vfOff also come from the parent.
 
 // ============================================================================
 //  Native codegen helpers
 // ============================================================================
-
-// VU0_BASE_REG — mirrors the definition in iVU0micro_arm64.cpp.
-// At runtime, x23 always holds &VU0 throughout a compiled block.
-static const auto VU0_BASE_REG = x23;
-
-// Compute byte offset of VI[reg] within VURegs.
-static constexpr int64_t viOff(u32 reg)
-{
-	return static_cast<int64_t>(offsetof(VURegs, VI)) + reg * static_cast<int64_t>(sizeof(REG_VI));
-}
-
-// Compute byte offset of VF[reg] within VURegs.
-static constexpr int64_t vfOff(u32 reg)
-{
-	return static_cast<int64_t>(offsetof(VURegs, VF)) + reg * static_cast<int64_t>(sizeof(VECTOR));
-}
 
 // Non-inline VI backup wrapper — callable from JIT-emitted code.
 // Mirrors _vuBackupVI() in VUops.cpp (which is __fi and can't be linked).

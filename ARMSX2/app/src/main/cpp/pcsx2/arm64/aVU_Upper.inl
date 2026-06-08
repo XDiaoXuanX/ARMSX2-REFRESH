@@ -6,15 +6,10 @@
 // accumulator variants (ADDA/SUBA/MULA/MADDA/MSUBA),
 // MAX, MINI, ABS, CLIP, FTOI/ITOF, OPMULA, OPMSUB, NOP
 
-#include "Common.h"
-#include "VUops.h"
-#include "VU.h"
-#include "VUflags.h"
-#include "arm64/arm64Emitter.h"
-#include "arm64/AsmHelpers.h"
-#include "arm64/microVU_arm/microVU.h" // emitVU1InterpBL
-
-using namespace vixl::aarch64;
+// Included from aVU.cpp. All headers and `using namespace vixl::aarch64;` are
+// already in effect there; VU1_*_REG / vfOff / viOff are also defined in the
+// parent. accOff / vfOffStatic0 / vfIndexFromDstOff are Upper-only and stay
+// here.
 
 // ============================================================================
 //  Flag-deferral state
@@ -271,41 +266,10 @@ void vu1BroadcastCacheNoteVfWritten(int vfreg)
 //  Native NEON codegen helpers
 // ============================================================================
 
-static const auto VU1_BASE_REG = x23;
+// VU1_BASE_REG / VU1_MACFLAG_REG / VU1_STATUSFLAG_REG / VU1_CLIPFLAG_REG /
+// VU1_ACC_REG are defined in the parent aVU.cpp.
 
-// Phase-7 pinned flag regs. Must match the aliases in iVU1micro_arm64.cpp.
-// Loaded at block prologue, flushed at epilogue / around vu1Exec.
-static const auto VU1_MACFLAG_REG    = w19;
-static const auto VU1_STATUSFLAG_REG = w20;
-static const auto VU1_CLIPFLAG_REG   = w28;
-
-// Phase-8 (2026-04-22): pinned VU->ACC register. Loaded at block prologue
-// (Ldr q16, [VU1_BASE, accOff()]), flushed at epilogue and around the one
-// BL that can mutate ACC (vu1Exec hazard fallback). Every FMAC transform
-// chain (MULAx → MADDAy → MADDAz → MADDw) touches ACC four times — pre-
-// pinning replaces 4 Ldr + 4 Str per chain with a single Ldr at prologue
-// and Str at epilogue, killing ~6 memory ops per chain.
-//
-// Reg choice rationale: q16 is unused by every current upper/lower
-// emitter (all NEON use in this file is v0-v8). The q-form is caller-
-// saved on AAPCS64 — we must flush+reload around BLs that may clobber
-// or mutate ACC. The only default-build BL that touches ACC is
-// vu1Exec; all other helpers (pipe flushes, XGKICK, CheckDTBits, etc.)
-// leave ACC alone.
-//
-// IMPORTANT: must match the alias in iVU1micro_arm64.cpp.
-static const auto VU1_ACC_REG = v16;
-
-static constexpr int64_t vfOff(u32 reg)
-{
-	return static_cast<int64_t>(offsetof(VURegs, VF)) + reg * static_cast<int64_t>(sizeof(VECTOR));
-}
-
-static constexpr int64_t viOff(u32 reg)
-{
-	return static_cast<int64_t>(offsetof(VURegs, VI)) + reg * static_cast<int64_t>(sizeof(REG_VI));
-}
-
+// vfOff / viOff are defined in the parent aVU.cpp. Only accOff is Upper-only.
 static constexpr int64_t accOff()
 {
 	return static_cast<int64_t>(offsetof(VURegs, ACC));

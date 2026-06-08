@@ -10,7 +10,7 @@
 // the x86 version (x86/iR3000Atables.cpp) since that file isn't compiled
 // for ARM64 targets.
 
-#include "iR3000A_arm64.h"
+#include "arm64/aR3000A.h"
 #include "arm64/AsmHelpers.h"
 #include "arm64/arm64Emitter.h"
 #include "R3000A.h"

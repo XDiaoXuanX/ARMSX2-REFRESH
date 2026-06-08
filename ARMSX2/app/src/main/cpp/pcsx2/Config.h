@@ -660,6 +660,15 @@ struct Pcsx2Config
 			EnableFastmem : 1;
 		bool
 			PauseOnTLBMiss : 1;
+		// ARMSX2 A/B: per-CPU toggle between the original Android arm64 backend
+		// (default) and the macOS-port arm64 backend (lives in arm64/mac/,
+		// namespaced as pcsx2_macrec). Use these to bisect mac regressions
+		// against the slower-but-more-accurate native backend.
+		bool
+			UseMacEE : 1,
+			UseMacIOP : 1,
+			UseMacVU0 : 1,
+			UseMacVU1 : 1;
 		BITFIELD_END
 
 		RecompilerOptions();

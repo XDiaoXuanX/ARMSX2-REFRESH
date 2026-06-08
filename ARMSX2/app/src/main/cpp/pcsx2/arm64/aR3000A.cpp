@@ -12,7 +12,7 @@
 //   - Constant propagation helpers
 //   - The psxRec CPU interface struct
 
-#include "iR3000A_arm64.h"
+#include "arm64/aR3000A.h"
 #include "arm64/AsmHelpers.h"
 #include "R3000A.h"
 #include "x86/BaseblockEx.h"

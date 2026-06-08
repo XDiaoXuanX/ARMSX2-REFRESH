@@ -181,6 +181,7 @@ extern bool iopIsDelaySlot;
 extern bool iopShadowSuppressEventTest;
 extern void psxInterpReplayBlock(u32 endpc, u32 maxInstructions);
 extern void psxInterpExecuteOne();
+extern void iopExecuteOneInst();
 
 // --------------------------------------------------------------------------------------
 //  R3000Acpu

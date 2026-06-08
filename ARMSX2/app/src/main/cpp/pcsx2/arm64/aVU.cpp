@@ -16,23 +16,56 @@
 #include "Gif_Unit.h"
 #include "Memory.h"
 #include "MTVU.h"
+#include "VU.h"
 #include "VU1Fingerprint.h"
+#include "VUflags.h"
 #include "VUmicro.h"
 #include "VUops.h"
+#include "Vif.h"
+#include "Vif_Dma.h"
 #include "arm64/arm64Emitter.h"
 #include "arm64/AsmHelpers.h"
-#include "arm64/microVU_arm/microVU.h"
-#include "arm64/microVU_arm/microVU_IR.h"
+#include "arm64/aVU.h"
+#include "arm64/aVU_IR.h"
 #include "common/Perf.h"
 
 #include <algorithm>
 #include <cfenv>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <string>
 #include <vector>
 
 using namespace vixl::aarch64;
+
+// ============================================================================
+//  Shared file-statics — defined here in the parent so the included
+//  aVU_Upper.inl / aVU_Lower.inl op-emitters can consume them without
+//  re-defining (which would ODR-error inside a single TU).
+//
+//  Pinned registers (callee-saved x19-x28 set):
+//    x23 = &VU1                  base for VF/VI/ACC reg-relative LDR/STR
+//    w19 = VU1_MACFLAG_REG       MAC flag instance ring
+//    w20 = VU1_STATUSFLAG_REG    Status flag instance
+//    w28 = VU1_CLIPFLAG_REG      Clip flag instance
+//    v16 = VU1_ACC_REG           ACC.xyzw cached in a Q reg across pair
+// ============================================================================
+static const auto VU1_BASE_REG = x23;
+static const auto VU1_MACFLAG_REG    = w19;
+static const auto VU1_STATUSFLAG_REG = w20;
+static const auto VU1_CLIPFLAG_REG   = w28;
+static const auto VU1_ACC_REG = v16;
+
+static constexpr int64_t vfOff(u32 reg)
+{
+	return static_cast<int64_t>(offsetof(VURegs, VF)) + reg * static_cast<int64_t>(sizeof(VECTOR));
+}
+
+static constexpr int64_t viOff(u32 reg)
+{
+	return static_cast<int64_t>(offsetof(VURegs, VI)) + reg * static_cast<int64_t>(sizeof(REG_VI));
+}
 
 // Global instance
 recArmVU1 CpuArmVU1;
@@ -3059,9 +3092,8 @@ static void patchWaitingPredecessors(u32 my_pc, u8* my_linkEntry, VU1IcacheBatch
 //  Block compilation
 // ============================================================================
 
-// Pinned VU1 base register used throughout compiled blocks.
-// x23 is callee-saved (AAPCS64) and not clobbered by C function calls.
-static const auto VU1_BASE_REG = x23;
+// VU1_BASE_REG = x23 is defined at top of this file (shared with included
+// aVU_Upper.inl / aVU_Lower.inl).
 
 // Stage C2 (2026-04-11): pinned VU->cycle register for the duration of a
 // compiled block. Loaded once at block entry, used directly by step 1
@@ -3156,22 +3188,8 @@ static const auto VU1_FMACCOUNT_REG = w26;
 //   w28 ↔ VU->clipflag
 // All three are 32-bit u32 fields — w-reg writes zero-extend into x-reg,
 // so the x19/x20/x28 64-bit forms stay canonical.
-static const auto VU1_MACFLAG_REG    = w19;
-static const auto VU1_STATUSFLAG_REG = w20;
-static const auto VU1_CLIPFLAG_REG   = w28;
-
-// Phase-8 (2026-04-22): pinned VU->ACC register. Must match the alias in
-// iVU1Upper_arm64.cpp. Loaded at block prologue, flushed at epilogue, and
-// flushed/reloaded around the vu1Exec hazard fallback (the only default-
-// build BL that can mutate ACC). Other BLs (TestPipes, XGKICK helpers,
-// CheckDTBits, EbitDone, HandleDelayBranch, stall probes) all leave ACC
-// untouched.
-//
-// Reg choice: q16. Caller-saved on AAPCS64 (upper half of d8-d15 is caller-
-// saved; q-form gives no callee-save either), so we MUST flush+reload
-// around any BL that could clobber/mutate ACC. Audit above confirms only
-// vu1Exec qualifies on the default build.
-static const auto VU1_ACC_REG = v16;
+// VU1_MACFLAG_REG / VU1_STATUSFLAG_REG / VU1_CLIPFLAG_REG / VU1_ACC_REG are
+// defined at the top of this file (shared with included .inl op-emitters).
 
 static void emitFlushWposRegs(int64_t fmacwpos_off, int64_t ialuwpos_off)
 {
@@ -7786,3 +7804,13 @@ void recArmVU1::Clear(u32 addr, u32 size)
 			blk->needsRelink = true;
 	}
 }
+
+// ============================================================================
+//  Native NEON op-emitters — Upper and Lower pipes.
+//  Included after all forward-declared emitVU1Upper/emitVU1Lower call sites
+//  in the compile-block driver above so the .inl content lands in the same
+//  TU as the driver. Mirrors arm64/mac/aVU.cpp's #include layout for direct
+//  comparison.
+// ============================================================================
+#include "arm64/aVU_Upper.inl"
+#include "arm64/aVU_Lower.inl"

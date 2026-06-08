@@ -16,7 +16,7 @@
 
 #include "Common.h"
 #include "arm64/arm64Emitter.h"
-#include "arm64/iDMAC_arm64.h"
+#include "arm64/aDMAC.h"
 
 #include "Dmac.h"
 #include "R5900.h"
