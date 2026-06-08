@@ -107,6 +107,11 @@ data class Settings(
      *  this because it has no runtime FMAC ring — flag instances are routed
      *  at compile time. */
     val vu1InlineDrainTestPipes: Boolean = false,
+    /** EmuCore/CPU/Recompiler/Vu1FmacInstanceRouting — mac-style 4-slot flag-
+     *  instance routing. Repurposes VU->fmac[0..3].{mac,status,clip}flag as
+     *  instance slots; skips the ring metadata Strs and the FMAC stall BLs.
+     *  fmaccount stays 0 so vu1_TestPipes_VU1's FMAC drain early-exits. */
+    val vu1FmacInstanceRouting: Boolean = false,
 
     // ---- EmuCore/GS — renderer accuracy / quality ----
     /** EmuCore/GS/hw_mipmap. */
@@ -173,6 +178,7 @@ data class Settings(
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1InlineFmacStall", "bool", vu1InlineFmacStall.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1CrossBlockPState", "bool", vu1CrossBlockPState.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1InlineDrainTestPipes", "bool", vu1InlineDrainTestPipes.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1FmacInstanceRouting", "bool", vu1FmacInstanceRouting.toString())
         // GS renderer
         NativeApp.setSetting("EmuCore/GS", "hw_mipmap", "bool", hwMipmap.toString())
         NativeApp.setSetting("EmuCore/GS", "accurate_blending_unit", "int", accurateBlendingUnit.toString())
@@ -217,6 +223,7 @@ data class Settings(
         put("vu1InlineFmacStall", vu1InlineFmacStall)
         put("vu1CrossBlockPState", vu1CrossBlockPState)
         put("vu1InlineDrainTestPipes", vu1InlineDrainTestPipes)
+        put("vu1FmacInstanceRouting", vu1FmacInstanceRouting)
         put("hwMipmap", hwMipmap)
         put("accurateBlendingUnit", accurateBlendingUnit)
         put("textureFiltering", textureFiltering)
@@ -258,6 +265,7 @@ data class Settings(
                 vu1InlineFmacStall = json.optBoolean("vu1InlineFmacStall", def.vu1InlineFmacStall),
                 vu1CrossBlockPState = json.optBoolean("vu1CrossBlockPState", def.vu1CrossBlockPState),
                 vu1InlineDrainTestPipes = json.optBoolean("vu1InlineDrainTestPipes", def.vu1InlineDrainTestPipes),
+                vu1FmacInstanceRouting = json.optBoolean("vu1FmacInstanceRouting", def.vu1FmacInstanceRouting),
                 hwMipmap = json.optBoolean("hwMipmap", def.hwMipmap),
                 accurateBlendingUnit = json.optInt("accurateBlendingUnit", def.accurateBlendingUnit),
                 textureFiltering = json.optInt("textureFiltering", def.textureFiltering),
@@ -305,6 +313,7 @@ data class Settings(
             if (current.vu1InlineFmacStall  != base.vu1InlineFmacStall)  j.put("vu1InlineFmacStall", current.vu1InlineFmacStall)
             if (current.vu1CrossBlockPState != base.vu1CrossBlockPState) j.put("vu1CrossBlockPState", current.vu1CrossBlockPState)
             if (current.vu1InlineDrainTestPipes != base.vu1InlineDrainTestPipes) j.put("vu1InlineDrainTestPipes", current.vu1InlineDrainTestPipes)
+            if (current.vu1FmacInstanceRouting != base.vu1FmacInstanceRouting) j.put("vu1FmacInstanceRouting", current.vu1FmacInstanceRouting)
             if (current.hwMipmap            != base.hwMipmap)            j.put("hwMipmap", current.hwMipmap)
             if (current.accurateBlendingUnit!= base.accurateBlendingUnit)j.put("accurateBlendingUnit", current.accurateBlendingUnit)
             if (current.textureFiltering    != base.textureFiltering)    j.put("textureFiltering", current.textureFiltering)
@@ -342,6 +351,7 @@ data class Settings(
             vu1InlineFmacStall = if (overrides.has("vu1InlineFmacStall")) overrides.getBoolean("vu1InlineFmacStall") else base.vu1InlineFmacStall,
             vu1CrossBlockPState = if (overrides.has("vu1CrossBlockPState")) overrides.getBoolean("vu1CrossBlockPState") else base.vu1CrossBlockPState,
             vu1InlineDrainTestPipes = if (overrides.has("vu1InlineDrainTestPipes")) overrides.getBoolean("vu1InlineDrainTestPipes") else base.vu1InlineDrainTestPipes,
+            vu1FmacInstanceRouting = if (overrides.has("vu1FmacInstanceRouting")) overrides.getBoolean("vu1FmacInstanceRouting") else base.vu1FmacInstanceRouting,
             hwMipmap = if (overrides.has("hwMipmap")) overrides.getBoolean("hwMipmap") else base.hwMipmap,
             accurateBlendingUnit = if (overrides.has("accurateBlendingUnit")) overrides.getInt("accurateBlendingUnit") else base.accurateBlendingUnit,
             textureFiltering = if (overrides.has("textureFiltering")) overrides.getInt("textureFiltering") else base.textureFiltering,

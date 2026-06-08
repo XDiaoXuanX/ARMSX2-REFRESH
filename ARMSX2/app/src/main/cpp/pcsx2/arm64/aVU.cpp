@@ -4721,7 +4721,95 @@ static void emitDecrementVIBackup(int64_t /*cycle_off*/, int64_t vibackup_off)
 // x8 is a transient base for the Ldp of VU->statusflag+clipflag whose offset
 // from VU1_BASE exceeds Ldp's imm7 range. All caller-saved per AAPCS64; no
 // BL between here and the last use, so they don't need preservation.
-static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
+// Mac-style flag-instance routing helpers. Vu1FmacInstanceRouting toggle
+// reinterprets VU->fmac[0..3].{mac,status,clip}flag as 4 dedicated instance
+// slots (the rest of the fmacPipe struct stays untouched in JIT but the
+// other ring metadata — sCycle / Cycle / flagreg / regupper / etc. — is no
+// longer written when the toggle is on, and fmaccount stays 0 so the
+// helper's FMAC drain loop early-exits). mo.{m,s,c}Flag.{read,write,
+// lastWrite} are 0-3 indices computed by mvu1AnalyzeBlock's findFlagInst
+// pass; the emitter consumes them directly.
+//
+// Slot byte offset for instance K within VU->fmac[]:
+//   fmac_off + K*sizeof(fmacPipe) + offsetof(fmacPipe, *flag)
+// fmacPipe sizeof = 48; macflag=+36, statusflag=+40, clipflag=+44. All fit
+// within the 12-bit unsigned-scaled Ldr/Str immediate range
+// (max = 16380 for u32).
+static int64_t fmacInstanceOff(int inst, int field_off)
+{
+	return (int64_t)offsetof(VURegs, fmac)
+	     + (int64_t)inst * (int64_t)sizeof(fmacPipe)
+	     + (int64_t)field_off;
+}
+
+// Reader-side commit: at the top of every pair, fan out the current
+// per-flag-type instance to VI[REG_MAC/STATUS/CLIP] so the lower-op
+// emit's VI cache load reads the right historical value. Three Ldr+Str
+// pairs (6 mem ops) per pair. Also bumps the pinned macflag/statusflag/
+// clipflag regs to the routed value — subsequent FMAC arithmetic
+// overwrites them with the new computed flag, then emitFMACAddPair
+// stores those new values into slot[mo.{m,s,c}Flag.write].
+static void emitFmacInstanceReaderCommit(const armvu1ir::microOp& mo)
+{
+	const int64_t f_macflag    = (int64_t)offsetof(fmacPipe, macflag);
+	const int64_t f_statusflag = (int64_t)offsetof(fmacPipe, statusflag);
+	const int64_t f_clipflag   = (int64_t)offsetof(fmacPipe, clipflag);
+	const int64_t vi_mac_off    = (int64_t)offsetof(VURegs, VI)
+	                            + REG_MAC_FLAG    * (int64_t)sizeof(REG_VI);
+	const int64_t vi_status_off = (int64_t)offsetof(VURegs, VI)
+	                            + REG_STATUS_FLAG * (int64_t)sizeof(REG_VI);
+	const int64_t vi_clip_off   = (int64_t)offsetof(VURegs, VI)
+	                            + REG_CLIP_FLAG   * (int64_t)sizeof(REG_VI);
+
+	// MAC flag: slot[mo.mFlag.read].macflag → VI[REG_MAC_FLAG] + pinned w19.
+	armAsm->Ldr(VU1_MACFLAG_REG,
+		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.mFlag.read, f_macflag)));
+	armAsm->Str(VU1_MACFLAG_REG, MemOperand(VU1_BASE_REG, vi_mac_off));
+
+	// Status flag: slot[mo.sFlag.read].statusflag → VI[REG_STATUS_FLAG] +
+	// pinned w20.
+	armAsm->Ldr(VU1_STATUSFLAG_REG,
+		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.sFlag.read, f_statusflag)));
+	armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(VU1_BASE_REG, vi_status_off));
+
+	// Clip flag: slot[mo.cFlag.read].clipflag → VI[REG_CLIP_FLAG] + pinned w28.
+	armAsm->Ldr(VU1_CLIPFLAG_REG,
+		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.cFlag.read, f_clipflag)));
+	armAsm->Str(VU1_CLIPFLAG_REG, MemOperand(VU1_BASE_REG, vi_clip_off));
+
+	// VI cache tracker invalidate — the GPR-cached copy of these three VI
+	// regs (if resident in w9..w15) no longer matches the value we just
+	// stored to memory.
+	viCacheInvalidate(REG_MAC_FLAG);
+	viCacheInvalidate(REG_STATUS_FLAG);
+	viCacheInvalidate(REG_CLIP_FLAG);
+}
+
+// Block prologue init: pre-load all 4 instance slots with the entry-time
+// VI[REG_MAC/STATUS/CLIP] value so the first 4 pairs' reader-side commits
+// (which can hit any of slots 0..3 per the findFlagInst {0,1,2,3} init)
+// return the right cross-block value instead of garbage. 12 Strs of pinned
+// regs to slot offsets; pinned regs are already loaded with VI memory by
+// the prologue's emitReloadFlagRegs.
+static void emitFmacInstanceBlockInit()
+{
+	const int64_t f_macflag    = (int64_t)offsetof(fmacPipe, macflag);
+	const int64_t f_statusflag = (int64_t)offsetof(fmacPipe, statusflag);
+	const int64_t f_clipflag   = (int64_t)offsetof(fmacPipe, clipflag);
+
+	for (int inst = 0; inst < 4; inst++)
+	{
+		armAsm->Str(VU1_MACFLAG_REG,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_macflag)));
+		armAsm->Str(VU1_STATUSFLAG_REG,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_statusflag)));
+		armAsm->Str(VU1_CLIPFLAG_REG,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_clipflag)));
+	}
+}
+
+static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs,
+	const armvu1ir::microOp* mo = nullptr)
 {
 	const bool upperFMAC = (uregs.pipe == VUPIPE_FMAC);
 	const bool lowerFMAC = (lregs.pipe == VUPIPE_FMAC);
@@ -4734,6 +4822,50 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 	const u32 xyzwLower   = lowerFMAC ? lregs.VFwxyzw  : 0u;
 	const u32 flagregBoth = (upperFMAC ? uregs.VIwrite : 0u) |
 	                        (lowerFMAC ? lregs.VIwrite : 0u);
+
+	// Mac-style flag-instance routing path. Skips every ring-metadata Str
+	// (sCycle / Cycle / flagreg / regupper / reglower / xyzwupper /
+	// xyzwlower) and skips the fmaccount bump — the JIT only writes the
+	// per-pair flag VALUES into slot[mo.{m,s,c}Flag.write]. The
+	// vu1_TestPipes_VU1 helper still runs but fmaccount stays 0 so its
+	// FMAC drain loop early-exits (FDIV / EFU / IALU drains continue).
+	if (mo && EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
+	{
+		const int64_t f_macflag    = (int64_t)offsetof(fmacPipe, macflag);
+		const int64_t f_statusflag = (int64_t)offsetof(fmacPipe, statusflag);
+		const int64_t f_clipflag   = (int64_t)offsetof(fmacPipe, clipflag);
+
+		// MAC flag: always written when this pair's upper op generates a
+		// MAC update (mFlag.doFlag mirrors the upstream sFlag.doFlag-driven
+		// mFlag.doFlag promotion done by the backward walk in
+		// mvu1AnalyzeBlock).
+		if (mo->mFlag.doFlag)
+		{
+			armAsm->Str(VU1_MACFLAG_REG,
+				MemOperand(VU1_BASE_REG, fmacInstanceOff(mo->mFlag.write, f_macflag)));
+		}
+
+		// Status flag: conditional on doFlag || isFSSET || doDivFlag
+		// (matches sCond in the analyze pass).
+		const bool sCond = mo->sFlag.doFlag || mo->lOp.isFSSET || mo->doDivFlag;
+		if (sCond)
+		{
+			armAsm->Str(VU1_STATUSFLAG_REG,
+				MemOperand(VU1_BASE_REG, fmacInstanceOff(mo->sFlag.write, f_statusflag)));
+		}
+
+		// Clip flag: only when this pair's upper op was CLIP (flagregBoth
+		// carries the REG_CLIP_FLAG bit) AND cFlag.doFlag (cross-block
+		// reachability).
+		const bool need_clip = (flagregBoth & (1u << REG_CLIP_FLAG)) != 0u
+			&& mo->cFlag.doFlag;
+		if (need_clip)
+		{
+			armAsm->Str(VU1_CLIPFLAG_REG,
+				MemOperand(VU1_BASE_REG, fmacInstanceOff(mo->cFlag.write, f_clipflag)));
+		}
+		return;
+	}
 
 	const int64_t fmac_off       = (int64_t)offsetof(VURegs, fmac);
 	// Phase-7: macflag/statusflag/clipflag live in pinned regs w19/w20/w28
@@ -5703,6 +5835,21 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				// suppress the BL. Outside that window the BL stays.
 				skip_info[i].useStaticFmacStall = fmac_carry_safe;
 
+				// Vu1FmacInstanceRouting: ring-metadata Strs (sCycle / Cycle /
+				// flagreg) are no longer emitted, so vu1_TestFMACStallReg /
+				// _Reg2 would read stale sCycle and either over- or under-
+				// stall arbitrarily. Force-skip those BLs unconditionally
+				// when the toggle is on; cycle correctness is still tracked
+				// via Phase 2's deferred-Add accumulator (which works off
+				// CT-modeled stalls, not runtime sCycle).
+				if (EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
+				{
+					skip_info[i].skipUpperFMACStall0 = true;
+					skip_info[i].skipUpperFMACStall1 = true;
+					skip_info[i].skipLowerFMACStall0 = true;
+					skip_info[i].skipLowerFMACStall1 = true;
+				}
+
 				// Phase 2 (microVU inline-FMAC-stall) — emit-side override.
 				// When the runtime toggle is on AND we're in the carry-safe
 				// window AND fmac_stall > 0, force-skip the per-pair FMAC
@@ -5949,6 +6096,21 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// FMAC arith writeback + FDIV/SQRT/RSQRT + FSSET/FCSET/CLIP read/write
 	// them — all now routed through pinned regs instead of memory.
 	emitReloadFlagRegs(macflag_off, statusflag_off, clipflag_off);
+
+	// Vu1FmacInstanceRouting: pre-load all 4 instance slots with the entry
+	// VI[REG_MAC/STATUS/CLIP] value (currently held in the pinned w19/w20/
+	// w28). The findFlagInst {0,1,2,3} init in mvu1AnalyzeBlock means the
+	// first 4 pairs' reader-side commits can hit any of slots 0..3, so each
+	// must hold the cross-block "old" value or those reads return garbage.
+	// 12 Strs, one-shot per block — negligible vs the per-pair savings.
+	// Also zero the pinned fmaccount so vu1_TestPipes_VU1's FMAC drain loop
+	// early-exits no matter what fmaccount was in VURegs memory from a
+	// predecessor block that ran with the toggle OFF.
+	if (EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
+	{
+		emitFmacInstanceBlockInit();
+		armAsm->Mov(VU1_FMACCOUNT_REG, 0);
+	}
 
 	// Phase-8: prime the pinned ACC register from memory. Every FMAC
 	// transform chain reads+writes ACC 4× — pinning gives us 1 Ldr here
@@ -6560,6 +6722,16 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		}
 #endif
 
+		// 0. Mac-style flag-instance reader-side commit. Vu1FmacInstanceRouting
+		//    routes each per-flag-type "current instance" from the 4-slot
+		//    array at fmac[0..3] to VI[REG_MAC/STATUS/CLIP] memory + the
+		//    pinned w19/w20/w28 regs. This is what gives the lower op (step
+		//    8) the right historical flag value when it reads VI[REG_*]. The
+		//    instance indices (mo.{m,s,c}Flag.read) come from
+		//    mvu1AnalyzeBlock's findFlagInst pass.
+		if (EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
+			emitFmacInstanceReaderCommit(ir.info[i]);
+
 		// 1. VU->cycle++ — Stage C2 uses the cached VU1_CYCLE_REG (x21).
 		//    x22 latches "cycle before this pair" for the VIBackupCycles
 		//    decrement at step 6b. Both x21 and x22 are callee-saved and
@@ -7163,7 +7335,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		//       For I-bit pairs lregs is all-zero (pipe == VUPIPE_NONE),
 		//       so passing it directly is safe — both helpers no-op on it.
 		VU1_PERF_BEGIN(_pp_s9);
-		emitFMACAddPair(uregs, lregs);
+		emitFMACAddPair(uregs, lregs, &ir.info[i]);
 		if (!ibit)
 			emitLowerNonFMACAdd(lregs);
 		VU1_PERF_END(_pp_s9, "VU1_PipeAdd_0x%04x", pc);

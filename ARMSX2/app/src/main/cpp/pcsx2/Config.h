@@ -703,6 +703,18 @@ struct Pcsx2Config
 		// regalloc. Default OFF until A/B-tested in San Andreas + GoW2.
 		bool
 			Vu1InlineDrainTestPipes : 1;
+		// Mac-style flag-instance routing. When ON, VU->fmac[0..3].{mac,
+		// status,clip}flag are reinterpreted as 4 mac-style instance slots
+		// (the ring metadata — sCycle/Cycle/flagreg/regupper/etc. — is no
+		// longer written). emitFMACAddPair stores the pair's new flags into
+		// slot[mo.{m,s,c}Flag.write]; at each pair's top, slot[mo.{m,s,c}
+		// Flag.read] is committed to VI[REG_MAC/STATUS/CLIP]. FMAC stall BLs
+		// are force-skipped (they read sCycle which we don't write) and
+		// fmaccount stays 0 so vu1_TestPipes_VU1's FMAC drain loop early-
+		// exits. Default OFF — first-cut port of microVU's flag-instance
+		// scheme; subsequent sessions add cross-block instance plumbing.
+		bool
+			Vu1FmacInstanceRouting : 1;
 		BITFIELD_END
 
 		RecompilerOptions();

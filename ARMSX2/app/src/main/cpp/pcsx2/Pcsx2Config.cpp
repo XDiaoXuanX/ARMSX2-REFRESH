@@ -473,6 +473,8 @@ Pcsx2Config::RecompilerOptions::RecompilerOptions()
 	// Inline-emit the FMAC drain instead of BL into vu1_TestPipes_VU1 at
 	// fmacOnlyTestPipes pairs. OFF by default until A/B-tested.
 	Vu1InlineDrainTestPipes = false;
+	// Mac-style flag-instance routing — OFF by default, first-cut port.
+	Vu1FmacInstanceRouting = false;
 
 	// vu and fpu clamping default to standard overflow.
 	vu0Overflow = true;
@@ -560,6 +562,7 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(Vu1InlineFmacStall);
 	SettingsWrapBitBool(Vu1CrossBlockPState);
 	SettingsWrapBitBool(Vu1InlineDrainTestPipes);
+	SettingsWrapBitBool(Vu1FmacInstanceRouting);
 
 	SettingsWrapBitBool(vu0Overflow);
 	SettingsWrapBitBool(vu0ExtraOverflow);
