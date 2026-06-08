@@ -4785,6 +4785,45 @@ static void emitFmacInstanceReaderCommit(const armvu1ir::microOp& mo)
 	viCacheInvalidate(REG_CLIP_FLAG);
 }
 
+// Writer-side commit: at the END of every pair (after both upper FMAC
+// writeback and lower op have updated the pinned w19/w20/w28), Str the
+// pinned regs to slot[mo.{m,s,c}Flag.write] gated on the analyze-pass
+// write-cycle gates (mFlag.doFlag for mac, sCond for status, cFlag.doFlag
+// for clip). Must fire for non-FMAC pairs too — FSSET / FDIV with status,
+// CLIP op, etc. all advance the instance ring via the analyze pass but
+// the FMAC writeback never runs for them. Earlier foundation cut put this
+// inside emitFMACAddPair which early-returns on non-FMAC pairs; the
+// missing FSSET / clip writes were the root cause of the wrecked
+// graphics with the toggle on alone.
+static void emitFmacInstanceWriterCommit(const armvu1ir::microOp& mo,
+	u32 flagregBoth)
+{
+	const int64_t f_macflag    = (int64_t)offsetof(fmacPipe, macflag);
+	const int64_t f_statusflag = (int64_t)offsetof(fmacPipe, statusflag);
+	const int64_t f_clipflag   = (int64_t)offsetof(fmacPipe, clipflag);
+
+	if (mo.mFlag.doFlag)
+	{
+		armAsm->Str(VU1_MACFLAG_REG,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.mFlag.write, f_macflag)));
+	}
+
+	const bool sCond = mo.sFlag.doFlag || mo.lOp.isFSSET || mo.doDivFlag;
+	if (sCond)
+	{
+		armAsm->Str(VU1_STATUSFLAG_REG,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.sFlag.write, f_statusflag)));
+	}
+
+	const bool need_clip = (flagregBoth & (1u << REG_CLIP_FLAG)) != 0u
+		&& mo.cFlag.doFlag;
+	if (need_clip)
+	{
+		armAsm->Str(VU1_CLIPFLAG_REG,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.cFlag.write, f_clipflag)));
+	}
+}
+
 // Block prologue init: pre-load all 4 instance slots with the entry-time
 // VI[REG_MAC/STATUS/CLIP] value so the first 4 pairs' reader-side commits
 // (which can hit any of slots 0..3 per the findFlagInst {0,1,2,3} init)
@@ -4823,49 +4862,17 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs,
 	const u32 flagregBoth = (upperFMAC ? uregs.VIwrite : 0u) |
 	                        (lowerFMAC ? lregs.VIwrite : 0u);
 
-	// Mac-style flag-instance routing path. Skips every ring-metadata Str
-	// (sCycle / Cycle / flagreg / regupper / reglower / xyzwupper /
-	// xyzwlower) and skips the fmaccount bump — the JIT only writes the
-	// per-pair flag VALUES into slot[mo.{m,s,c}Flag.write]. The
-	// vu1_TestPipes_VU1 helper still runs but fmaccount stays 0 so its
-	// FMAC drain loop early-exits (FDIV / EFU / IALU drains continue).
-	if (mo && EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
-	{
-		const int64_t f_macflag    = (int64_t)offsetof(fmacPipe, macflag);
-		const int64_t f_statusflag = (int64_t)offsetof(fmacPipe, statusflag);
-		const int64_t f_clipflag   = (int64_t)offsetof(fmacPipe, clipflag);
-
-		// MAC flag: always written when this pair's upper op generates a
-		// MAC update (mFlag.doFlag mirrors the upstream sFlag.doFlag-driven
-		// mFlag.doFlag promotion done by the backward walk in
-		// mvu1AnalyzeBlock).
-		if (mo->mFlag.doFlag)
-		{
-			armAsm->Str(VU1_MACFLAG_REG,
-				MemOperand(VU1_BASE_REG, fmacInstanceOff(mo->mFlag.write, f_macflag)));
-		}
-
-		// Status flag: conditional on doFlag || isFSSET || doDivFlag
-		// (matches sCond in the analyze pass).
-		const bool sCond = mo->sFlag.doFlag || mo->lOp.isFSSET || mo->doDivFlag;
-		if (sCond)
-		{
-			armAsm->Str(VU1_STATUSFLAG_REG,
-				MemOperand(VU1_BASE_REG, fmacInstanceOff(mo->sFlag.write, f_statusflag)));
-		}
-
-		// Clip flag: only when this pair's upper op was CLIP (flagregBoth
-		// carries the REG_CLIP_FLAG bit) AND cFlag.doFlag (cross-block
-		// reachability).
-		const bool need_clip = (flagregBoth & (1u << REG_CLIP_FLAG)) != 0u
-			&& mo->cFlag.doFlag;
-		if (need_clip)
-		{
-			armAsm->Str(VU1_CLIPFLAG_REG,
-				MemOperand(VU1_BASE_REG, fmacInstanceOff(mo->cFlag.write, f_clipflag)));
-		}
+	// Mac-style flag-instance routing path. Slot writes are now handled by
+	// emitFmacInstanceWriterCommit (called for every pair from the per-pair
+	// emit, even non-FMAC ones — FSSET / FDIV-with-flag / CLIP all advance
+	// the instance ring via the analyze pass but never trigger this
+	// function). Here we just skip every ring-metadata Str (sCycle / Cycle
+	// / flagreg / regupper / reglower / xyzwupper / xyzwlower) and skip
+	// the fmaccount bump. vu1_TestPipes_VU1 still runs but fmaccount stays
+	// 0 so its FMAC drain loop early-exits.
+	if (EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
 		return;
-	}
+	(void)mo;
 
 	const int64_t fmac_off       = (int64_t)offsetof(VURegs, fmac);
 	// Phase-7: macflag/statusflag/clipflag live in pinned regs w19/w20/w28
@@ -7338,6 +7345,21 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		emitFMACAddPair(uregs, lregs, &ir.info[i]);
 		if (!ibit)
 			emitLowerNonFMACAdd(lregs);
+
+		// Vu1FmacInstanceRouting writer-side commit. Runs after the FMAC
+		// writeback (and after the lower op which may have updated
+		// VU1_STATUSFLAG_REG for FSSET / FDIV-flag) so pinned regs hold
+		// the latest computed flag value. Strs pinned → slot[mo.write]
+		// gated on doFlag / sCond / cFlag.doFlag. Must fire for every
+		// pair — non-FMAC pairs with sCond / cFlag.doFlag advance the
+		// instance ring in mvu1AnalyzeBlock and need their slot
+		// populated for downstream reader-side commits, otherwise
+		// readers at pair+K read stale values from the prologue init.
+		if (EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
+		{
+			const u32 flagregBoth = uregs.VIwrite | lregs.VIwrite;
+			emitFmacInstanceWriterCommit(ir.info[i], flagregBoth);
+		}
 		VU1_PERF_END(_pp_s9, "VU1_PipeAdd_0x%04x", pc);
 
 		// 11b. D/T bits — depend on VU0 FBRST (runtime). Only emit when
