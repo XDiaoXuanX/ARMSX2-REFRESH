@@ -2487,7 +2487,7 @@ void FullscreenUI::DrawBIOSSettingsPage()
 
 	MenuHeading(FSUI_CSTR("Fast Boot Options"));
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_FORWARD_FAST, "Fast Boot"), FSUI_CSTR("Skips the intro screen, and bypasses region checks."),
-		"EmuCore", "EnableFastBoot", true);
+		"EmuCore", "EnableFastBoot", false);
 
 	EndMenuButtons();
 }

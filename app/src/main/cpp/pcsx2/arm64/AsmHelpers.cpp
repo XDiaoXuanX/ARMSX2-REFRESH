@@ -77,6 +77,10 @@ thread_local a64::MacroAssembler* armAsm;
 thread_local u8* armAsmPtr;
 thread_local size_t armAsmCapacity;
 thread_local ArmConstantPool* armConstantPool;
+static thread_local u8* s_arm_block_start = nullptr;
+static thread_local size_t s_arm_block_write_size = 0;
+
+static constexpr size_t ARM64_CODE_WRITE_WINDOW = 1024 * 1024;
 
 #ifdef INCLUDE_DISASSEMBLER
 static std::mutex armDisasmMutex;
@@ -119,7 +123,9 @@ u8* armStartBlock()
 {
 	armAlignAsmPtr();
 
-	HostSys::BeginCodeWrite();
+	s_arm_block_start = armAsmPtr;
+	s_arm_block_write_size = (armAsmCapacity < ARM64_CODE_WRITE_WINDOW) ? armAsmCapacity : ARM64_CODE_WRITE_WINDOW;
+	HostSys::BeginCodeWriteRange(s_arm_block_start, s_arm_block_write_size);
 
 	pxAssert(!armAsm);
 	armAsm = new (s_asm_storage) a64::MacroAssembler(static_cast<vixl::byte*>(armGetWritableCodePtr(armAsmPtr)), armAsmCapacity);
@@ -140,10 +146,12 @@ u8* armEndBlock()
 	armAsm->~MacroAssembler();
 	armAsm = nullptr;
 
-	HostSys::EndCodeWrite();
+	HostSys::EndCodeWriteRange(s_arm_block_start, s_arm_block_write_size);
 
 	HostSys::FlushInstructionCache(armAsmPtr, size);
 
+	s_arm_block_start = nullptr;
+	s_arm_block_write_size = 0;
 	armAsmPtr = armAsmPtr + size;
 	armAsmCapacity -= size;
 	return armAsmPtr;
@@ -431,7 +439,10 @@ u8* ArmConstantPool::GetJumpTrampoline(const void* target)
 		return nullptr;
 	}
 
-	a64::MacroAssembler masm(static_cast<vixl::byte*>(armGetWritableCodePtr(m_base_ptr + offset)), m_capacity - offset);
+	u8* const trampoline_ptr = m_base_ptr + offset;
+	static constexpr size_t TRAMPOLINE_WRITE_WINDOW = 64;
+	HostSys::BeginCodeWriteRange(trampoline_ptr, TRAMPOLINE_WRITE_WINDOW);
+	a64::MacroAssembler masm(static_cast<vixl::byte*>(armGetWritableCodePtr(trampoline_ptr)), m_capacity - offset);
 	masm.Mov(RXVIXLSCRATCH, reinterpret_cast<intptr_t>(target));
 	masm.Br(RXVIXLSCRATCH);
 	masm.FinalizeCode();
@@ -440,9 +451,10 @@ u8* ArmConstantPool::GetJumpTrampoline(const void* target)
 	m_jump_targets.emplace(target, offset);
 	m_used = offset + static_cast<u32>(masm.GetSizeOfCodeGenerated());
 
-	HostSys::FlushInstructionCache(reinterpret_cast<void*>(m_base_ptr + offset), m_used - offset);
+	HostSys::EndCodeWriteRange(trampoline_ptr, m_used - offset);
+	HostSys::FlushInstructionCache(reinterpret_cast<void*>(trampoline_ptr), m_used - offset);
 
-	return m_base_ptr + offset;
+	return trampoline_ptr;
 }
 
 u8* ArmConstantPool::GetLiteral(u64 value)
@@ -460,9 +472,12 @@ u8* ArmConstantPool::GetLiteral(const u128& value)
 		return nullptr;
 
 	const u32 offset = Common::AlignUpPow2(m_used, 16);
-	std::memcpy(armGetWritableCodePtr(&m_base_ptr[offset]), &value, sizeof(value));
+	u8* const literal_ptr = &m_base_ptr[offset];
+	HostSys::BeginCodeWriteRange(literal_ptr, sizeof(value));
+	std::memcpy(armGetWritableCodePtr(literal_ptr), &value, sizeof(value));
+	HostSys::EndCodeWriteRange(literal_ptr, sizeof(value));
 	m_used = offset + sizeof(value);
-	return m_base_ptr + offset;
+	return literal_ptr;
 }
 
 u8* ArmConstantPool::GetLiteral(const u8* bytes, size_t len)

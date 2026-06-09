@@ -587,7 +587,7 @@ void VMManager::SetDefaultSettings(
 		temp_config.LoadSave(ssw);
 
 		// Settings not part of the Pcsx2Config struct.
-		si.SetBoolValue("EmuCore", "EnableFastBoot", true);
+		si.SetBoolValue("EmuCore", "EnableFastBoot", false);
 
 		SetHardwareDependentDefaultSettings(si);
 		SetDefaultLoggingSettings(si);

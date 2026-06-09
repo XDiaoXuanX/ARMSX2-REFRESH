@@ -2465,7 +2465,7 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 	g_p44_settings_interface->SetStringValue("GameISO", "BootISO", bootValue.UTF8String);
 	const bool fastBoot = g_p44_settings_interface->GetBoolValue(
 		"GameISO", "FastBoot",
-		g_p44_settings_interface->GetBoolValue("EmuCore", "EnableFastBoot", true));
+		g_p44_settings_interface->GetBoolValue("EmuCore", "EnableFastBoot", false));
 	g_p44_settings_interface->SetBoolValue("GameISO", "FastBoot", fastBoot);
 	g_p44_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", fastBoot);
 	g_p44_settings_interface->Save();

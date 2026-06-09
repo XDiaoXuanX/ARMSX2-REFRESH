@@ -356,9 +356,62 @@ size_t HostSys::GetRuntimeCacheLineSize()
 static void* s_legacy_code_base = nullptr;
 static size_t s_legacy_code_size = 0;
 static bool s_legacy_is_writable = true;
+static bool s_legacy_range_log_done = false;
 #endif
 
 static thread_local int s_code_write_depth = 0;
+static thread_local int s_code_write_range_full_depth = 0;
+
+#if TARGET_OS_IPHONE
+static bool LegacyProtectCodeRange(void* address, size_t size, int prot, const char* tag)
+{
+	if (!s_legacy_code_base || !address || size == 0)
+		return false;
+
+	const uintptr_t base = reinterpret_cast<uintptr_t>(s_legacy_code_base);
+	const uintptr_t limit = base + s_legacy_code_size;
+	const uintptr_t start = reinterpret_cast<uintptr_t>(address);
+	uintptr_t end = start + size;
+	if (end < start || end > limit)
+		end = limit;
+
+	if (start < base || start >= limit || end <= start)
+		return false;
+
+	static const size_t page_size = []() {
+		size_t detected_page_size = HostSys::GetRuntimePageSize();
+		return detected_page_size ? detected_page_size : static_cast<size_t>(getpagesize());
+	}();
+
+	const uintptr_t page_mask = ~(static_cast<uintptr_t>(page_size) - 1);
+	const uintptr_t aligned_start = start & page_mask;
+	const uintptr_t aligned_end = (end + page_size - 1) & page_mask;
+	if (aligned_end <= aligned_start)
+		return false;
+
+	if (mprotect(reinterpret_cast<void*>(aligned_start), aligned_end - aligned_start, prot) != 0)
+	{
+		static int s_range_fail_count = 0;
+		if (s_range_fail_count++ < 8)
+		{
+			std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_mprotect_%s_fail addr=%p size=0x%zx err=%d count=%d\n",
+				tag, address, size, errno, s_range_fail_count);
+			std::fflush(stderr);
+		}
+		return false;
+	}
+
+	if (!s_legacy_range_log_done)
+	{
+		std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_range_wx_enabled page=0x%zx base=%p size=0x%zx\n",
+			page_size, s_legacy_code_base, s_legacy_code_size);
+		std::fflush(stderr);
+		s_legacy_range_log_done = true;
+	}
+
+	return true;
+}
+#endif
 
 void HostSys::BeginCodeWrite()
 {
@@ -423,6 +476,38 @@ void HostSys::EndCodeWrite()
 		pthread_jit_write_protect_np(1);
 #endif
 	}
+}
+
+void HostSys::BeginCodeWriteRange(void* address, size_t size)
+{
+#if TARGET_OS_IPHONE
+	if (DarwinMisc::g_code_rw_offset == 0 &&
+		DarwinMisc::GetJitMode() == DarwinMisc::JitMode::Legacy && s_legacy_code_base &&
+		LegacyProtectCodeRange(address, size, PROT_READ | PROT_WRITE, "range_rw"))
+	{
+		return;
+	}
+#endif
+	s_code_write_range_full_depth++;
+	BeginCodeWrite();
+}
+
+void HostSys::EndCodeWriteRange(void* address, size_t size)
+{
+	if (s_code_write_range_full_depth > 0)
+	{
+		s_code_write_range_full_depth--;
+		EndCodeWrite();
+		return;
+	}
+
+#if TARGET_OS_IPHONE
+	if (DarwinMisc::g_code_rw_offset == 0 &&
+		DarwinMisc::GetJitMode() == DarwinMisc::JitMode::Legacy && s_legacy_code_base)
+	{
+		LegacyProtectCodeRange(address, size, PROT_READ | PROT_EXEC, "range_rx");
+	}
+#endif
 }
 
 [[maybe_unused]] static bool IsStoreInstruction(const void* ptr)
@@ -723,7 +808,9 @@ void* DarwinMisc::MmapCodeDualMap(size_t size)
 		s_legacy_code_base = ptr;
 		s_legacy_code_size = size;
 		s_legacy_is_writable = true;
-		std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_rw_ok rx=%p rw=%p offset=0 size=0x%zx\n",
+		s_legacy_range_log_done = false;
+
+		std::fprintf(stderr, "@@JIT_ALLOC@@ legacy_wx_toggle_ok rx=%p rw=%p offset=0 size=0x%zx\n",
 			ptr, ptr, size);
 		std::fflush(stderr);
 		return ptr;
@@ -823,6 +910,7 @@ void DarwinMisc::MunmapCodeDualMap(void* rx_ptr, size_t size)
 	s_legacy_code_base = nullptr;
 	s_legacy_code_size = 0;
 	s_legacy_is_writable = true;
+	s_legacy_range_log_done = false;
 #endif
 }
 

@@ -476,7 +476,7 @@ final class SettingsStore: @unchecked Sendable {
     }
 
     private static func loadedFastBoot() -> Bool {
-        let coreFastBoot = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableFastBoot", defaultValue: true)
+        let coreFastBoot = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableFastBoot", defaultValue: false)
         return ARMSX2Bridge.getINIBool("GameISO", key: "FastBoot", defaultValue: coreFastBoot)
     }
 

@@ -1945,7 +1945,7 @@ Pcsx2Config::Pcsx2Config()
 	bitset = 0;
 	// Set defaults for fresh installs / reset settings
 	EnablePatches = true;
-	EnableFastBoot = true;
+	EnableFastBoot = false;
 	EnableRecordingTools = true;
 	EnableGameFixes = true;
 	InhibitScreensaver = true;

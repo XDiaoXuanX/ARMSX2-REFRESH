@@ -738,11 +738,11 @@ static INISettingsInterface* s_secrets_settings_interface = nullptr;
 static bool ARMSX2GetConfiguredFastBoot()
 {
     if (!s_settings_interface)
-        return true;
+        return false;
 
     return s_settings_interface->GetBoolValue(
         "GameISO", "FastBoot",
-        s_settings_interface->GetBoolValue("EmuCore", "EnableFastBoot", true));
+        s_settings_interface->GetBoolValue("EmuCore", "EnableFastBoot", false));
 }
 
 static double ARMSX2IOSGetAppRAMGB()
@@ -3184,8 +3184,8 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             // Normal console-speed frame limiter. Do not save reduced nominal
             // speed here; that is not a safe FPS cap for iOS.
             s_settings_interface->SetFloatValue("Framerate", "NominalScalar", 1.0f);
-            s_settings_interface->SetBoolValue("GameISO", "FastBoot", true);
-            s_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", true);
+            s_settings_interface->SetBoolValue("GameISO", "FastBoot", false);
+            s_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", false);
 
             // Speedhacks
             s_settings_interface->SetBoolValue("EmuCore/Speedhacks", "vuThread", ARMSX2ShouldEnableMTVUByDefault(nullptr));
@@ -3841,8 +3841,11 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             ARMSX2RepairIOSARM64JITSettings(s_settings_interface, "pre-vm-initialize");
             VMManager::Internal::LoadStartupSettings();
             ARMSX2ApplyIOSOsdPresetFromConfig("pre-vm-initialize");
-            VMManager::ApplySettings();
-            std::fprintf(stderr, "@@IOS_PREVM_APPLY_SETTINGS@@ mtvu=%d fastmem=%d\n",
+            EmuConfig.Speedhacks.vuThread =
+                s_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", EmuConfig.Speedhacks.vuThread);
+            EmuConfig.Cpu.Recompiler.EnableFastmem =
+                s_settings_interface->GetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", EmuConfig.Cpu.Recompiler.EnableFastmem);
+            std::fprintf(stderr, "@@IOS_PREVM_SYNC_SETTINGS@@ mtvu=%d fastmem=%d\n",
                 EmuConfig.Speedhacks.vuThread ? 1 : 0,
                 EmuConfig.Cpu.Recompiler.EnableFastmem ? 1 : 0);
             std::fflush(stderr);
@@ -4082,7 +4085,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_ios18_mtvu_v3_prevm_apply\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_ios18_legacy_range_wx_fastboot_off\n");
     fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     
     // [iPSX2] Unification Validation
