@@ -954,6 +954,18 @@ static inline bool isFSSETOp(u32 lower)
 	return (lower >> 25) == 0x15u;
 }
 
+// FCSET writes the clip flag (lregs.VIwrite carries REG_CLIP_FLAG). Not
+// caught by classifyUpper, so the analyze pass's cFlag.doFlag stayed false
+// for FCSET pairs even though they advance the helper's clip drain via the
+// flagreg bit. Under Vu1FmacInstanceRouting we need cFlag.doFlag true so
+// xClip[xC] gets bumped and the writer commit Strs the new clip to the
+// slot. Otherwise next CLIP / FCAND reads stale entry clip. Symptom: BIOS
+// pillars disappeared with the toggle on alone.
+static inline bool isFCSETOp(u32 lower)
+{
+	return (lower >> 25) == 0x11u;
+}
+
 void mvu1AnalyzeBlock(
 	u32 startPC,
 	u32 numPairs,
@@ -1730,7 +1742,10 @@ void mvu1AnalyzeBlock(
 		mo.mFlag.lastWrite   = 0;
 		mo.mFlag.read        = 0;
 
-		mo.cFlag.doFlag      = (ukind == 3);
+		// (ukind == 3) is upper CLIP; the lower FCSET also writes the clip
+		// flag and must advance the instance ring under Vu1FmacInstanceRouting
+		// — see isFCSETOp() comment.
+		mo.cFlag.doFlag      = (ukind == 3) || isFCSETOp(mo.lower);
 		mo.cFlag.doNonSticky = false;
 		mo.cFlag.write       = 0;
 		mo.cFlag.lastWrite   = 0;
