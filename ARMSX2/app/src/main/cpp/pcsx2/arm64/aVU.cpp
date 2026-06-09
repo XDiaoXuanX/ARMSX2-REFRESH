@@ -6155,21 +6155,6 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// them — all now routed through pinned regs instead of memory.
 	emitReloadFlagRegs(macflag_off, statusflag_off, clipflag_off);
 
-	// Vu1FmacInstanceRouting: pre-load all 4 instance slots with the entry
-	// VI[REG_MAC/STATUS/CLIP] value (currently held in the pinned w19/w20/
-	// w28). The findFlagInst {0,1,2,3} init in mvu1AnalyzeBlock means the
-	// first 4 pairs' reader-side commits can hit any of slots 0..3, so each
-	// must hold the cross-block "old" value or those reads return garbage.
-	// 12 Strs, one-shot per block — negligible vs the per-pair savings.
-	// Also zero the pinned fmaccount so vu1_TestPipes_VU1's FMAC drain loop
-	// early-exits no matter what fmaccount was in VURegs memory from a
-	// predecessor block that ran with the toggle OFF.
-	if (EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
-	{
-		emitFmacInstanceBlockInit();
-		armAsm->Mov(VU1_FMACCOUNT_REG, 0);
-	}
-
 	// Phase-8: prime the pinned ACC register from memory. Every FMAC
 	// transform chain reads+writes ACC 4× — pinning gives us 1 Ldr here
 	// and 1 Str at epilogue instead of 8 memory ops per chain.
@@ -6180,6 +6165,31 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// prologue. At this point x21/x23/x24/x25 are live — caller's regs
 	// trusted (same ABI as the fall-through from codeEntry above).
 	out_block->linkEntry = armGetCurrentCodePointer();
+
+	// Vu1FmacInstanceRouting: pre-load all 4 instance slots with the entry
+	// VI[REG_MAC/STATUS/CLIP] value (currently held in the pinned w19/w20/
+	// w28). The findFlagInst {0,1,2,3} init in mvu1AnalyzeBlock means the
+	// first 4 pairs' reader-side commits can hit any of slots 0..3, so each
+	// must hold the cross-block "old" value or those reads return garbage.
+	// 12 Strs, one-shot per block — negligible vs the per-pair savings.
+	// Also zero the pinned fmaccount so vu1_TestPipes_VU1's FMAC drain loop
+	// early-exits no matter what fmaccount was in VURegs memory from a
+	// predecessor block that ran with the toggle OFF.
+	//
+	// Placed AFTER linkEntry (not in the cold-only prologue above) so it
+	// runs on EVERY block invocation — both cold dispatch and direct-link
+	// B's from predecessor blocks. Earlier placement above emitReloadFlagRegs
+	// only ran on cold entry, so linked entries inherited slot[0..3] from
+	// whatever the predecessor's writer commits left there, and inherited
+	// VU1_FMACCOUNT_REG from the caller's frame. Symptom: BIOS pillars
+	// disappeared because the BIOS scheduler runs a small VU program many
+	// times via the link-chain, and only the very first invocation had
+	// coherent slot state.
+	if (EmuConfig.Cpu.Recompiler.Vu1FmacInstanceRouting)
+	{
+		emitFmacInstanceBlockInit();
+		armAsm->Mov(VU1_FMACCOUNT_REG, 0);
+	}
 
 	// VU1_PROFILE_BLOCKS: bump per-block exec counter. Placed at linkEntry so
 	// both the prologue fall-through (first dispatch) and direct-linked
