@@ -63,6 +63,9 @@ namespace R5900::Interpreter::OpcodeImpl::COP0
 
 extern "C" void LogUnified(const char* fmt, ...)
 {
+	if (Log::ShouldSuppressLegacyProbeMessage(fmt))
+		return;
+
 	va_list args;
 	va_start(args, fmt);
 	std::vfprintf(stderr, fmt, args);

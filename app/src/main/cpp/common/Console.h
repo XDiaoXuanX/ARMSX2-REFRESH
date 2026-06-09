@@ -96,6 +96,7 @@ namespace Log
 	LOGLEVEL GetMaxLevel();
 
 	// writes a message to the log
+	bool ShouldSuppressLegacyProbeMessage(std::string_view message);
 	void Write(LOGLEVEL level, ConsoleColors color, std::string_view message);
 	void Writef(LOGLEVEL level, ConsoleColors color, const char* format, ...);
 	void Writev(LOGLEVEL level, ConsoleColors color, const char* format, va_list ap);

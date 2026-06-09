@@ -12,9 +12,27 @@ ENTITLEMENTS_FILE="${ENTITLEMENTS_FILE:-$ROOT_DIR/app/src/main/cpp/Entitlements.
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 AD_HOC_SIGN="${AD_HOC_SIGN:-0}"
 
-if [[ ! -d "$PROJECT" ]]; then
-	"$ROOT_DIR/scripts/generate-ios-xcode.sh"
-fi
+refresh_generated_git_metadata() {
+	local short_hash full_hash git_date pbxproj svnrev_file
+	short_hash="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+	full_hash="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+	git_date="$(git -C "$ROOT_DIR" log -1 --format=%cd --date=local 2>/dev/null || true)"
+	[[ -n "$short_hash" ]] || return 0
+
+	pbxproj="$PROJECT/project.pbxproj"
+	if [[ -f "$pbxproj" ]]; then
+		SHORT_HASH="$short_hash" perl -0pi -e 's/ARMSX2_GIT_HASH=\\"[0-9A-Fa-f]+\\"/ARMSX2_GIT_HASH=\\"$ENV{SHORT_HASH}\\"/g' "$pbxproj"
+	fi
+
+	svnrev_file="$BUILD_DIR/common/include/svnrev.h"
+	if [[ -f "$svnrev_file" ]]; then
+		SHORT_HASH="$short_hash" FULL_HASH="$full_hash" GIT_DATE_TEXT="$git_date" perl -0pi -e '
+			s/(#define GIT_REV "[^"]*-g)[0-9A-Fa-f]+(")/$1$ENV{SHORT_HASH}$2/g;
+			s/(#define GIT_HASH ")[^"]*(")/$1$ENV{FULL_HASH}$2/g;
+			s/(#define GIT_DATE ")[^"]*(")/$1$ENV{GIT_DATE_TEXT}$2/g;
+		' "$svnrev_file"
+	fi
+}
 
 mkdir -p "$BUILD_DIR"
 
@@ -37,6 +55,17 @@ xcodebuild -version
 echo "Developer directory: $(xcode-select -p)"
 echo "Metal compiler: $(xcrun --sdk iphoneos --find metal)"
 echo
+
+if command -v cmake >/dev/null 2>&1; then
+	"$ROOT_DIR/scripts/generate-ios-xcode.sh"
+elif [[ ! -d "$PROJECT" ]]; then
+	echo "error: cmake is required to generate the iOS Xcode project." >&2
+	echo "Install CMake from https://cmake.org/download/ or through your package manager." >&2
+	exit 1
+else
+	echo "cmake not found; reusing existing generated Xcode project."
+fi
+refresh_generated_git_metadata
 
 set +e
 xcodebuild \

@@ -592,7 +592,9 @@ static bool ARMSX2RepairIOSARM64JITSettings(SettingsInterface* si, const char* r
     const bool defaultMTVU = ARMSX2ShouldEnableMTVUByDefault(&physicalCores);
     const bool manualFastmem = si->GetBoolValue("ARMSX2iOS/Speedhacks", "ManualFastmem", false);
     const bool manualMTVU = si->GetBoolValue("ARMSX2iOS/Speedhacks", "ManualMTVU", false);
+    const int manualMTVUVersion = si->GetIntValue("ARMSX2iOS/Speedhacks", "ManualMTVUVersion", 0);
     const bool mtvu = si->GetBoolValue("EmuCore/Speedhacks", "vuThread", defaultMTVU);
+    const bool staleManualMTVUOff = defaultMTVU && manualMTVU && !mtvu && manualMTVUVersion < 2;
 #if TARGET_OS_SIMULATOR
     const bool jitAvailable = false;
 #else
@@ -601,11 +603,12 @@ static bool ARMSX2RepairIOSARM64JITSettings(SettingsInterface* si, const char* r
     NSString* systemVersion = [[UIDevice currentDevice] systemVersion] ?: @"unknown";
     NSString* deviceModel = [[UIDevice currentDevice] model] ?: @"unknown";
     std::fprintf(stderr,
-        "@@IOS_JIT_POLICY@@ reason=%s ios=\"%s\" device=\"%s\" jit_probe=%d core=%d use_arm64=%d ee=%d iop=%d vu0=%d vu1=%d fastmem=%d manual_fastmem=%d mtvu=%d manual_mtvu=%d physical=%u\n",
+        "@@IOS_JIT_POLICY@@ reason=%s ios=\"%s\" device=\"%s\" jit_probe=%d core=%d use_arm64=%d ee=%d iop=%d vu0=%d vu1=%d fastmem=%d manual_fastmem=%d mtvu=%d manual_mtvu=%d manual_mtvu_version=%d stale_manual_mtvu=%d physical=%u\n",
         reason ? reason : "unknown", systemVersion.UTF8String, deviceModel.UTF8String, jitAvailable ? 1 : 0,
         coreType, useArm64 ? 1 : 0, enableEE ? 1 : 0, enableIOP ? 1 : 0,
         enableVU0 ? 1 : 0, enableVU1 ? 1 : 0, enableFastmem ? 1 : 0,
-        manualFastmem ? 1 : 0, mtvu ? 1 : 0, manualMTVU ? 1 : 0, physicalCores);
+        manualFastmem ? 1 : 0, mtvu ? 1 : 0, manualMTVU ? 1 : 0, manualMTVUVersion,
+        staleManualMTVUOff ? 1 : 0, physicalCores);
     std::fflush(stderr);
 
     if (!jitAvailable || coreType == 1)
@@ -633,7 +636,15 @@ static bool ARMSX2RepairIOSARM64JITSettings(SettingsInterface* si, const char* r
     setBoolIfNeeded("EmuCore/CPU/Recompiler", "EnableVU1", true);
     if (!manualFastmem)
         setBoolIfNeeded("EmuCore/CPU/Recompiler", "EnableFastmem", true);
-    if (defaultMTVU && !manualMTVU)
+    if (staleManualMTVUOff) {
+        si->DeleteValue("ARMSX2iOS/Speedhacks", "ManualMTVU");
+        si->DeleteValue("ARMSX2iOS/Speedhacks", "ManualMTVUVersion");
+        changed = true;
+        std::fprintf(stderr, "@@IOS_STALE_MTVU_REPAIR@@ reason=%s old_mtvu=0 manual_version=%d action=enable_default\n",
+            reason ? reason : "unknown", manualMTVUVersion);
+        std::fflush(stderr);
+    }
+    if (defaultMTVU && (!manualMTVU || staleManualMTVUOff))
         setBoolIfNeeded("EmuCore/Speedhacks", "vuThread", true);
 
     if (changed) {
@@ -4066,7 +4077,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_ios18_fastmem_mtvu_repair\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_ios18_stale_mtvu_repair_diagoff\n");
     fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     
     // [iPSX2] Unification Validation

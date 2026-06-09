@@ -9,6 +9,7 @@
 
 #include "fmt/format.h"
 
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -57,6 +58,55 @@ namespace Log
 	static std::mutex s_file_mutex;
 
 	static HostCallbackType s_host_callback;
+
+	static bool IsLegacyProbeLoggingEnabled()
+	{
+		static int s_enabled = -1;
+		if (s_enabled < 0)
+		{
+			const char* value = std::getenv("iPSX2_DEBUG_VERBOSE");
+			if ((!value || !value[0]) && (value = std::getenv("SIMCTL_CHILD_iPSX2_DEBUG_VERBOSE")) == nullptr)
+				value = "";
+			s_enabled = (value[0] == '1' && value[1] == '\0') ? 1 : 0;
+		}
+		return (s_enabled == 1);
+	}
+
+	static bool StartsWith(std::string_view value, std::string_view prefix)
+	{
+		return (value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0);
+	}
+
+	static bool IsAllowedDiagnosticMarker(std::string_view marker)
+	{
+		static constexpr std::string_view allowed_prefixes[] = {
+			"@@TEST_MARKER@@"sv,
+			"@@OSD@@"sv,
+			"@@FRAMELIMIT@@"sv,
+			"@@JIT_"sv,
+			"@@BOOT_JIT_"sv,
+			"@@ISO_BOOT@@"sv,
+			"@@IOS_"sv,
+			"@@CPU_"sv,
+			"@@VM_"sv,
+			"@@MTL_"sv,
+			"@@MAP_JIT"sv,
+			"@@FASTMEM"sv,
+			"@@MEM_"sv,
+			"@@VTLB_INIT@@"sv,
+			"@@P43_OFFSET@@"sv,
+			"@@P44_"sv,
+			"@@GS_STACK@@"sv,
+		};
+
+		for (std::string_view prefix : allowed_prefixes)
+		{
+			if (StartsWith(marker, prefix))
+				return true;
+		}
+
+		return false;
+	}
 
 #ifdef _WIN32
 	static HANDLE s_hConsoleStdIn = NULL;
@@ -411,6 +461,18 @@ LOGLEVEL Log::GetMaxLevel()
 	return s_max_level;
 }
 
+bool Log::ShouldSuppressLegacyProbeMessage(std::string_view message)
+{
+	if (message.empty() || IsLegacyProbeLoggingEnabled())
+		return false;
+
+	const std::string_view::size_type marker_pos = message.find("@@");
+	if (marker_pos == std::string_view::npos)
+		return (message.find("[TEMP_DIAG]") != std::string_view::npos);
+
+	return !IsAllowedDiagnosticMarker(message.substr(marker_pos));
+}
+
 __ri void Log::UpdateMaxLevel()
 {
 	s_max_level = std::max(s_console_level, std::max(s_debug_level, std::max(s_file_level, s_host_level)));
@@ -442,6 +504,9 @@ void Log::ExecuteCallbacks(LOGLEVEL level, ConsoleColors color, std::string_view
 	}
 
 	pxAssert(level > LOGLEVEL_NONE);
+	if (ShouldSuppressLegacyProbeMessage(message))
+		return;
+
 	if (level <= s_console_level)
 		WriteToConsole(level, color, message);
 
