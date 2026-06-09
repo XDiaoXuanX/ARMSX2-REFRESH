@@ -1133,7 +1133,7 @@ bool VMManager::UpdateGameSettingsLayer()
 			else if (new_interface->ContainsValue("EmuCore/Speedhacks", "vuThread") &&
 					 !new_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", true) &&
 					 (!new_interface->GetBoolValue("ARMSX2iOS/PerGame", "ManualMTVU", false) ||
-					  new_interface->GetIntValue("ARMSX2iOS/PerGame", "ManualMTVUVersion", 0) < 2))
+					  new_interface->GetIntValue("ARMSX2iOS/PerGame", "ManualMTVUVersion", 0) < 3))
 			{
 				new_interface->DeleteValue("ARMSX2iOS/PerGame", "ManualMTVU");
 				new_interface->DeleteValue("ARMSX2iOS/PerGame", "ManualMTVUVersion");

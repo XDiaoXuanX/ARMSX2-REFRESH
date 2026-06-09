@@ -125,7 +125,7 @@ final class SettingsStore: @unchecked Sendable {
         didSet {
             guard !suppressINIWrites else { return }
             ARMSX2Bridge.setINIBool("ARMSX2iOS/Speedhacks", key: "ManualMTVU", value: true)
-            ARMSX2Bridge.setINIInt("ARMSX2iOS/Speedhacks", key: "ManualMTVUVersion", value: 2)
+            ARMSX2Bridge.setINIInt("ARMSX2iOS/Speedhacks", key: "ManualMTVUVersion", value: 3)
             ARMSX2Bridge.setINIBool("EmuCore/Speedhacks", key: "vuThread", value: mtvu)
         }
     }
@@ -854,7 +854,7 @@ final class SettingsStore: @unchecked Sendable {
         fastCDVD = false
         eeCycleRate = 0
         vu1Instant = true
-        mtvu = false
+        mtvu = true
         waitLoop = true
         intcStat = true
         enableCheats = false

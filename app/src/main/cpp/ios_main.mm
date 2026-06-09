@@ -594,7 +594,7 @@ static bool ARMSX2RepairIOSARM64JITSettings(SettingsInterface* si, const char* r
     const bool manualMTVU = si->GetBoolValue("ARMSX2iOS/Speedhacks", "ManualMTVU", false);
     const int manualMTVUVersion = si->GetIntValue("ARMSX2iOS/Speedhacks", "ManualMTVUVersion", 0);
     const bool mtvu = si->GetBoolValue("EmuCore/Speedhacks", "vuThread", defaultMTVU);
-    const bool staleManualMTVUOff = defaultMTVU && manualMTVU && !mtvu && manualMTVUVersion < 2;
+    const bool staleManualMTVUOff = defaultMTVU && manualMTVU && !mtvu && manualMTVUVersion < 3;
 #if TARGET_OS_SIMULATOR
     const bool jitAvailable = false;
 #else
@@ -3841,6 +3841,11 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             ARMSX2RepairIOSARM64JITSettings(s_settings_interface, "pre-vm-initialize");
             VMManager::Internal::LoadStartupSettings();
             ARMSX2ApplyIOSOsdPresetFromConfig("pre-vm-initialize");
+            VMManager::ApplySettings();
+            std::fprintf(stderr, "@@IOS_PREVM_APPLY_SETTINGS@@ mtvu=%d fastmem=%d\n",
+                EmuConfig.Speedhacks.vuThread ? 1 : 0,
+                EmuConfig.Cpu.Recompiler.EnableFastmem ? 1 : 0);
+            std::fflush(stderr);
             const int configuredCoreType = s_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2);
             const bool configuredUseArm64 = s_settings_interface->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", configuredCoreType == 2);
             std::fprintf(stderr,
@@ -4077,7 +4082,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_ios18_stale_mtvu_repair_diagoff\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_ios18_mtvu_v3_prevm_apply\n");
     fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     
     // [iPSX2] Unification Validation
