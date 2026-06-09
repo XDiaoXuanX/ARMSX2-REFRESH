@@ -4785,60 +4785,36 @@ static void emitFmacInstanceReaderCommit(const armvu1ir::microOp& mo)
 	const int64_t vi_clip_off   = (int64_t)offsetof(VURegs, VI)
 	                            + REG_CLIP_FLAG   * (int64_t)sizeof(REG_VI);
 
+	// Use lastWrite for BOTH pinned AND VI memory. Mac's microFlagInst.read
+	// is the hardware-pipeline-accurate 4-cycle-delayed instance, but the
+	// pre-routing JIT had VI[REG_*] memory tracking the eagerly-committed
+	// helper-drained value (= most up-to-date matured slot, which is much
+	// closer to lastWrite). Splitting pinned to lastWrite + VI memory to
+	// read was an over-correction — downstream Ldrh readers (FSAND / FMAND
+	// / FCAND / FSEQ) under pre-routing had been seeing eager values, and
+	// games are written to that. Using lastWrite for VI keeps pre-routing
+	// downstream semantics. We can fold to one Ldr per flag type — same
+	// instance for both destinations.
+
 	// MAC flag.
-	// Pinned (RMW source for OPMULA W preservation) ← slot[lastWrite].
 	armAsm->Ldr(VU1_MACFLAG_REG,
 		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.mFlag.lastWrite, f_macflag)));
-	// VI memory (delayed readers) ← slot[read]. Re-use w4 to avoid an
-	// extra Ldr if read == lastWrite — same address.
-	if (mo.mFlag.read == mo.mFlag.lastWrite)
-	{
-		armAsm->Str(VU1_MACFLAG_REG, MemOperand(VU1_BASE_REG, vi_mac_off));
-	}
-	else
-	{
-		armAsm->Ldr(w4,
-			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.mFlag.read, f_macflag)));
-		armAsm->Str(w4, MemOperand(VU1_BASE_REG, vi_mac_off));
-	}
+	armAsm->Str(VU1_MACFLAG_REG, MemOperand(VU1_BASE_REG, vi_mac_off));
 
-	// Status flag. Two contributing sources (see source comment): FMAC
-	// writeback owns bits 0xFCF, FDIV drain owns bits 0x30. Pinned gets
-	// the lastWrite-routed FMAC value merged with the current FDIV bits
-	// from VI memory; VI memory gets the read-routed FMAC value merged
-	// with the current FDIV bits.
-	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vi_status_off));   // VI current
-	armAsm->And(w4, w4, 0x30);                                  // keep FDIV bits
+	// Status flag. Merge FDIV's 0x30 D/I bits from VI memory with the
+	// FMAC slot's 0xFCF bits.
+	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vi_status_off));
+	armAsm->And(w4, w4, 0x30);
 	armAsm->Ldr(w5,
 		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.sFlag.lastWrite, f_statusflag)));
 	armAsm->And(w5, w5, 0xFCF);
-	armAsm->Orr(VU1_STATUSFLAG_REG, w4, w5);                    // pinned = lastWrite-merged
-	if (mo.sFlag.read == mo.sFlag.lastWrite)
-	{
-		armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(VU1_BASE_REG, vi_status_off));
-	}
-	else
-	{
-		armAsm->Ldr(w5,
-			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.sFlag.read, f_statusflag)));
-		armAsm->And(w5, w5, 0xFCF);
-		armAsm->Orr(w5, w4, w5);
-		armAsm->Str(w5, MemOperand(VU1_BASE_REG, vi_status_off));
-	}
+	armAsm->Orr(VU1_STATUSFLAG_REG, w4, w5);
+	armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(VU1_BASE_REG, vi_status_off));
 
 	// Clip flag.
 	armAsm->Ldr(VU1_CLIPFLAG_REG,
 		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.cFlag.lastWrite, f_clipflag)));
-	if (mo.cFlag.read == mo.cFlag.lastWrite)
-	{
-		armAsm->Str(VU1_CLIPFLAG_REG, MemOperand(VU1_BASE_REG, vi_clip_off));
-	}
-	else
-	{
-		armAsm->Ldr(w4,
-			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.cFlag.read, f_clipflag)));
-		armAsm->Str(w4, MemOperand(VU1_BASE_REG, vi_clip_off));
-	}
+	armAsm->Str(VU1_CLIPFLAG_REG, MemOperand(VU1_BASE_REG, vi_clip_off));
 
 	viCacheInvalidate(REG_MAC_FLAG);
 	viCacheInvalidate(REG_STATUS_FLAG);
