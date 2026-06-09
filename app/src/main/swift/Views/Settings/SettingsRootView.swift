@@ -128,7 +128,7 @@ struct SettingsRootView: View {
                 }
                 .disabled(stikDebugOpenInProgress)
 
-                Text(settings.localized("JIT Access means iOS currently allows executable memory. Confirm the real runtime state in-game: the OSD should show EE:JIT, IOP:JIT, and VU:JIT. If StikDebug reports a socket failure, reopen StikDebug and relaunch with the UTM-Dolphin script."))
+                Text(settings.localized("JIT Access means iOS currently allows executable memory. Confirm the real runtime state in-game: the OSD should show EE:JIT, IOP:JIT, and VU:JIT. Match the StikDebug script to the JIT Script setting in Emulator settings."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
@@ -277,15 +277,15 @@ struct SettingsRootView: View {
 
     private var jitStatusSubtitle: String {
         if stikDebugOpenFailed {
-            return "Open StikDebug manually, then run the UTM-Dolphin script and relaunch ARMSX2."
+            return "Open StikDebug manually, then run the selected script and relaunch ARMSX2."
         }
         if jitAvailable {
-            return "Access is available. Confirm EE:JIT / IOP:JIT / VU:JIT in the in-game OSD."
+            return "Access is available. Confirm EE:JIT / IOP:JIT / VU:JIT in the in-game OSD. Current script: \(settings.jitScriptProtocol.label)."
         }
         if noJITFallbackActive {
-            return "No-JIT fallback is active. Use StikDebug/UTM-Dolphin for dynarec."
+            return "No-JIT fallback is active. Use StikDebug/\(settings.jitScriptProtocol.label) for dynarec."
         }
-        return "Launch with StikDebug/UTM-Dolphin to enable JIT."
+        return "Launch with StikDebug using the \(settings.jitScriptProtocol.label) script to enable JIT."
     }
 
     private var jitStatusBadge: String {

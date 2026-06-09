@@ -745,6 +745,30 @@ static bool ARMSX2GetConfiguredFastBoot()
         s_settings_interface->GetBoolValue("EmuCore", "EnableFastBoot", false));
 }
 
+static std::string ARMSX2ResolveJITScriptProtocol()
+{
+    std::string jitProtocol = "universal";
+    if (s_settings_interface)
+    {
+        jitProtocol = s_settings_interface->GetStringValue("ARMSX2iOS/JIT", "ScriptProtocol", "universal");
+        std::transform(jitProtocol.begin(), jitProtocol.end(), jitProtocol.begin(), ::tolower);
+        if (jitProtocol == "utm-dolphin" || jitProtocol == "utm_dolphin")
+            jitProtocol = "legacy";
+        else if (jitProtocol != "legacy" && jitProtocol != "universal")
+            jitProtocol = s_settings_interface->GetBoolValue("ARMSX2iOS/JIT", "UseUniversalJITScript", true) ? "universal" : "legacy";
+    }
+    return jitProtocol;
+}
+
+static void ARMSX2ApplyJITScriptProtocol(const char* reason)
+{
+    const std::string jitProtocol = ARMSX2ResolveJITScriptProtocol();
+    setenv("ARMSX2_JIT_PROTOCOL", jitProtocol.c_str(), 1);
+    std::fprintf(stderr, "@@JIT_PROTOCOL_SELECTED@@ reason=%s protocol=%s\n",
+        reason ? reason : "unknown", jitProtocol.c_str());
+    std::fflush(stderr);
+}
+
 static double ARMSX2IOSGetAppRAMGB()
 {
     task_vm_info_data_t vm_info = {};
@@ -3653,6 +3677,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 // dual-map, or legacy mprotect depending on what iOS/LiveContainer permits.
 - (void)checkJITAndStartVM {
 #if !TARGET_OS_SIMULATOR
+    ARMSX2ApplyJITScriptProtocol("jit-gate");
     if (DarwinMisc::IsJITAvailable()) {
         std::fprintf(stderr, "@@BOOT_JIT_GATE@@ available=1 mode=jit_alloc\n");
         std::fflush(stderr);
@@ -3676,6 +3701,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 }
 
 - (void)startVMThread {
+    ARMSX2ApplyJITScriptProtocol("start-vm-thread");
     {
         std::lock_guard<std::mutex> lk(s_vmMutex);
         if (s_vmThreadActive.load()) {
@@ -3868,6 +3894,8 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                 EmuConfig.EmulationSpeed.SlomoScalar,
                 EmuConfig.GS.FramerateNTSC,
                 EmuConfig.GS.FrameratePAL);
+
+            ARMSX2ApplyJITScriptProtocol("pre-vm-initialize");
 
             // --- Initialize & Execute VM ---
             Error bootError;
@@ -4085,7 +4113,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_ios18_legacy_range_wx_fastboot_off\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_refresh_universal_jit_selector\n");
     fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     
     // [iPSX2] Unification Validation

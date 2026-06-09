@@ -21,6 +21,40 @@ enum OsdPreset: Int, CaseIterable {
     }
 }
 
+enum JITScriptProtocol: String, CaseIterable, Identifiable {
+    case universal
+    case legacy
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .universal:
+            return "Universal"
+        case .legacy:
+            return "UTM-Dolphin"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .universal:
+            return "Uses brk #0xf00d prepare + detach."
+        case .legacy:
+            return "Uses legacy brk #0x69 prepare."
+        }
+    }
+
+    static func normalized(_ rawValue: String) -> JITScriptProtocol {
+        switch rawValue.lowercased() {
+        case "legacy", "utm-dolphin", "utm_dolphin":
+            return .legacy
+        default:
+            return .universal
+        }
+    }
+}
+
 @Observable
 final class SettingsStore: @unchecked Sendable {
     static let shared = SettingsStore()
@@ -402,6 +436,12 @@ final class SettingsStore: @unchecked Sendable {
             ARMSX2Bridge.setINIBool("ARMSX2iOS/JIT", key: "AutoOpenStikDebug", value: autoOpenStikDebug)
         }
     }
+    var jitScriptProtocol: JITScriptProtocol {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIString("ARMSX2iOS/JIT", key: "ScriptProtocol", value: jitScriptProtocol.rawValue)
+        }
+    }
 
     // DEV9 / Network
     var dev9HddEnabled: Bool {
@@ -591,6 +631,7 @@ final class SettingsStore: @unchecked Sendable {
         appLanguage = AppLanguage(rawValue: ARMSX2Bridge.getINIString("ARMSX2iOS/UI", key: "AppLanguage", defaultValue: AppLanguage.system.rawValue)) ?? .system
         controllerMultitapMode = Int(ARMSX2Bridge.getINIInt("ARMSX2iOS/Gamepad", key: "MultitapMode", defaultValue: 0))
         autoOpenStikDebug = ARMSX2Bridge.getINIBool("ARMSX2iOS/JIT", key: "AutoOpenStikDebug", defaultValue: false)
+        jitScriptProtocol = JITScriptProtocol.normalized(ARMSX2Bridge.getINIString("ARMSX2iOS/JIT", key: "ScriptProtocol", defaultValue: JITScriptProtocol.universal.rawValue))
         dev9HddEnabled = ARMSX2Bridge.getINIBool("DEV9/Hdd", key: "HddEnable", defaultValue: false)
         dev9HddFile = ARMSX2Bridge.getINIString("DEV9/Hdd", key: "HddFile", defaultValue: "DEV9hdd.raw")
         dev9EthernetEnabled = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthEnable", defaultValue: false)
@@ -709,6 +750,7 @@ final class SettingsStore: @unchecked Sendable {
         appLanguage = AppLanguage(rawValue: ARMSX2Bridge.getINIString("ARMSX2iOS/UI", key: "AppLanguage", defaultValue: AppLanguage.system.rawValue)) ?? .system
         controllerMultitapMode = Int(ARMSX2Bridge.getINIInt("ARMSX2iOS/Gamepad", key: "MultitapMode", defaultValue: 0))
         autoOpenStikDebug = ARMSX2Bridge.getINIBool("ARMSX2iOS/JIT", key: "AutoOpenStikDebug", defaultValue: false)
+        jitScriptProtocol = JITScriptProtocol.normalized(ARMSX2Bridge.getINIString("ARMSX2iOS/JIT", key: "ScriptProtocol", defaultValue: JITScriptProtocol.universal.rawValue))
         dev9HddEnabled = ARMSX2Bridge.getINIBool("DEV9/Hdd", key: "HddEnable", defaultValue: false)
         dev9HddFile = ARMSX2Bridge.getINIString("DEV9/Hdd", key: "HddFile", defaultValue: "DEV9hdd.raw")
         dev9EthernetEnabled = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthEnable", defaultValue: false)
@@ -864,6 +906,7 @@ final class SettingsStore: @unchecked Sendable {
         enableWidescreenPatches = false
         enableNoInterlacingPatches = false
         hostFilesystem = false
+        jitScriptProtocol = .universal
     }
 
     /// Keep EE/IOP/VU0 fast while isolating suspected VU1 JIT regressions.

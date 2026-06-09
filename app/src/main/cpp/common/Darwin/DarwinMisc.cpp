@@ -748,6 +748,26 @@ DarwinMisc::JitMode DarwinMisc::GetJitMode()
 	return s_jit_mode;
 }
 
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+__attribute__((noinline, optnone))
+static void JIT26PrepareRegion(void* addr, size_t len)
+{
+	asm volatile("mov x0, %0\n"
+	             "mov x1, %1\n"
+	             "mov x16, #1\n"
+	             "brk #0xf00d\n"
+	             :: "r"(addr), "r"(len) : "x0", "x1", "x16", "memory");
+}
+
+__attribute__((noinline, optnone))
+static void JIT26Detach(void)
+{
+	asm volatile("mov x16, #0\n"
+	             "brk #0xf00d\n"
+	             ::: "x16", "memory");
+}
+#endif
+
 void* DarwinMisc::MmapCodeDualMap(size_t size)
 {
 #if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
@@ -836,23 +856,65 @@ void* DarwinMisc::MmapCodeDualMap(size_t size)
 		sigemptyset(&sa_brk.sa_mask);
 		sigaction(SIGTRAP, &sa_brk, &sa_brk_old);
 
-		bool brk_ok = false;
-		std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_begin rx=%p size=0x%zx\n", rx_ptr, size);
+		const bool useLegacy = []() {
+			const char* proto = std::getenv("ARMSX2_JIT_PROTOCOL");
+			return proto && std::strcmp(proto, "legacy") == 0;
+		}();
+
+		std::fprintf(stderr, "@@JIT_ALLOC@@ txm_protocol=%s\n", useLegacy ? "legacy" : "universal");
 		std::fflush(stderr);
-		if (sigsetjmp(s_alloc_brk_jmp, 1) == 0)
+
+		bool brk_ok = false;
+		if (useLegacy)
 		{
-			asm volatile("mov x0, %0\n"
-			             "mov x1, %1\n"
-			             "brk #0x69"
-			             :: "r"(rx_ptr), "r"(size) : "x0", "x1");
-			brk_ok = true;
-			std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_ok\n");
+			std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_begin rx=%p size=0x%zx\n", rx_ptr, size);
 			std::fflush(stderr);
+			if (sigsetjmp(s_alloc_brk_jmp, 1) == 0)
+			{
+				asm volatile("mov x0, %0\n"
+				             "mov x1, %1\n"
+				             "brk #0x69"
+				             :: "r"(rx_ptr), "r"(size) : "x0", "x1");
+				brk_ok = true;
+				std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_ok\n");
+				std::fflush(stderr);
+			}
+			else
+			{
+				std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_sigtrap\n");
+				std::fflush(stderr);
+			}
 		}
 		else
 		{
-			std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_sigtrap\n");
+			std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_universal_begin rx=%p size=0x%zx\n", rx_ptr, size);
 			std::fflush(stderr);
+			if (sigsetjmp(s_alloc_brk_jmp, 1) == 0)
+			{
+				JIT26PrepareRegion(rx_ptr, size);
+				std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_universal_ok\n");
+				std::fflush(stderr);
+
+				std::fprintf(stderr, "@@JIT_ALLOC@@ txm_detach_begin\n");
+				std::fflush(stderr);
+				if (sigsetjmp(s_alloc_brk_jmp, 1) == 0)
+				{
+					JIT26Detach();
+					brk_ok = true;
+					std::fprintf(stderr, "@@JIT_ALLOC@@ txm_detach_ok\n");
+					std::fflush(stderr);
+				}
+				else
+				{
+					std::fprintf(stderr, "@@JIT_ALLOC@@ txm_detach_sigtrap\n");
+					std::fflush(stderr);
+				}
+			}
+			else
+			{
+				std::fprintf(stderr, "@@JIT_ALLOC@@ txm_register_universal_sigtrap\n");
+				std::fflush(stderr);
+			}
 		}
 		sigaction(SIGTRAP, &sa_brk_old, nullptr);
 
