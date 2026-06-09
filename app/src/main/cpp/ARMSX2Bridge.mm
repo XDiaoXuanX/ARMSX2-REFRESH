@@ -1314,7 +1314,7 @@ static NSMutableDictionary<NSString*, id>* ARMSX2BuildGlobalGameSettingsResult()
     const bool globalEnableGameFixes = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableGameFixes", true) : true;
     const bool globalEnableGameDBHardwareFixes = g_p44_settings_interface ? !g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks", false) : true;
     const int globalEECoreType = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2) : 2;
-    const bool globalMTVU = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", false) : false;
+    const bool globalMTVU = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", true) : true;
     return [@{
         @"enabled": @NO,
         @"path": @"",
@@ -1368,6 +1368,17 @@ static void ARMSX2ApplyPerGameSettingsOverrides(NSMutableDictionary<NSString*, i
     INISettingsInterface si(settingsPath);
     if (!si.Load())
         return;
+
+    if (si.ContainsValue("EmuCore/Speedhacks", "vuThread") &&
+        !si.GetBoolValue("ARMSX2iOS/PerGame", "ManualMTVU", false) &&
+        !si.GetBoolValue("EmuCore/Speedhacks", "vuThread", true)) {
+        si.DeleteValue("EmuCore/Speedhacks", "vuThread");
+        Error saveError;
+        const bool saved = si.Save(&saveError);
+        std::fprintf(stderr, "@@IOS_PERGAME_MTVU_REPAIR@@ file=\"%s\" ui_read=1 removed_stale_false=1 saved=%d error=\"%s\"\n",
+            settingsPath.c_str(), saved ? 1 : 0, saveError.GetDescription().c_str());
+        std::fflush(stderr);
+    }
 
     const bool hasKnownOverride =
         si.GetBoolValue("ARMSX2iOS/PerGame", "Enabled", false) ||
@@ -1534,7 +1545,15 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         si.SetBoolValue("EmuCore/GS", "UserHacks", !enableGameDBHardwareFixes);
         si.SetIntValue("EmuCore/CPU", "CoreType", eeCoreType);
         si.SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", eeCoreType == 2);
-        si.SetBoolValue("EmuCore/Speedhacks", "vuThread", mtvu);
+        const bool globalMTVU = g_p44_settings_interface ?
+            g_p44_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", true) : true;
+        if (mtvu == globalMTVU) {
+            si.DeleteValue("ARMSX2iOS/PerGame", "ManualMTVU");
+            si.DeleteValue("EmuCore/Speedhacks", "vuThread");
+        } else {
+            si.SetBoolValue("ARMSX2iOS/PerGame", "ManualMTVU", true);
+            si.SetBoolValue("EmuCore/Speedhacks", "vuThread", mtvu);
+        }
     } else {
         si.DeleteValue("ARMSX2iOS/PerGame", "Enabled");
         si.DeleteValue("EmuCore/GS", "upscale_multiplier");
@@ -1559,6 +1578,7 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         si.DeleteValue("EmuCore/GS", "UserHacks");
         si.DeleteValue("EmuCore/CPU", "CoreType");
         si.DeleteValue("EmuCore/CPU", "UseArm64Dynarec");
+        si.DeleteValue("ARMSX2iOS/PerGame", "ManualMTVU");
         si.DeleteValue("EmuCore/Speedhacks", "vuThread");
         si.RemoveEmptySections();
     }

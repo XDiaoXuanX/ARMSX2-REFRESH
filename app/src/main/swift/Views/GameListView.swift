@@ -1516,7 +1516,7 @@ struct PerGameSettingsPanel: View {
         _skipDrawEndOverride = State(initialValue: hasSkipDrawEndOverride)
         _skipDrawEnd = State(initialValue: initialSkipDrawEnd)
         _eeCoreType = State(initialValue: Self.intValue(info["eeCoreType"], defaultValue: 2))
-        _mtvu = State(initialValue: Self.boolValue(info["mtvu"], defaultValue: false))
+        _mtvu = State(initialValue: Self.boolValue(info["mtvu"], defaultValue: true))
         _enableCheats = State(initialValue: Self.boolValue(info["enableCheats"], defaultValue: false))
         _enablePatches = State(initialValue: Self.boolValue(info["enablePatches"], defaultValue: true))
         _enableGameFixes = State(initialValue: Self.boolValue(info["enableGameFixes"], defaultValue: true))

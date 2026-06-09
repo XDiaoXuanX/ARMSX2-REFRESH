@@ -1129,6 +1129,19 @@ bool VMManager::UpdateGameSettingsLayer()
 				Console.Error("Failed to parse game settings ini '%s'", new_interface->GetFileName().c_str());
 				new_interface.reset();
 			}
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+			else if (new_interface->ContainsValue("EmuCore/Speedhacks", "vuThread") &&
+					 !new_interface->GetBoolValue("ARMSX2iOS/PerGame", "ManualMTVU", false) &&
+					 !new_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", true))
+			{
+				new_interface->DeleteValue("EmuCore/Speedhacks", "vuThread");
+				Error save_error;
+				const bool saved = new_interface->Save(&save_error);
+				std::fprintf(stderr, "@@IOS_PERGAME_MTVU_REPAIR@@ file=\"%s\" removed_stale_false=1 saved=%d error=\"%s\"\n",
+					new_interface->GetFileName().c_str(), saved ? 1 : 0, save_error.GetDescription().c_str());
+				std::fflush(stderr);
+			}
+#endif
 		}
 		else
 		{

@@ -576,6 +576,79 @@ static void ARMSX2EnsureIOSSpeedhackDefaults(SettingsInterface* si, const char* 
         si->Save();
 }
 
+static bool ARMSX2RepairIOSARM64JITSettings(SettingsInterface* si, const char* reason)
+{
+    if (!si)
+        return false;
+
+    const int coreType = si->GetIntValue("EmuCore/CPU", "CoreType", 2);
+    const bool useArm64 = si->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", coreType == 2);
+    const bool enableEE = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
+    const bool enableIOP = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
+    const bool enableVU0 = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
+    const bool enableVU1 = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
+    const bool enableFastmem = si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
+    u32 physicalCores = 0;
+    const bool defaultMTVU = ARMSX2ShouldEnableMTVUByDefault(&physicalCores);
+    const bool manualFastmem = si->GetBoolValue("ARMSX2iOS/Speedhacks", "ManualFastmem", false);
+    const bool manualMTVU = si->GetBoolValue("ARMSX2iOS/Speedhacks", "ManualMTVU", false);
+    const bool mtvu = si->GetBoolValue("EmuCore/Speedhacks", "vuThread", defaultMTVU);
+#if TARGET_OS_SIMULATOR
+    const bool jitAvailable = false;
+#else
+    const bool jitAvailable = DarwinMisc::IsJITAvailable();
+#endif
+    NSString* systemVersion = [[UIDevice currentDevice] systemVersion] ?: @"unknown";
+    NSString* deviceModel = [[UIDevice currentDevice] model] ?: @"unknown";
+    std::fprintf(stderr,
+        "@@IOS_JIT_POLICY@@ reason=%s ios=\"%s\" device=\"%s\" jit_probe=%d core=%d use_arm64=%d ee=%d iop=%d vu0=%d vu1=%d fastmem=%d manual_fastmem=%d mtvu=%d manual_mtvu=%d physical=%u\n",
+        reason ? reason : "unknown", systemVersion.UTF8String, deviceModel.UTF8String, jitAvailable ? 1 : 0,
+        coreType, useArm64 ? 1 : 0, enableEE ? 1 : 0, enableIOP ? 1 : 0,
+        enableVU0 ? 1 : 0, enableVU1 ? 1 : 0, enableFastmem ? 1 : 0,
+        manualFastmem ? 1 : 0, mtvu ? 1 : 0, manualMTVU ? 1 : 0, physicalCores);
+    std::fflush(stderr);
+
+    if (!jitAvailable || coreType == 1)
+        return false;
+
+    bool changed = false;
+    auto setBoolIfNeeded = [&](const char* section, const char* key, bool value) {
+        if (si->GetBoolValue(section, key, !value) != value) {
+            si->SetBoolValue(section, key, value);
+            changed = true;
+        }
+    };
+    auto setIntIfNeeded = [&](const char* section, const char* key, int value) {
+        if (si->GetIntValue(section, key, value == 2 ? 0 : 2) != value) {
+            si->SetIntValue(section, key, value);
+            changed = true;
+        }
+    };
+
+    setIntIfNeeded("EmuCore/CPU", "CoreType", 2);
+    setBoolIfNeeded("EmuCore/CPU", "UseArm64Dynarec", true);
+    setBoolIfNeeded("EmuCore/CPU/Recompiler", "EnableEE", true);
+    setBoolIfNeeded("EmuCore/CPU/Recompiler", "EnableIOP", true);
+    setBoolIfNeeded("EmuCore/CPU/Recompiler", "EnableVU0", true);
+    setBoolIfNeeded("EmuCore/CPU/Recompiler", "EnableVU1", true);
+    if (!manualFastmem)
+        setBoolIfNeeded("EmuCore/CPU/Recompiler", "EnableFastmem", true);
+    if (defaultMTVU && !manualMTVU)
+        setBoolIfNeeded("EmuCore/Speedhacks", "vuThread", true);
+
+    if (changed) {
+        si->Save();
+        std::fprintf(stderr,
+            "@@CPU_DEFAULT_FIX@@ reason=%s old_core=%d old_arm64=%d old_ee=%d old_iop=%d old_vu0=%d old_vu1=%d old_fastmem=%d old_mtvu=%d new_core=2 new_arm64=1 fastmem=%d mtvu=%d\n",
+            reason ? reason : "unknown", coreType, useArm64 ? 1 : 0, enableEE ? 1 : 0, enableIOP ? 1 : 0,
+            enableVU0 ? 1 : 0, enableVU1 ? 1 : 0, enableFastmem ? 1 : 0, mtvu ? 1 : 0,
+            si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true) ? 1 : 0,
+            si->GetBoolValue("EmuCore/Speedhacks", "vuThread", defaultMTVU) ? 1 : 0);
+        std::fflush(stderr);
+    }
+    return changed;
+}
+
 static void ARMSX2ConfigureImGuiFonts(const char* reason)
 {
     const std::string fontPath =
@@ -3087,6 +3160,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
             s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
             s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
+            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
             s_settings_interface->SetBoolValue("EmuCore/CPU", "EnableSparseMemory", true);
             s_settings_interface->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
 
@@ -3128,36 +3202,16 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             s_buttonMap[i] = val;
         }
     }
-    {
-        const int coreType = s_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2);
-        const bool useArm64 = s_settings_interface->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", coreType == 2);
-#if TARGET_OS_SIMULATOR
-        const bool jitAvailableForDefaults = false;
-#else
-        const bool jitAvailableForDefaults = DarwinMisc::IsJITAvailable();
-#endif
-        if (jitAvailableForDefaults && (coreType != 2 || !useArm64)) {
-            s_settings_interface->SetIntValue("EmuCore/CPU", "CoreType", 2);
-            s_settings_interface->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
-            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
-            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
-            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
-            s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
-            const bool fastBoot = ARMSX2GetConfiguredFastBoot();
-            s_settings_interface->SetBoolValue("GameISO", "FastBoot", fastBoot);
-            s_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", fastBoot);
-            s_settings_interface->Save();
-            std::fprintf(stderr, "@@CPU_DEFAULT_FIX@@ old_core=%d old_arm64=%d new_core=2 new_arm64=1 fast_boot=%d\n",
-                coreType, useArm64 ? 1 : 0, fastBoot ? 1 : 0);
-            std::fflush(stderr);
-        }
-    }
+    ARMSX2RepairIOSARM64JITSettings(s_settings_interface, "scene-connect");
     // One-time migration for existing INI (runs once, then conditions are false)
     if (!s_settings_interface->ContainsValue("SPU2/Output", "Backend")) {
         s_settings_interface->SetStringValue("SPU2/Output", "Backend", "SDL");
     }
     if (!s_settings_interface->ContainsValue("EmuCore/CPU", "ExtraMemory")) {
         s_settings_interface->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
+    }
+    if (!s_settings_interface->ContainsValue("EmuCore/CPU/Recompiler", "EnableFastmem")) {
+        s_settings_interface->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
     }
     if (!s_settings_interface->ContainsValue("Achievements", "Enabled")) {
         s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
@@ -3772,17 +3826,21 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             }
 
             ARMSX2SanitizeFrameLimiterConfig("pre-vm-initialize");
+            ARMSX2EnsureIOSSpeedhackDefaults(s_settings_interface, "pre-vm-initialize");
+            ARMSX2RepairIOSARM64JITSettings(s_settings_interface, "pre-vm-initialize");
+            VMManager::Internal::LoadStartupSettings();
             ARMSX2ApplyIOSOsdPresetFromConfig("pre-vm-initialize");
             const int configuredCoreType = s_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2);
             const bool configuredUseArm64 = s_settings_interface->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", configuredCoreType == 2);
             std::fprintf(stderr,
-                "@@CPU_CONFIG@@ core=%d use_arm64=%d ee=%d iop=%d vu0=%d vu1=%d fastmem=%d forced_interp=%d\n",
+                "@@CPU_CONFIG@@ core=%d use_arm64=%d ee=%d iop=%d vu0=%d vu1=%d fastmem=%d mtvu=%d forced_interp=%d\n",
                 configuredCoreType, configuredUseArm64 ? 1 : 0,
                 EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0,
                 EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0,
                 EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0,
                 EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0,
                 EmuConfig.Cpu.Recompiler.EnableFastmem ? 1 : 0,
+                EmuConfig.Speedhacks.vuThread ? 1 : 0,
                 DarwinMisc::iPSX2_FORCE_EE_INTERP ? 1 : 0);
             std::fflush(stderr);
             Console.WriteLn("@@FRAMELIMIT@@ boot nominal=%.3f turbo=%.3f slomo=%.3f ntsc=%.3f pal=%.3f",
@@ -4008,7 +4066,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_pcsx2_27_gow1_native_scaling_probe_v18\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_ios18_fastmem_mtvu_repair\n");
     fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     
     // [iPSX2] Unification Validation
