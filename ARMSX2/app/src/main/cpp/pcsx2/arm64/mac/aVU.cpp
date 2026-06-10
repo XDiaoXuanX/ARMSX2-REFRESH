@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -36,6 +37,7 @@
 
 // microVU rec contexts (x86 defines these in microVU.h; on ARM64 they live here,
 // where microRegAlloc is a complete type so microVU's unique_ptr dtor compiles).
+
 namespace pcsx2_macrec {
 
 alignas(16) microVU microVU0;
@@ -1154,10 +1156,10 @@ void recMacMVU1::ResumeXGkick()
 	((mVUrecCallXG)microVU1.startFunctXG)();
 }
 
-// SaveStateBase::vuJITFreeze() is provided by arm64/RecStubs.cpp (the original
-// Android backend's stub). When the mac backend is selected, save state for
-// the mac microVU state isn't currently round-tripped — acceptable for A/B
-// debugging; saves taken on mac backend won't carry mac-specific JIT state.
+// vuJITFreeze stays as the original Android arm64 backend's stub — saves
+// taken on the mac backend won't carry mac-specific JIT state. Fine for A/B.
+// Skipped here because SaveStateBase is in the global namespace and the
+// original backend already provides a definition (see arm64/aVU.cpp).
 
 //------------------------------------------------------------------
 // Dispatcher / helper-thunk code generation (task 7.2d)
@@ -1697,5 +1699,6 @@ static_assert(alignof(microBlock) == 16, "microBlock must stay 16-byte aligned")
 	mVUDTendProgram(mVU, &mFC, 1);
 	mVUsetupBranch(mVU, mFC);
 }
+
 
 } // namespace pcsx2_macrec

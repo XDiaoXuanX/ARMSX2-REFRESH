@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -22,6 +23,7 @@
 #include "common/Assertions.h"
 
 #include <cstddef>
+
 
 namespace pcsx2_macrec {
 
@@ -213,5 +215,6 @@ void armEmitStoreQuad(u32 rt, u32 rs, s32 imm)
 
 	armEmitVtlbWriteQuad(RWARG1, RQSCRATCH);
 }
+
 
 } // namespace pcsx2_macrec

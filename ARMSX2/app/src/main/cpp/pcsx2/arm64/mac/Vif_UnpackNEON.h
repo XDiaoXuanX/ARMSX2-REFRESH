@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-License-Identifier: GPL-3.0
 
 #pragma once
@@ -18,6 +19,7 @@
 // --------------------------------------------------------------------------------------
 //  VifUnpackSSE_Base
 // --------------------------------------------------------------------------------------
+
 namespace pcsx2_macrec {
 
 class VifUnpackNEON_Base
@@ -146,5 +148,6 @@ protected:
 		return fillingWrite;
 	}
 };
+
 
 } // namespace pcsx2_macrec

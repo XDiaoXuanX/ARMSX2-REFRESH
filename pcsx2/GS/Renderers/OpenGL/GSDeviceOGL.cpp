@@ -4,6 +4,7 @@
 #include "GS/Renderers/OpenGL/GLContext.h"
 #include "GS/Renderers/OpenGL/GSDeviceOGL.h"
 #include "GS/Renderers/OpenGL/GLState.h"
+#include "GS/Renderers/Common/GSGPUProfile.h"
 #include "GS/GSState.h"
 #include "GS/GSGL.h"
 #include "GS/GSPerfMon.h"
@@ -716,24 +717,59 @@ bool GSDeviceOGL::CheckFeatures()
 
 	memset(&m_bugs, 0, sizeof(m_bugs));
 
-	const char* vendor = (const char*)glGetString(GL_VENDOR);
-	if (std::strstr(vendor, "Advanced Micro Devices") || std::strstr(vendor, "ATI Technologies Inc.") ||
-		std::strstr(vendor, "ATI"))
+	bool vendor_id_mali = false;
+	bool vendor_id_adreno = false;
+
+	const char* vendor_raw = (const char*)glGetString(GL_VENDOR);
+	const char* renderer_raw = (const char*)glGetString(GL_RENDERER);
+	const char* vendor_str = vendor_raw ? vendor_raw : "";
+	const char* renderer_str = renderer_raw ? renderer_raw : "";
+
+	if (std::strstr(vendor_str, "Advanced Micro Devices") || std::strstr(vendor_str, "ATI Technologies Inc.") ||
+		std::strstr(vendor_str, "ATI"))
 	{
 		Console.WriteLn(Color_StrongRed, "GL: AMD GPU detected.");
 		//vendor_id_amd = true;
 	}
-	else if (std::strstr(vendor, "NVIDIA Corporation"))
+	else if (std::strstr(vendor_str, "NVIDIA Corporation"))
 	{
 		Console.WriteLn(Color_StrongGreen, "GL: NVIDIA GPU detected.");
 		//vendor_id_nvidia = true;
 		m_bugs.broken_blend_coherency = true;
 	}
-	else if (std::strstr(vendor, "Intel"))
+	else if (std::strstr(vendor_str, "Intel"))
 	{
 		Console.WriteLn(Color_StrongBlue, "GL: Intel GPU detected.");
 		//vendor_id_intel = true;
 	}
+	else if (std::strstr(vendor_str, "ARM") || std::strstr(renderer_str, "Mali"))
+	{
+		Console.WriteLn(Color_Yellow, "GL: ARM Mali GPU detected.");
+		vendor_id_mali = true;
+	}
+	else if (std::strstr(vendor_str, "Qualcomm") || std::strstr(renderer_str, "Adreno"))
+	{
+		Console.WriteLn(Color_Cyan, "GL: Qualcomm Adreno GPU detected.");
+		vendor_id_adreno = true;
+	}
+
+#if defined(__ANDROID__)
+	const GpuProfileSelection profile_selection =
+		GpuProfileDetector::Resolve(GSConfig.AndroidGpuProfileOverride, vendor_str, renderer_str);
+	SetRuntimeGPUProfile(profile_selection.runtime_profile);
+	Console.WriteLn("GL: GPU profile override='%s' resolved='%s'.",
+		GpuProfileDetector::OverrideToConfigString(profile_selection.override_mode),
+		GpuProfileDetector::RuntimeProfileToString(profile_selection.runtime_profile));
+	DevCon.WriteLn("GL: GPU profile hints: %s", profile_selection.hints.c_str());
+	bool use_mali_profile = IsMaliGPUProfile();
+	bool use_adreno_profile = IsAdrenoGPUProfile();
+	bool use_powervr_profile = IsPowerVRGPUProfile();
+#else
+	SetRuntimeGPUProfile(vendor_id_mali ? RuntimeGpuProfile::Mali : RuntimeGpuProfile::Adreno);
+	bool use_mali_profile = vendor_id_mali;
+	bool use_adreno_profile = vendor_id_adreno;
+	bool use_powervr_profile = false;
+#endif
 
 	GLint major_gl = 0;
 	GLint minor_gl = 0;
@@ -845,7 +881,7 @@ bool GSDeviceOGL::CheckFeatures()
 	m_features.broken_point_sampler = false;
 	m_features.primitive_id = true;
 
-	m_features.framebuffer_fetch = GLAD_GL_EXT_shader_framebuffer_fetch;
+	m_features.framebuffer_fetch = (GLAD_GL_ARM_shader_framebuffer_fetch || GLAD_GL_EXT_shader_framebuffer_fetch);
 	if (m_features.framebuffer_fetch && GSConfig.DisableFramebufferFetch)
 	{
 		Host::AddOSDMessage(
@@ -886,6 +922,83 @@ bool GSDeviceOGL::CheckFeatures()
 	{
 		// Multidraw fb copy can do depth feedback just fine
 		m_features.depth_feedback |= GSConfig.DepthFeedbackMode == GSDepthFeedbackMode::Auto;
+	}
+
+	// Mobile tile-based GPU profiles. Both Mali and Adreno prefer fresh
+	// textures over reused ones (avoids tile-flush stalls on partial
+	// writes), so the texture-pool hint is shared. Mali additionally
+	// pins framebuffer_fetch to the ARM extension and (on Auto) reuses
+	// it as the texture-barrier substitute — matched by the
+	// `#if GPU_PROFILE_MALI` branch in tfx_fs.glsl which picks
+	// gl_LastFragColorARM. Adreno + Generic fall through to the EXT/PLS
+	// inout path in the shader's `#else` arm; GPU_PROFILE_ADRENO is
+	// emitted but not currently consumed by any shader.
+	if (use_mali_profile || use_adreno_profile || use_powervr_profile)
+		m_features.prefer_new_textures = true;
+
+	if (use_mali_profile)
+	{
+		// Mali path prefers ARM_shader_framebuffer_fetch (gl_LastFragColorARM) because
+		// the EXT inout path has been broken across every tested Mali driver. If a
+		// device was force-overridden to Mali but lacks ARM fbfetch (rare but
+		// possible), demote to PowerVR profile which uses the same EXT/PLS path the
+		// catch-all default uses.
+		if (GLAD_GL_ARM_shader_framebuffer_fetch)
+		{
+			Console.WriteLn(Color_Yellow, "GL: Applying Mali-specific optimizations for tile-based rendering.");
+			m_features.framebuffer_fetch = true;
+			if (GSConfig.OverrideTextureBarriers == -1)
+			{
+				m_features.texture_barrier = m_features.framebuffer_fetch;
+				Console.WriteLn("GL: Mali optimization - using ARM framebuffer fetch over texture barriers.");
+			}
+		}
+		else
+		{
+			Console.Warning("GL: Mali profile selected but ARM framebuffer fetch is unavailable; demoting to PowerVR/EXT profile.");
+			SetRuntimeGPUProfile(RuntimeGpuProfile::PowerVR);
+			use_mali_profile = false;
+			use_powervr_profile = true;
+		}
+	}
+
+	if (use_powervr_profile)
+	{
+		// PowerVR (Imagination) is tile-based like Mali but ships EXT/PLS fbfetch
+		// (PLS originated on PowerVR). framebuffer_fetch + texture_barrier values
+		// from line ~882/908 already reflect the EXT path, so no override needed —
+		// just confirm the path is wired up.
+		Console.WriteLn(Color_Yellow, "GL: PowerVR profile active (EXT/PLS framebuffer fetch).");
+	}
+	else if (use_adreno_profile)
+	{
+		Console.WriteLn(Color_Cyan, "GL: Adreno profile active (EXT/PLS framebuffer fetch).");
+	}
+
+	{
+		const bool has_arm_fetch = GLAD_GL_ARM_shader_framebuffer_fetch;
+		const bool has_ext_fetch = GLAD_GL_EXT_shader_framebuffer_fetch;
+		const bool has_pls_fetch = GLAD_GL_EXT_shader_pixel_local_storage;
+		Console.WriteLn("GL: Framebuffer fetch extension caps: arm=%d ext=%d pls=%d.",
+			has_arm_fetch ? 1 : 0, has_ext_fetch ? 1 : 0, has_pls_fetch ? 1 : 0);
+
+		const char* active_profile_name = use_mali_profile ? "Mali" :
+			(use_powervr_profile ? "PowerVR" :
+			(use_adreno_profile ? "Adreno" : "Generic"));
+		const char* active_fetch_backend = "None";
+		if (m_features.framebuffer_fetch)
+		{
+			if (use_mali_profile)
+				active_fetch_backend = "ARM";
+			else if (has_ext_fetch || has_pls_fetch)
+				active_fetch_backend = "EXT/PLS";
+			else if (has_arm_fetch)
+				active_fetch_backend = "ARM";
+		}
+		Console.WriteLn("GL: Active framebuffer fetch backend (%s profile): %s.", active_profile_name, active_fetch_backend);
+
+		if (use_mali_profile && !has_arm_fetch)
+			Console.Warning("GL: Mali profile selected but ARM framebuffer fetch is unavailable; using non-fetch fallback.");
 	}
 
 	if (GLAD_GL_ARB_shader_storage_buffer_object)
@@ -1563,6 +1676,13 @@ std::string GSDeviceOGL::GenGlslHeader(const std::string_view entry, GLenum type
 		header += "#define HAS_FRAMEBUFFER_FETCH 1\n";
 	else
 		header += "#define HAS_FRAMEBUFFER_FETCH 0\n";
+
+	header += fmt::format("#define HAS_EXT_SHADER_FRAMEBUFFER_FETCH {}\n", GLAD_GL_EXT_shader_framebuffer_fetch ? 1 : 0);
+	header += fmt::format("#define HAS_ARM_SHADER_FRAMEBUFFER_FETCH {}\n", GLAD_GL_ARM_shader_framebuffer_fetch ? 1 : 0);
+	header += fmt::format("#define HAS_EXT_SHADER_PIXEL_LOCAL_STORAGE {}\n", GLAD_GL_EXT_shader_pixel_local_storage ? 1 : 0);
+	header += fmt::format("#define GPU_PROFILE_MALI {}\n", IsMaliGPUProfile() ? 1 : 0);
+	header += fmt::format("#define GPU_PROFILE_ADRENO {}\n", IsAdrenoGPUProfile() ? 1 : 0);
+	header += fmt::format("#define GPU_PROFILE_POWERVR {}\n", IsPowerVRGPUProfile() ? 1 : 0);
 
 	if (GLAD_GL_ARB_conservative_depth)
 	{

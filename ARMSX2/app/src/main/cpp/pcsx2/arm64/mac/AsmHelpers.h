@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-License-Identifier: GPL-3.0
 
 #pragma once
@@ -45,6 +46,7 @@
 #define RQSCRATCH2I vixl::aarch64::VRegister(31, 128, 16)
 #define RQSCRATCH2F vixl::aarch64::VRegister(31, 128, 4)
 #define RQSCRATCH2D vixl::aarch64::VRegister(31, 128, 2)
+
 
 namespace pcsx2_macrec {
 
@@ -146,5 +148,6 @@ private:
 	u32 m_capacity = 0;
 	u32 m_used = 0;
 };
+
 
 } // namespace pcsx2_macrec

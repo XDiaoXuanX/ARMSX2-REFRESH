@@ -73,18 +73,19 @@ data class Settings(
     val enableFastmem: Boolean = true,
 
     // ---- macOS-port arm64 backend A/B toggles ----
-    // Per-CPU switch between our original arm64 backend (default) and the
-    // namespaced macOS-port backend (pcsx2_macrec). VMManager picks at VM
-    // init; flipping requires a VM restart. Bisect a mac regression by
-    // flipping individual CPUs to original.
+    // Per-CPU switch between our original arm64 backend and the namespaced
+    // macOS-port backend (pcsx2_macrec). Defaults: original EE/IOP/VU0,
+    // mac VU1. VMManager picks at VM init; flipping requires a VM restart.
+    // Bisect a regression by flipping individual CPUs.
     /** EmuCore/CPU/Recompiler/UseMacEE — mac arm64 EE recompiler. */
     val useMacEE: Boolean = false,
     /** EmuCore/CPU/Recompiler/UseMacIOP — mac arm64 IOP recompiler. */
     val useMacIOP: Boolean = false,
     /** EmuCore/CPU/Recompiler/UseMacVU0 — mac arm64 VU0 recompiler. */
     val useMacVU0: Boolean = false,
-    /** EmuCore/CPU/Recompiler/UseMacVU1 — mac arm64 VU1 recompiler. */
-    val useMacVU1: Boolean = false,
+    /** EmuCore/CPU/Recompiler/UseMacVU1 — mac arm64 VU1 recompiler.
+     *  Default ON: mac VU1 + original EE/IOP/VU0 is the shipping JIT config. */
+    val useMacVU1: Boolean = true,
 
     // ---- microVU-style compile-time pipeline-stall folding ----
     /** EmuCore/CPU/Recompiler/Vu1InlineFmacStall — replace the per-pair

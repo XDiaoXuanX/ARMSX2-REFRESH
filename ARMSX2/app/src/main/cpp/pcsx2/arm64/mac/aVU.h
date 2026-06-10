@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -44,6 +45,7 @@
 #include <deque>
 #include <memory>
 #include <vector>
+
 
 namespace pcsx2_macrec {
 
@@ -510,6 +512,8 @@ public:
 // microVU rec contexts (defined in aVU.cpp, where microRegAlloc is complete).
 extern microVU microVU0;
 extern microVU microVU1;
+
+
 
 // macOS-port VU recompiler instances. These mirror VUmicro.h's
 // recMicroVU0/recMicroVU1 (both final), but live in pcsx2_macrec so they don't

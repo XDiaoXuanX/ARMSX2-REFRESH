@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -28,6 +29,9 @@
 // iopMem* helpers directly — so unlike the EE we only reserve this one.
 #ifndef RESTATEPTR
 #define RESTATEPTR vixl::aarch64::x19
+
+namespace pcsx2_macrec {
+
 #endif
 
 // --------------------------------------------------------------------------------------
@@ -35,8 +39,6 @@
 // --------------------------------------------------------------------------------------
 // GPR is the first member of psxRegisters and GPRRegs is a u32[34] union, so guest
 // GPR `n`'s offset is just n*4 (hi == r[32], lo == r[33]).
-namespace pcsx2_macrec {
-
 static constexpr u32 IOP_GPR_OFFSET(u32 n) { return n * 4u; }
 static constexpr u32 IOP_HI_OFFSET = IOP_GPR_OFFSET(32);
 static constexpr u32 IOP_LO_OFFSET = IOP_GPR_OFFSET(33);
@@ -51,11 +53,11 @@ static constexpr u32 IOP_CYCLEEE_OFFSET = static_cast<u32>(offsetof(psxRegisters
 //  Interpreter single-step fallback (defined in R3000AInterpreter.cpp)
 // --------------------------------------------------------------------------------------
 // Interpret exactly one IOP instruction at psxRegs.pc (handling its own PC, delay slot
-// and cycle++), then return — the rec's per-opcode fallback. Must NOT exit the
-// timeslice itself; the rec block tail drives iopCycleEE / event tests.
-// iopExecuteOneInst() is at global scope (declared in pcsx2/R3000A.h, defined in
-// R3000AInterpreter.cpp). Unqualified calls from inside pcsx2_macrec resolve to
-// ::iopExecuteOneInst via outer namespace lookup; do not re-declare it here or
-// the compiler would prefer the (undefined) pcsx2_macrec::iopExecuteOneInst.
+// and cycle++), then return — the rec's per-opcode fallback. Lives at global
+// namespace (declared in R3000A.h, defined in R3000AInterpreter.cpp). Bring it
+// into pcsx2_macrec via a using-declaration so qualified-by-namespace lookups
+// here find the global symbol instead of treating it as a missing local decl.
+using ::iopExecuteOneInst;
+
 
 } // namespace pcsx2_macrec

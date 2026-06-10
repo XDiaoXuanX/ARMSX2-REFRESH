@@ -309,6 +309,12 @@ void psxInterpExecuteOne()
 	iopShadowSuppressEventTest = false;
 }
 
+// Single-step entry for the macOS-port IOP recompiler's fallback path.
+void iopExecuteOneInst()
+{
+	execI();
+}
+
 // Block-level interp replay used by the IOP shadow-verify harness. Runs
 // `execI()` until either the inner branch path fires (branch2 == true), pc
 // reaches `endpc` (fall-through block boundary), or the instruction count

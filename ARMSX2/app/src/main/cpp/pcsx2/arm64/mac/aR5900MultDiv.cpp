@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -30,6 +31,7 @@
 #include "R5900.h"
 
 #include <cstddef>
+
 
 namespace pcsx2_macrec {
 
@@ -168,5 +170,6 @@ void armEmitMULT1(u32 rd, u32 rs, u32 rt) { emitMult(true, rd, rs, rt, EE_LO1_OF
 void armEmitMULTU1(u32 rd, u32 rs, u32 rt) { emitMult(false, rd, rs, rt, EE_LO1_OFFSET, EE_HI1_OFFSET); }
 void armEmitDIV1(u32 rs, u32 rt) { emitDivS(rs, rt, EE_LO1_OFFSET, EE_HI1_OFFSET); }
 void armEmitDIVU1(u32 rs, u32 rt) { emitDivU(rs, rt, EE_LO1_OFFSET, EE_HI1_OFFSET); }
+
 
 } // namespace pcsx2_macrec

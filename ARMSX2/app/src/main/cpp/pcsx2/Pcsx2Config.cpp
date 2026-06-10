@@ -459,12 +459,12 @@ Pcsx2Config::RecompilerOptions::RecompilerOptions()
 	EnableFastmem = true;
 	PauseOnTLBMiss = false;
 
-	// Default to the original arm64 backend on every CPU; flip to bisect against
-	// the macOS-port backend (see Config.h).
+	// Default backends: original arm64 for EE/IOP/VU0, macOS-port for VU1.
+	// Flip individual CPUs to bisect regressions (see Config.h).
 	UseMacEE = false;
 	UseMacIOP = false;
 	UseMacVU0 = false;
-	UseMacVU1 = false;
+	UseMacVU1 = true;
 
 	// Phase 2 microVU inline FMAC stall — OFF by default until verified.
 	Vu1InlineFmacStall = false;

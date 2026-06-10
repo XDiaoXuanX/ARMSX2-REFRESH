@@ -480,30 +480,16 @@ struct Gif_Path
 			if (gifTag.tag.EOP)
 				break;
 		}
-		// Partial-transfer-friendly: under MTVU + REC_VU1 the hazard fallback
-		// path runs `_vuTestPipes -> _vuXGKICKTransfer(flush=false)` which
-		// transfers a cycle-budgeted chunk of the packet, not necessarily a
-		// full one. The chunk can end mid-tag (leftover <16 bytes of header
-		// at line 453, or a tag whose data run extends past the buffer at
-		// line 457), leaving curOffset < curSize. The leftover data sits in
-		// the buffer until the next CopyGSPacketData appends more bytes;
-		// the next ExecuteGSPacketMTVU then resumes from the same curOffset
-		// and processes the now-complete tag. So `curOffset == curSize` is
-		// a non-invariant for our config — Twinsanity (memory-card screen)
-		// hit the strict assert here in Debug builds. (Release silently
-		// no-ops the assert and continues; this comment documents why
-		// dropping it in Debug is correct rather than a workaround.)
+		pxAssert(curOffset == curSize);
 		gifTag.isValid = false;
 	}
 
 	// MTVU: Gets called after VU1 execution on MTVU thread
 	void FinishGSPacketMTVU()
 	{
-		// Release-only: prior writes (gif buffer / gsPack fields) publish to MTGS
-		// when the increased readAmount is observed. The acquire half of acq_rel
-		// served no producer-side purpose and emitted a redundant `dmb ish` per
-		// packet on ARM64.
-		readAmount.fetch_add(gsPack.size + gsPack.readAmount, std::memory_order_release);
+		// Performance note: fetch_add atomic operation might create some stall for atomic
+		// operation in gsPack.push
+		readAmount.fetch_add(gsPack.size + gsPack.readAmount, std::memory_order_acq_rel);
 		while (!mtvu.gsPackQueue.push(gsPack))
 			;
 
@@ -623,19 +609,7 @@ struct Gif_Unit
 			}
 			if (gifTag.tag.EOP )
 			{
-				// Always tag the return with the EOP top bit so callers can
-				// detect end-of-packet termination unambiguously. Without this,
-				// _vuXGKICKTransfer (called from _vuTestPipes inside the interp's
-				// vu1Exec when a hazard-fallback pair runs an XGKICK lower)
-				// reads xgkickendpacket=0, the do-loop continues past the
-				// packet, GetGSPacketSize is re-invoked at the post-transfer
-				// addr, walks stale VU memory, and feeds garbage through
-				// ExecuteGSPacketMTVU which trips its `curOffset == curSize`
-				// assert (Gif_Unit.h:483). The arm64 JIT's primary XGKICK
-				// path (vu1_XGKICK_fire_deferred) strips the bit via
-				// `size &= 0xFFFFu`, so this change is invisible there. Caused
-				// the Twinsanity memory-card-screen MTVU SIGABRT.
-				return curSize | (1u << 31);
+				return curSize;
 			}
 		}
 	}

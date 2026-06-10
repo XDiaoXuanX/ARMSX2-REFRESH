@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -50,6 +51,7 @@
 // persistent state regs (x19-x21) are callee-saved and survive. Once the EE rec
 // has a register allocator (Phase 3) it must flush live caller-saved guest state
 // before invoking these.
+
 namespace pcsx2_macrec {
 
 void armEmitVtlbRead(u32 bits, bool sign, const vixl::aarch64::Register& dst, const vixl::aarch64::Register& addr);
@@ -518,5 +520,6 @@ void armEmitPEXT5(u32 rd, u32 rt);
 void armEmitPPAC5(u32 rd, u32 rt);
 bool armEmitPMFHL(u32 rd, u32 sa);
 void armEmitPMTHL(u32 rs, u32 sa);
+
 
 } // namespace pcsx2_macrec

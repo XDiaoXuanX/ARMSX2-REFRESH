@@ -5060,6 +5060,16 @@ VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 
 	VkPipeline pipeline = CreateTFXPipeline(p);
 	m_tfx_pipelines.emplace(p, pipeline);
+
+	// Persist the pipeline cache every N new compiles so an Android OOM-kill
+	// or crash mid-session doesn't throw away pipelines that compiled after
+	// the last onPause flush. 32 is a balance between save overhead and how
+	// much work we'd lose in the worst case. onPause still does a final flush.
+	if (g_vulkan_shader_cache && ++m_tfx_pipeline_compile_counter >= 32)
+	{
+		m_tfx_pipeline_compile_counter = 0;
+		g_vulkan_shader_cache->FlushPipelineCache();
+	}
 	return pipeline;
 }
 
@@ -6216,9 +6226,9 @@ void GSDeviceVK::UpdateHWPipelineSelector(GSHWDrawConfig& config, PipelineSelect
 	pipe.ds = config.ds != nullptr;
 	pipe.line_width = config.line_expand;
 	pipe.feedback_loop_flags = FeedbackLoopFlag_None;
-	if (m_features.texture_barrier && (config.require_one_barrier || config.require_full_barrier))
+	if (m_features.texture_barrier)
 	{
-		if (config.ps.IsFeedbackLoopRT())
+		if (config.ps.IsFeedbackLoopRT() || config.require_one_barrier || config.require_full_barrier)
 			pipe.feedback_loop_flags |= FeedbackLoopFlag_ReadAndWriteRT;
 
 		if (config.ps.IsFeedbackLoopDepth())

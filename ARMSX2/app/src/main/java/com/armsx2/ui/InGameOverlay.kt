@@ -247,7 +247,18 @@ object InGameOverlay {
     fun open() {
         if (WindowImpl.overlayVisible.value) return
         pausedByOverlay = (Main.eState.value == EmuState.RUNNING)
-        if (pausedByOverlay) Main.pause()
+        // ALWAYS pause while the overlay is up — even if eState already
+        // says PAUSED. The Kotlin flag can run ahead of the actual VM,
+        // and a stale PAUSED left the VM running underneath while settings
+        // changes (upscale → live GS reconfig) applied mid-frame.
+        // Main.pause() dispatches the (blocking) native pause to a
+        // background executor — it must NOT run here on the UI thread:
+        // SetState(Paused) drains MTVU/MTGS with no watchdog, which froze
+        // the app on long-press so the overlay showed late or never.
+        // Mid-frame-settings safety doesn't depend on this call having
+        // completed: commitSettings and the savestate/GS-reconfig JNI entry
+        // points enforce VM quiescence themselves (ScopedVMPause).
+        if (Main.eState.value != EmuState.STOPPED) Main.pause()
         state.value = State.Root
         currentTab.value = Tab.PlayingNow
         // Resolve the current game's serial first; scope and settings

@@ -846,13 +846,18 @@ __ri void ImGuiManager::DrawShaderCompileIndicator(float scale, float margin, fl
 			label.c_str() + label.length());
 	}
 
+	// ImGui v1.92 PathStroke: (col, ImDrawFlags flags = 0, float thickness = 1.0f).
+	// Upstream's build-fix commit (6d171ff34f) swapped args incorrectly — passing
+	// thickness as flags casts the float to an int with potentially low-nibble bits set,
+	// and `false` lands in the thickness slot (becomes 0.0f → invisible stroke).
+	// Correct: flags = ImDrawFlags_None (open path), thickness second.
 	dl->PathClear();
 	dl->PathArcTo(center, radius, 0.0f, 2.0f * IM_PI, 32);
-	dl->PathStroke(spinner_track_col, std::max(1.0f, thickness * 0.65f), false);
+	dl->PathStroke(spinner_track_col, ImDrawFlags_None, std::max(1.0f, thickness * 0.65f));
 
 	dl->PathClear();
 	dl->PathArcTo(center, radius, a0, a1, 24);
-	dl->PathStroke(text_col, thickness, false);
+	dl->PathStroke(text_col, ImDrawFlags_None, thickness);
 }
 
 __ri void ImGuiManager::DrawSettingsOverlay(float scale, float margin, float spacing)

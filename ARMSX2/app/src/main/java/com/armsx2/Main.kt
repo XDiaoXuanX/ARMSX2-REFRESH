@@ -487,14 +487,29 @@ class Main: ComponentActivity() {
             }
         }
 
+        // pause/resume run on a dedicated serialized executor, NOT the UI
+        // thread. NativeApp.pause() is synchronous and can block for seconds:
+        // SetState(Paused) drains the MTVU ring (vu1Thread.WaitVU) and waits
+        // on MTGS (WaitGS) with no watchdog, then pause() busy-waits up to 3s
+        // for the EE to park outside Execute(). Running that on the UI thread
+        // froze the whole app on long-press-to-pause (overlay appeared late
+        // or never). A single thread keeps pause/resume strictly ordered, so
+        // a fast open→close can't resume before the pause lands; native
+        // resume() runs inline on this executor for the same reason.
+        // eState is set eagerly for instant UI feedback — the authoritative
+        // value is re-asserted by Host::OnVMPaused/Resumed → vmSetPaused.
+        private val vmControl = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "VMControl")
+        }
+
         fun pause() {
-            NativeApp.pause()
             eState.value = EmuState.PAUSED
+            vmControl.execute { NativeApp.pause() }
         }
 
         fun resume() {
-            NativeApp.resume()
             eState.value = EmuState.RUNNING
+            vmControl.execute { NativeApp.resume() }
         }
 
         fun stop() {
@@ -844,12 +859,14 @@ class Main: ComponentActivity() {
                             .focusRequester(focusRequester)
                             .fillMaxSize()
                             .pointerInput(Unit) {
-                                // Long-press on the surface while running pops the
-                                // in-game pause overlay (Resume / Save+Load State /
-                                // Change Disc / Library / Renderer / Frame Limit /
-                                // Reset / Close — see InGameOverlay). Opening
-                                // auto-pauses the VM; close paths inside the
-                                // overlay handle resume themselves.
+                                // In-game pausing moved OFF the surface-wide
+                                // long-press: it fired on accidental presses in
+                                // empty screen space. The pause overlay now opens
+                                // via long-press on the invisible PAUSE hotspot
+                                // widget between the DPad and face buttons (see
+                                // TouchControlsOverlay.PauseWidget). Long-press
+                                // here only toggles the toolbar when no game is
+                                // up (games-list screen).
                                 //
                                 // onPress fires on every initial pointer down on
                                 // the surface (events that don't land on a touch
@@ -863,10 +880,8 @@ class Main: ComponentActivity() {
                                         com.armsx2.ui.touch.TouchControls.onSurfaceTouched()
                                     },
                                     onLongPress = {
-                                        if (eState.value == EmuState.RUNNING ||
-                                            eState.value == EmuState.PAUSED) {
-                                            com.armsx2.ui.InGameOverlay.open()
-                                        } else {
+                                        if (eState.value != EmuState.RUNNING &&
+                                            eState.value != EmuState.PAUSED) {
                                             WindowImpl.toolbarVisible.value = !WindowImpl.toolbarVisible.value
                                         }
                                     },

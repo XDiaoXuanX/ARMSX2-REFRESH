@@ -292,6 +292,24 @@ void intSetBranch()
 	branch2 = /*cpuRegs.branch =*/ 1;
 }
 
+// Single-step entry used by the macOS-port arm64 recompiler when it hands an op
+// back to the interpreter. Mirrors execI without the fastjmp exit (rec drives
+// its own exits).
+void intExecuteOneInst()
+{
+	const u32 thispc = cpuRegs.pc;
+	cpuRegs.pc += 4;
+	cpuRegs.code = memRead32(thispc);
+
+	const OPCODE& opcode = GetCurrentInstruction();
+	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
+
+	opcode.interpret();
+
+	if (!(opcode.flags & IS_BRANCH))
+		intUpdateCPUCycles();
+}
+
 ////////////////////////////////////////////////////////////////////
 // R5900 Branching Instructions!
 // These are the interpreter versions of the branch instructions.  Unlike other

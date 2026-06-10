@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-License-Identifier: GPL-3.0
 
 #include "common/Console.h"
@@ -7,6 +8,7 @@
 #include "vtlb.h"
 
 #include "common/Assertions.h"
+
 
 namespace pcsx2_macrec {
 
@@ -18,5 +20,6 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 // SaveStateBase::vuJITFreeze() now lives in arm64/aVU.cpp (Phase 7.2c), where it
 // freezes the real microVU0/1 pipeline state (mVU.prog.lpState) instead of the
 // 96-byte placeholder that used to be stubbed here.
+
 
 } // namespace pcsx2_macrec

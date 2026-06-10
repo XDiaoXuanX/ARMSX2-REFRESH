@@ -660,6 +660,61 @@ struct Pcsx2Config
 			EnableFastmem : 1;
 		bool
 			PauseOnTLBMiss : 1;
+		// ARMSX2 A/B: per-CPU toggle between the original Android arm64 backend
+		// (default) and the macOS-port arm64 backend (lives in arm64/mac/,
+		// namespaced as pcsx2_macrec). Use these to bisect mac regressions
+		// against the slower-but-more-accurate native backend.
+		bool
+			UseMacEE : 1,
+			UseMacIOP : 1,
+			UseMacVU0 : 1,
+			UseMacVU1 : 1;
+		// microVU-style compile-time pipeline-stall folding (Phase 2 inline FMAC
+		// stall, re-attempt). When ON, per-pair FMAC stall-check BLs
+		// (vu1_TestFMACStallReg / vu1_TestFMACStallReg2 — formerly 17-32% of
+		// total CPU per simpleperf) are replaced by a compile-time inline
+		// `Add VU1_CYCLE_REG, #fmac_stall`, gated by the same fmac_carry_safe
+		// guard (ct_cycle > 3) that proves cross-block carry-in slots have
+		// retired at runtime. Mirrors mac's compile-time mVUincCycles + mVUstall
+		// fold. Default OFF — was reverted 2026-04 due to GoW glitches; needs
+		// shadow-verify pass before enabling.
+		bool
+			Vu1InlineFmacStall : 1;
+		// microVU-style cross-block pipeline-state propagation. When ON, each
+		// VU1 block records its exit-time microRegInfo (per-VF/VI lane
+		// countdowns + Q/P/xgkick state). When a predecessor links to a
+		// successor via direct-B forward link, the predecessor's exitState is
+		// used at the successor's tryForwardLink time to match a specialised
+		// variant whose entryState matches — letting CompileBlock shrink the
+		// CARRY_IN_GATE_* bounds (FMAC=3, IALU=3, FDIV=12, EFU=54 cycle
+		// thresholds for cross-block carry-in safety). With entryState known
+		// for-sure clean, per-pair stall checks can elide from cycle 0 of the
+		// block. Default OFF — variant cache multiplies per-slot; needs
+		// measurement on real workloads.
+		bool
+			Vu1CrossBlockPState : 1;
+		// Inline FMAC-drain instead of BL into vu1_TestPipes_VU1 at pairs
+		// where the pre-walk proves the non-FMAC pipes (FDIV/EFU/IALU) are
+		// empty and carry-safe (skip_info[i].fmacOnlyTestPipes). The runtime
+		// helper would only walk the FMAC ring; we emit that walk inline at
+		// the JIT site instead, saving the BL + viCacheInvalidateAll + ret
+		// per call. Mac doesn't need this because it has no runtime FMAC
+		// ring — flag instances are routed at compile time via the
+		// regalloc. Default OFF until A/B-tested in San Andreas + GoW2.
+		bool
+			Vu1InlineDrainTestPipes : 1;
+		// Mac-style flag-instance routing. When ON, VU->fmac[0..3].{mac,
+		// status,clip}flag are reinterpreted as 4 mac-style instance slots
+		// (the ring metadata — sCycle/Cycle/flagreg/regupper/etc. — is no
+		// longer written). emitFMACAddPair stores the pair's new flags into
+		// slot[mo.{m,s,c}Flag.write]; at each pair's top, slot[mo.{m,s,c}
+		// Flag.read] is committed to VI[REG_MAC/STATUS/CLIP]. FMAC stall BLs
+		// are force-skipped (they read sCycle which we don't write) and
+		// fmaccount stays 0 so vu1_TestPipes_VU1's FMAC drain loop early-
+		// exits. Default OFF — first-cut port of microVU's flag-instance
+		// scheme; subsequent sessions add cross-block instance plumbing.
+		bool
+			Vu1FmacInstanceRouting : 1;
 		BITFIELD_END
 
 		RecompilerOptions();
@@ -943,6 +998,7 @@ struct Pcsx2Config
 		int AudioCaptureBitrate = DEFAULT_AUDIO_CAPTURE_BITRATE;
 
 		std::string Adapter;
+		std::string AndroidGpuProfileOverride = "auto";
 		std::string HWDumpDirectory;
 		std::string SWDumpDirectory;
 
@@ -1160,7 +1216,22 @@ struct Pcsx2Config
 			WaitLoop : 1, // enables constant loop detection and fast-forwarding
 			vuFlagHack : 1, // microVU specific flag hack
 			vuThread : 1, // Enable Threaded VU1
-			vu1Instant : 1; // Enable Instant VU1 (Without MTVU only)
+			vu1Instant : 1, // Enable Instant VU1 (Without MTVU only)
+			vuNeonFusions : 1, // ARMSX2: gate the arm64 VU1 NEON peephole fusions
+			                   // (MAC cluster MULAx+MADDAy+MADDAz+MADDw, OPMULA+OPMSUB
+			                   // cross-product). Toggle off to confirm whether a game
+			                   // regression is caused by our JIT fusion peepholes.
+			vuDeferredWrites : 1, // ARMSX2 (EXPERIMENTAL): defer per-pair VF stores via
+			                      // the NEON cache instead of writing through. Big perf
+			                      // win when it works (saves 1 Str per FMAC pair on
+			                      // hot transform code). Known to break SH2 graphics
+			                      // and similar games with cross-pair coherence
+			                      // assumptions. Default OFF.
+			vuSkipStallSim : 1; // ARMSX2 (AGGRESSIVE): skip the vu1_TestPipes_VU1 BL
+			                    // in the JIT. Memory profiling showed 19-32% of CPU in
+			                    // this helper on Futurama / GoW2 / etc. Skipping breaks
+			                    // any game that relies on accurate FMAC/FDIV/EFU/IALU
+			                    // pipeline-stall timing. Default OFF.
 		BITFIELD_END
 
 		s8 EECycleRate; // EE cycle rate selector (1.0, 1.5, 2.0)

@@ -109,17 +109,13 @@ static u32 GetSpinTime()
 		return 1000 * atoi(req);
 	}
 #if defined(__ANDROID__)
-	// Mobile: shorter spin window. Producer scheduling latency on Android
-	// is bimodal — either sub-µs (fast cache hit, same cluster) or many ms
-	// (big.LITTLE migration, foreground UI preemption, thermal throttle).
-	// Spinning 50µs covers neither well: the fast case finishes in <1µs so
-	// 49µs are wasted, and the slow case spends 50µs spinning and STILL
-	// falls through to futex anyway. simpleperf on S26 Ultra showed the
-	// MTGS thread burning 25% of total CPU in ShortSpin() with the desktop
-	// 50µs default — a quarter of the SoC doing nothing. A 5µs window
-	// captures the fast case and bails to futex (~2µs syscall) far earlier
-	// on long waits, freeing CPU for the threads that actually have work.
-	return 5 * 1000; // 5µs
+	// Mobile producer arrival is bimodal: either sub-µs (EE→MTGS handoff with
+	// work already queued) or many-ms (waiting for a frame boundary). A
+	// 50µs spin window is wrong for both cases — longer than the sub-µs hit
+	// rewards and uselessly short for the many-ms wait. Cut to 2µs to keep
+	// the fast path but stop bleeding CPU on the slow path; the simpleperf
+	// trace showed ~30% of total CPU in ShortSpin at the 50µs default.
+	return 2 * 1000;
 #else
 	return 50 * 1000; // 50µs
 #endif

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -36,6 +37,7 @@
 #include "aR5900.h"
 
 #include "R5900.h"
+
 
 namespace pcsx2_macrec {
 
@@ -1332,5 +1334,6 @@ void armEmitPMTHL(u32 rs, u32 sa)
 	armAsm->Ldr(a64::w9, a64::MemOperand(RESTATEPTR, EE_GPR_OFFSET(rs) + 12));
 	armAsm->Str(a64::w9, a64::MemOperand(RESTATEPTR, EE_HI1_OFFSET));
 }
+
 
 } // namespace pcsx2_macrec

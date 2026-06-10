@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -34,6 +35,7 @@
 #include "arm64/mac/AsmHelpers.h"
 
 #include <array>
+
 
 namespace pcsx2_macrec {
 
@@ -983,5 +985,6 @@ private:
 	// writes back every cached VF reg before a call.
 	static bool vfIsCallerSaved([[maybe_unused]] int i) { return true; }
 };
+
 
 } // namespace pcsx2_macrec

@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -22,6 +23,7 @@
 #include "common/Assertions.h"
 
 #include <cstddef>
+
 
 namespace pcsx2_macrec {
 
@@ -555,5 +557,6 @@ void armEmitCVT_S(u32 fd, u32 fs)
 	armAsm->Fmov(a64::w9, RSSCRATCH);
 	armAsm->Str(a64::w9, a64::MemOperand(RESTATEPTR, EE_FPR_OFFSET(fd)));
 }
+
 
 } // namespace pcsx2_macrec

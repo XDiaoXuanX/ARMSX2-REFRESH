@@ -384,6 +384,7 @@ Pcsx2Config::SpeedhackOptions::SpeedhackOptions()
 	IntcStat = true;
 	vuFlagHack = true;
 	vu1Instant = true;
+	vuNeonFusions = true;
 }
 
 Pcsx2Config::SpeedhackOptions& Pcsx2Config::SpeedhackOptions::DisableAll()
@@ -407,6 +408,9 @@ void Pcsx2Config::SpeedhackOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(vuFlagHack);
 	SettingsWrapBitBool(vuThread);
 	SettingsWrapBitBool(vu1Instant);
+	SettingsWrapBitBool(vuNeonFusions);
+	SettingsWrapBitBool(vuDeferredWrites);
+	SettingsWrapBitBool(vuSkipStallSim);
 
 	EECycleRate = std::clamp(EECycleRate, MIN_EE_CYCLE_RATE, MAX_EE_CYCLE_RATE);
 	EECycleSkip = std::min(EECycleSkip, MAX_EE_CYCLE_SKIP);
@@ -454,6 +458,23 @@ Pcsx2Config::RecompilerOptions::RecompilerOptions()
 	EnableVU1 = true;
 	EnableFastmem = true;
 	PauseOnTLBMiss = false;
+
+	// Default backends: original arm64 for EE/IOP/VU0, macOS-port for VU1.
+	// Flip individual CPUs to bisect regressions (see Config.h).
+	UseMacEE = false;
+	UseMacIOP = false;
+	UseMacVU0 = false;
+	UseMacVU1 = true;
+
+	// Phase 2 microVU inline FMAC stall — OFF by default until verified.
+	Vu1InlineFmacStall = false;
+	// Phase 3 microVU cross-block pState propagation — OFF by default.
+	Vu1CrossBlockPState = false;
+	// Inline-emit the FMAC drain instead of BL into vu1_TestPipes_VU1 at
+	// fmacOnlyTestPipes pairs. OFF by default until A/B-tested.
+	Vu1InlineDrainTestPipes = false;
+	// Mac-style flag-instance routing — OFF by default, first-cut port.
+	Vu1FmacInstanceRouting = false;
 
 	// vu and fpu clamping default to standard overflow.
 	vu0Overflow = true;
@@ -532,6 +553,16 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(EnableVU1);
 	SettingsWrapBitBool(EnableFastmem);
 	SettingsWrapBitBool(PauseOnTLBMiss);
+
+	SettingsWrapBitBool(UseMacEE);
+	SettingsWrapBitBool(UseMacIOP);
+	SettingsWrapBitBool(UseMacVU0);
+	SettingsWrapBitBool(UseMacVU1);
+
+	SettingsWrapBitBool(Vu1InlineFmacStall);
+	SettingsWrapBitBool(Vu1CrossBlockPState);
+	SettingsWrapBitBool(Vu1InlineDrainTestPipes);
+	SettingsWrapBitBool(Vu1FmacInstanceRouting);
 
 	SettingsWrapBitBool(vu0Overflow);
 	SettingsWrapBitBool(vu0ExtraOverflow);
@@ -889,6 +920,7 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(AudioCaptureBitrate) &&
 
 		OpEqu(Adapter) &&
+		OpEqu(AndroidGpuProfileOverride) &&
 
 		OpEqu(HWDumpDirectory) &&
 		OpEqu(SWDumpDirectory));
@@ -1097,6 +1129,13 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitfieldEx(AudioCaptureBitrate, "AudioCaptureBitrate");
 
 	SettingsWrapEntry(Adapter);
+	SettingsWrapEntry(AndroidGpuProfileOverride);
+	if (StringUtil::Strcasecmp(AndroidGpuProfileOverride.c_str(), "mali") == 0)
+		AndroidGpuProfileOverride = "mali";
+	else if (StringUtil::Strcasecmp(AndroidGpuProfileOverride.c_str(), "adreno") == 0)
+		AndroidGpuProfileOverride = "adreno";
+	else
+		AndroidGpuProfileOverride = "auto";
 	SettingsWrapEntry(HWDumpDirectory);
 	if (!HWDumpDirectory.empty() && !Path::IsAbsolute(HWDumpDirectory))
 		HWDumpDirectory = Path::Combine(EmuFolders::DataRoot, HWDumpDirectory);

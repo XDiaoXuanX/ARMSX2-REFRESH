@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-License-Identifier: GPL-3.0
 
 #include "arm64/mac/AsmHelpers.h"
@@ -7,6 +8,7 @@
 #include "common/BitUtils.h"
 #include "common/Console.h"
 #include "common/HostSys.h"
+
 
 namespace pcsx2_macrec {
 
@@ -461,5 +463,6 @@ void ArmConstantPool::EmitLoadLiteral(const vixl::aarch64::CPURegister& reg, con
 	armMoveAddressToReg(RXVIXLSCRATCH, literal);
 	armAsm->Ldr(reg, a64::MemOperand(RXVIXLSCRATCH));
 }
+
 
 } // namespace pcsx2_macrec

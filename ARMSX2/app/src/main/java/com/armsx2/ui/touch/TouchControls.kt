@@ -207,9 +207,15 @@ enum class TouchButtonId(val label: String, val keycode: Int, val kind: Kind) {
     R3("R3", KeyEvent.KEYCODE_BUTTON_THUMBR, Kind.MENU),
     DPAD("D-Pad", KeyEvent.KEYCODE_DPAD_UP, Kind.DPAD),
     L_STICK("L-Stick", 110, Kind.STICK),
-    R_STICK("R-Stick", 120, Kind.STICK);
+    R_STICK("R-Stick", 120, Kind.STICK),
+    // Invisible long-press hotspot that opens the in-game pause overlay.
+    // Replaced the old long-press-anywhere-on-the-surface gesture, which
+    // fired on accidental presses in empty space mid-game. Emits no pad
+    // keycode (0 = unused); renders nothing in play mode, shows an
+    // outlined "PAUSE" box in edit mode so it can be moved/resized.
+    PAUSE("Pause", 0, Kind.PAUSE);
 
-    enum class Kind { FACE, SHOULDER, MENU, DPAD, STICK }
+    enum class Kind { FACE, SHOULDER, MENU, DPAD, STICK, PAUSE }
 }
 
 /** Position + size for a single widget. xFrac / yFrac are anchor-point
@@ -305,6 +311,10 @@ data class TouchLayout(val buttons: List<TouchButtonCfg>) {
                 // doesn't accidentally press them).
                 TouchButtonCfg(TouchButtonId.L3,       0.18f, 0.93f, 42f),
                 TouchButtonCfg(TouchButtonId.R3,       0.82f, 0.93f, 42f),
+                // Invisible pause hotspot — dead center between the DPad
+                // (0.10) and the face diamond (0.86), on their shared row,
+                // clear of the sticks (y 0.80) and Start/Select (y 0.92).
+                TouchButtonCfg(TouchButtonId.PAUSE,    0.48f, 0.50f, 120f),
             ),
         )
     }

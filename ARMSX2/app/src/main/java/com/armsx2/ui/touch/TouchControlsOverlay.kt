@@ -145,6 +145,7 @@ fun TouchControlsOverlay() {
                 when (cfg.id.kind) {
                     TouchButtonId.Kind.DPAD -> DpadWidget(cfg, edit)
                     TouchButtonId.Kind.STICK -> StickWidget(cfg, edit)
+                    TouchButtonId.Kind.PAUSE -> PauseWidget(cfg, edit)
                     else -> ButtonWidget(cfg, edit)
                 }
             }
@@ -237,8 +238,47 @@ private fun drawableFor(id: TouchButtonId, pressed: Boolean): Int = when (id) {
     TouchButtonId.SELECT   -> if (pressed) R.drawable.pad_select_pressed   else R.drawable.pad_select
     TouchButtonId.L3       -> if (pressed) R.drawable.pad_l3_pressed       else R.drawable.pad_l3
     TouchButtonId.R3       -> if (pressed) R.drawable.pad_r3_pressed       else R.drawable.pad_r3
-    // DPad / sticks render their own composed sprites.
-    TouchButtonId.DPAD, TouchButtonId.L_STICK, TouchButtonId.R_STICK -> R.drawable.pad_cross
+    // DPad / sticks render their own composed sprites; PAUSE renders none.
+    TouchButtonId.DPAD, TouchButtonId.L_STICK, TouchButtonId.R_STICK,
+    TouchButtonId.PAUSE -> R.drawable.pad_cross
+}
+
+/* -------------------------------------------------------------------- */
+/*  Pause hotspot — invisible long-press zone that opens the overlay    */
+/* -------------------------------------------------------------------- */
+
+/** Invisible in play mode; long-press opens the in-game pause overlay.
+ *  Replaced the old long-press-anywhere surface gesture (see Main.kt),
+ *  which paused on accidental presses in empty screen space. The default
+ *  spot sits between the DPad and the face-button diamond; in edit mode
+ *  it renders an outlined "PAUSE" box so it can be dragged/resized like
+ *  any other widget. */
+@Composable
+private fun PauseWidget(cfg: TouchButtonCfg, edit: Boolean) {
+    if (edit) {
+        Box(
+            modifier = Modifier.fillMaxSize().editGestures(cfg),
+            contentAlignment = Alignment.Center,
+        ) {
+            EditAdornment(cfg.id)
+            Text(
+                "PAUSE",
+                color = Color.White.copy(alpha = 0.75f),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    } else {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(cfg.id) {
+                    detectTapGestures(
+                        onLongPress = { com.armsx2.ui.InGameOverlay.open() },
+                    )
+                },
+        )
+    }
 }
 
 /* -------------------------------------------------------------------- */

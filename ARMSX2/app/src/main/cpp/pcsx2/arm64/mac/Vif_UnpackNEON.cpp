@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-License-Identifier: GPL-3.0
 
 #include "Vif_UnpackNEON.h"
 #include "common/Perf.h"
+
 
 namespace pcsx2_macrec {
 
@@ -427,5 +429,6 @@ void VifUnpackSSE_Init()
 	Perf::any.Register(SysMemory::GetVIFUnpackRec(), armGetAsmPtr() - SysMemory::GetVIFUnpackRec(), "VIF Unpack");
 	HostSys::EndCodeWrite();
 }
+
 
 } // namespace pcsx2_macrec

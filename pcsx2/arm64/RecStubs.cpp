@@ -35,8 +35,8 @@ bool SaveStateBase::vuJITFreeze()
 
 #include "VUmicro.h"
 #include "VU.h"
-#include "arm64/iVU0micro_arm64.h"
-#include "arm64/iVU1micro_arm64.h"
+#include "arm64/aVU0.h"
+#include "arm64/aVU.h"
 
 namespace
 {

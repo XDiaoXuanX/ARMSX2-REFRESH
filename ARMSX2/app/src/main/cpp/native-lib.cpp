@@ -76,7 +76,12 @@ static void redirect_stdout_to_logcat()
     pthread_detach(t);
 }
 
-bool s_execute_exit;
+#include <atomic>
+
+// True whenever the CPU thread is parked outside Cpu->Execute() (runVMThread's
+// loop flips it around each Execute() call). Read cross-thread by the savestate
+// JNI entry points to confirm the VM is actually quiescent, hence atomic.
+std::atomic<bool> s_execute_exit{false};
 int s_window_width = 0;
 int s_window_height = 0;
 ANativeWindow* s_window = nullptr;
@@ -568,6 +573,48 @@ Java_kr_co_iefriends_pcsx2_NativeApp_speedhackEecycleskip(JNIEnv *env, jclass cl
                                                           jint p_value) {
 }
 
+// Savestate save/load and live GS reconfiguration mutate VM state that the
+// EE/MTVU/MTGS pipeline reads concurrently, and upstream only ever runs them
+// on the CPU thread. Our JNI entry points run on UI / Dispatchers.IO threads
+// and used to rely on the caller having paused the VM first — which not every
+// UI flow guaranteed. A load racing a RUNNING VM corrupts it mid-overwrite:
+// the EE rec executes blocks against half-loaded RAM, MTVU keeps VIF-unpacking
+// while dVifReset clears the hash buckets, and the SPU2 mixer reads voice
+// state mid-thaw (three distinct observed SIGSEGVs). Live upscale changes had
+// the same class of bug: GSUpdateConfig reconfigured the renderer while MTVU
+// was mid-XGKICK, corrupting the GIF path (GoW2: "GS packet size exceeded VU
+// memory size!" storms, then random EE/MTVU SIGSEGVs).
+//
+// This guard pauses the VM, then waits for the CPU thread to actually park
+// outside Cpu->Execute() (runVMThread flips s_execute_exit between Execute()
+// calls). The destructor restores the previous run state. If the CPU thread
+// fails to park, parked() stays false and the caller must skip the state op.
+class ScopedVMPause {
+public:
+    ScopedVMPause() {
+        m_was_running = (VMManager::GetState() == VMState::Running);
+        if (m_was_running)
+            VMManager::SetPaused(true);
+        // A healthy VM exits Execute() within a frame of the state flip;
+        // allow a generous 3s before declaring failure.
+        for (int i = 0; i < 3000 && !s_execute_exit.load(std::memory_order_acquire); ++i)
+            usleep(1000);
+        m_parked = s_execute_exit.load(std::memory_order_acquire);
+    }
+    ~ScopedVMPause() {
+        if (m_was_running)
+            VMManager::SetPaused(false);
+    }
+    ScopedVMPause(const ScopedVMPause&) = delete;
+    ScopedVMPause& operator=(const ScopedVMPause&) = delete;
+
+    bool parked() const { return m_parked; }
+
+private:
+    bool m_was_running = false;
+    bool m_parked = false;
+};
+
 // Generic setting writer — mirror of pcsx2-qt's settings save path.
 // Writes flow into s_settings_interface (the MemorySettingsInterface
 // installed in initialize); commitSettings flushes them through to the
@@ -620,10 +667,24 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setSetting(JNIEnv *env, jclass clazz,
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_commitSettings(JNIEnv *env, jclass clazz) {
-    if (VMManager::HasValidVM())
+    if (VMManager::HasValidVM()) {
+        // ApplySettings mutates state the EE/MTVU/MTGS pipeline reads
+        // concurrently (JIT cache flushes, GS reconfig), so it must not race
+        // a RUNNING VM. The pause overlay used to guarantee that by pausing
+        // synchronously on the UI thread before any settings write could be
+        // sent; pause is now dispatched to a background executor (it can
+        // block for seconds when MTVU/MTGS drain slowly), so enforce
+        // quiescence here instead of trusting caller ordering. Near-zero
+        // cost when the VM is already parked. Skipped entirely pre-VM:
+        // s_execute_exit is false before the first Execute(), so the guard
+        // would spin its full 3s watchdog during setup-wizard commits.
+        ScopedVMPause vm_pause;
         VMManager::ApplySettings();
-    if (MTGS::IsOpen())
+        if (MTGS::IsOpen())
+            MTGS::ApplySettings();
+    } else if (MTGS::IsOpen()) {
         MTGS::ApplySettings();
+    }
 
     // Plumbing roundtrip verifier — once the UI starts pushing real
     // settings, watch logcat for these to confirm the write landed.
@@ -651,8 +712,14 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderUpscalemultiplier(JNIEnv *env, jclass
     // VM picks up the change without a settings file save round-trip.
     Host::SetBaseFloatSettingValue("EmuCore/GS", "upscale_multiplier", p_value);
     EmuConfig.GS.UpscaleMultiplier = p_value;
-    if (MTGS::IsOpen())
+    if (MTGS::IsOpen()) {
+        // The overlay pauses the VM before this can fire, but don't trust
+        // every caller: reconfiguring GS mid-frame while the EE feeds MTVU
+        // corrupts the GIF path (see ScopedVMPause comment). No-ops when
+        // the VM is already paused; restores the run state otherwise.
+        ScopedVMPause vm_pause;
         MTGS::ApplySettings();
+    }
 }
 
 extern "C"
@@ -971,17 +1038,33 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_pause(JNIEnv *env, jclass clazz) {
-    std::thread([] {
+    // Synchronous on purpose. The old fire-and-forget detached thread
+    // returned before the VM actually stopped, so "pause then tweak
+    // settings" flows (pause overlay → upscale slider) raced a still-live
+    // EE/MTVU/MTGS pipeline. Block until the CPU thread parks outside
+    // Execute(); a healthy VM does so within a frame (the 3s cap is a
+    // watchdog, not an expected wait).
+    if (!VMManager::HasValidVM())
+        return;
+    if (VMManager::GetState() == VMState::Running)
         VMManager::SetPaused(true);
-    }).detach();
+    if (VMManager::GetState() == VMState::Paused) {
+        for (int i = 0; i < 3000 && !s_execute_exit.load(std::memory_order_acquire); ++i)
+            usleep(1000);
+        if (!s_execute_exit.load(std::memory_order_acquire))
+            Console.Error("pause(): CPU thread failed to park within 3s");
+    }
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_resume(JNIEnv *env, jclass clazz) {
-    std::thread([] {
-        VMManager::SetPaused(false);
-    }).detach();
+    // Inline on the calling thread (the old detached std::thread broke
+    // ordering against pause(): Kotlin now serializes pause/resume on one
+    // background executor, which only works if the native side runs
+    // synchronously on it). The resume path of SetState has no waits, so
+    // this is cheap even from the lifecycle onResume main-thread call.
+    VMManager::SetPaused(false);
 }
 
 extern "C"
@@ -1027,6 +1110,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_saveStateToSlot(JNIEnv *env, jclass clazz, 
         return false;
     if (VMManager::GetDiscCRC() == 0)
         return false;
+    const ScopedVMPause pause_guard;
+    if (!pause_guard.parked()) {
+        Console.Error("saveStateToSlot: CPU thread failed to park, refusing to save");
+        return false;
+    }
     // SaveStateToSlot calls error_callback on failure paths (memcard busy,
     // bad path) — passing a null std::function would std::bad_function_call.
     // No-op lambda swallows errors silently for now; proper UI surfacing
@@ -1039,10 +1127,9 @@ Java_kr_co_iefriends_pcsx2_NativeApp_saveStateToSlot(JNIEnv *env, jclass clazz, 
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_loadStateFromSlot(JNIEnv *env, jclass clazz, jint p_slot) {
-    // Previous body spun for 5 seconds waiting for s_execute_exit
-    // before ever calling LoadStateFromSlot — typically the flag
-    // never flipped within the window so load was a no-op. Direct
-    // call now (caller pauses + dispatches off-thread).
+    // ScopedVMPause below guarantees the CPU thread is parked before the
+    // load runs — do not rely on the Kotlin caller having paused the VM
+    // (not every UI flow does, and a load racing a running VM corrupts it).
     if (!VMManager::HasValidVM())
         return false;
     const u32 _crc = VMManager::GetDiscCRC();
@@ -1050,6 +1137,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_loadStateFromSlot(JNIEnv *env, jclass clazz
         return false;
     if (!VMManager::HasSaveStateInSlot(VMManager::GetDiscSerial().c_str(), _crc, p_slot))
         return false;
+    const ScopedVMPause pause_guard;
+    if (!pause_guard.parked()) {
+        Console.Error("loadStateFromSlot: CPU thread failed to park, refusing to load");
+        return false;
+    }
     return VMManager::LoadStateFromSlot(p_slot);
 }
 
@@ -1107,6 +1199,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_saveAutosaveState(JNIEnv *env, jclass clazz
         return false;
     if (VMManager::GetDiscCRC() == 0)
         return false;
+    const ScopedVMPause pause_guard;
+    if (!pause_guard.parked()) {
+        Console.Error("saveAutosaveState: CPU thread failed to park, refusing to save");
+        return false;
+    }
     VMManager::SaveStateToSlot(VMManager::SAVESTATE_SLOT_AUTOSAVE, /*zip_on_thread=*/false,
         [](const std::string&) {});
     return true;
@@ -1123,6 +1220,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_loadAutosaveState(JNIEnv *env, jclass clazz
     if (!VMManager::HasSaveStateInSlot(VMManager::GetDiscSerial().c_str(), _crc,
                                        VMManager::SAVESTATE_SLOT_AUTOSAVE))
         return false;
+    const ScopedVMPause pause_guard;
+    if (!pause_guard.parked()) {
+        Console.Error("loadAutosaveState: CPU thread failed to park, refusing to load");
+        return false;
+    }
     return VMManager::LoadStateFromSlot(VMManager::SAVESTATE_SLOT_AUTOSAVE);
 }
 

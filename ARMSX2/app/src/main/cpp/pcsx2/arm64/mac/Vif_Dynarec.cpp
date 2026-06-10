@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-License-Identifier: GPL-3.0
 
 #include "arm64/mac/Vif_UnpackNEON.h"
@@ -8,6 +9,7 @@
 #include "common/Assertions.h"
 #include "common/Perf.h"
 #include "common/StringUtil.h"
+
 
 namespace pcsx2_macrec {
 
@@ -587,5 +589,6 @@ _vifT __fi void dVifUnpack(const u8* data, bool isFill)
 
 template void dVifUnpack<0>(const u8* data, bool isFill);
 template void dVifUnpack<1>(const u8* data, bool isFill);
+
 
 } // namespace pcsx2_macrec

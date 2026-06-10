@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 isztld <https://isztld.com/>
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
@@ -24,6 +25,7 @@
 #include "aR5900.h"
 
 #include "R5900.h"
+
 
 namespace pcsx2_macrec {
 
@@ -182,5 +184,6 @@ void armEmitBC1T(u32 target, u32 fallthrough)
 	armAsm->Tst(RSCRATCHW, FPUflagC);
 	emitSelectPc(target, fallthrough, a64::ne); // C != 0 -> branch
 }
+
 
 } // namespace pcsx2_macrec
