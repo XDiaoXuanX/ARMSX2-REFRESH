@@ -9,7 +9,54 @@
 #include "common/Perf.h"
 #include "common/StringUtil.h"
 
+#include <cstdio>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#define ARMSX2_IOS_VIF_PERF_PROBE 1
+#else
+#define ARMSX2_IOS_VIF_PERF_PROBE 0
+#endif
+
 namespace a64 = vixl::aarch64;
+
+#if ARMSX2_IOS_VIF_PERF_PROBE
+// Lightweight tester probes (@@VIF_PERF@@). Per-unpack cost is a single u64
+// increment; all printing is on the compile/reset/fallback paths or heavily
+// rate-limited, so the hot unpack path is unaffected.
+struct VifPerfCounters
+{
+	u64 compiles = 0;
+	u64 resets = 0;
+	u64 executes = 0;
+	u64 interp_fallbacks = 0;
+};
+static VifPerfCounters s_vif_perf[2];
+
+static void vifPerfLog(int idx, const char* event)
+{
+	const nVifStruct& v = nVif[idx];
+	const VifPerfCounters& c = s_vif_perf[idx];
+	// Cache fill of the per-VIF rec region (how close we are to a reset).
+	const u8* base = SysMemory::GetCodePtr(idx ? HostMemoryMap::VIF1recOffset : HostMemoryMap::VIF0recOffset);
+	const size_t size = idx ? HostMemoryMap::VIF1recSize : HostMemoryMap::VIF0recSize;
+	const unsigned fill_pct = (v.recWritePtr && size) ?
+		static_cast<unsigned>(((v.recWritePtr - base) * 100) / size) : 0;
+
+	std::fprintf(stderr,
+		"@@VIF_PERF@@ event=%s idx=%d compiles=%llu resets=%llu executes=%llu interp_fallbacks=%llu cache_fill=%u%%\n",
+		event, idx,
+		static_cast<unsigned long long>(c.compiles),
+		static_cast<unsigned long long>(c.resets),
+		static_cast<unsigned long long>(c.executes),
+		static_cast<unsigned long long>(c.interp_fallbacks),
+		fill_pct);
+	std::fflush(stderr);
+}
+#endif
 
 static void mVUmergeRegs(const vixl::aarch64::VRegister& dest, const vixl::aarch64::VRegister& src, int xyzw, bool modXYZW = false, bool canModifySrc = false)
 {
@@ -172,6 +219,16 @@ static void maskedVecWrite(const a64::VRegister& reg, const a64::MemOperand& add
 
 void dVifReset(int idx)
 {
+#if ARMSX2_IOS_VIF_PERF_PROBE
+	// A reset mid-game means the unpack rec cache filled and every block recompiles —
+	// if testers see this repeating, the game is thrashing the VIF cache.
+	if (nVif[idx].recWritePtr)
+	{
+		s_vif_perf[idx].resets++;
+		vifPerfLog(idx, "reset");
+	}
+#endif
+
 	nVif[idx].vifBlocks.reset();
 
 	const size_t offset = idx ? HostMemoryMap::VIF1recOffset : HostMemoryMap::VIF0recOffset;
@@ -495,6 +552,12 @@ _vifT __fi nVifBlock* dVifCompile(nVifBlock& block, bool isFill)
 	Perf::vif.RegisterPC(v.recWritePtr, armGetCurrentCodePointer() - v.recWritePtr, block.upkType /* FIXME ideally a key*/);
 	v.recWritePtr = armEndBlock();
 
+#if ARMSX2_IOS_VIF_PERF_PROBE
+	s_vif_perf[idx].compiles++;
+	if (s_vif_perf[idx].compiles <= 8 || (s_vif_perf[idx].compiles & 0xFF) == 0)
+		vifPerfLog(idx, "compile");
+#endif
+
 	return &block;
 }
 
@@ -549,6 +612,12 @@ _vifT __fi void dVifUnpack(const u8* data, bool isFill)
 		u8* startmem = VU.Mem + (vif.tag.addr & (vuMemLimit - 0x10));
 		u8* endmem = VU.Mem + vuMemLimit;
 
+#if ARMSX2_IOS_VIF_PERF_PROBE
+		// One increment per unpack; periodic heartbeat roughly every 1M unpacks.
+		if ((++s_vif_perf[idx].executes & 0xFFFFF) == 0)
+			vifPerfLog(idx, "heartbeat");
+#endif
+
 		if ((startmem + b->length) <= endmem) [[likely]]
 		{
 #if 1
@@ -576,6 +645,11 @@ _vifT __fi void dVifUnpack(const u8* data, bool isFill)
 		}
 		else
 		{
+#if ARMSX2_IOS_VIF_PERF_PROBE
+			s_vif_perf[idx].interp_fallbacks++;
+			if (s_vif_perf[idx].interp_fallbacks <= 8 || (s_vif_perf[idx].interp_fallbacks & 0xFFF) == 0)
+				vifPerfLog(idx, "interp_fallback");
+#endif
 			VIF_LOG("Running Interpreter Block: nVif%x - VU Mem Ptr Overflow; falling back to interpreter. Start = %x End = %x num = %x, wl = %x, cl = %x",
 				v.idx, vif.tag.addr, vif.tag.addr + (block.num * 16), block.num, block.wl, block.cl);
 			_nVifUnpack(idx, data, vifRegs.mode, isFill);

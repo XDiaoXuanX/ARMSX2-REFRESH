@@ -39,6 +39,12 @@
 #define ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS 0
 #endif
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#define ARMSX2_IOS_EE_PERF_PROBE 1
+#else
+#define ARMSX2_IOS_EE_PERF_PROBE 0
+#endif
+
 namespace a64 = vixl::aarch64;
 
 // --------------------------------------------------------------------------------------
@@ -395,6 +401,119 @@ enum : u32
 	OP_SQC2 = 0x3e,
 };
 
+#if ARMSX2_IOS_EE_PERF_PROBE
+struct RecPerfCounters
+{
+	u64 blocks = 0;
+	u64 interp_blocks = 0;
+	u64 guest_ops = 0;
+	u64 const_ops = 0;
+	u64 cached_ops = 0;
+	u64 native_ops = 0;
+	u64 fallback_ops = 0;
+	u64 inline_interp_ops = 0;
+	u64 known_tails = 0;
+	u64 generic_tails = 0;
+	u64 branch_tails = 0;
+	u64 likely_tails = 0;
+	u64 waitloop_blocks = 0;
+	u64 cache_hits = 0;
+	u64 cache_misses = 0;
+	u64 cache_spills = 0;
+	u64 cache_writebacks = 0;
+	u64 fallback_primary[64] = {};
+};
+
+static RecPerfCounters s_ee_perf;
+
+static void recPerfCountFallback(u32 op)
+{
+	s_ee_perf.fallback_ops++;
+	s_ee_perf.fallback_primary[(op >> 26) & 0x3f]++;
+}
+
+static void recPerfLog(const char* reason, u32 startpc, u32 endpc, u32 compiled, bool interp_step,
+	bool known_dispatch_pc, u32 raw_cycles)
+{
+	if (s_ee_perf.blocks > 16 && (s_ee_perf.blocks & 0x7ff) != 0)
+		return;
+
+	std::fprintf(stderr,
+		"@@EE_PERF@@ reason=%s blocks=%llu interp_blocks=%llu pc=0x%08x end=0x%08x ops=%llu compiled=%u interp=%d raw_cycles=%u const=%llu cached=%llu native=%llu fallback=%llu inline_interp=%llu known_tails=%llu generic_tails=%llu branch_tails=%llu cache_hits=%llu cache_misses=%llu cache_spills=%llu cache_writebacks=%llu dispatch=%s fb_special=%llu fb_regimm=%llu fb_cop0=%llu fb_cop1=%llu fb_cop2=%llu fb_mmi=%llu fb_lqc2=%llu fb_sqc2=%llu\n",
+		reason,
+		static_cast<unsigned long long>(s_ee_perf.blocks),
+		static_cast<unsigned long long>(s_ee_perf.interp_blocks),
+		startpc,
+		endpc,
+		static_cast<unsigned long long>(s_ee_perf.guest_ops),
+		compiled,
+		interp_step ? 1 : 0,
+		raw_cycles,
+		static_cast<unsigned long long>(s_ee_perf.const_ops),
+		static_cast<unsigned long long>(s_ee_perf.cached_ops),
+		static_cast<unsigned long long>(s_ee_perf.native_ops),
+		static_cast<unsigned long long>(s_ee_perf.fallback_ops),
+		static_cast<unsigned long long>(s_ee_perf.inline_interp_ops),
+		static_cast<unsigned long long>(s_ee_perf.known_tails),
+		static_cast<unsigned long long>(s_ee_perf.generic_tails),
+		static_cast<unsigned long long>(s_ee_perf.branch_tails),
+		static_cast<unsigned long long>(s_ee_perf.cache_hits),
+		static_cast<unsigned long long>(s_ee_perf.cache_misses),
+		static_cast<unsigned long long>(s_ee_perf.cache_spills),
+		static_cast<unsigned long long>(s_ee_perf.cache_writebacks),
+		known_dispatch_pc ? "known" : "generic",
+		static_cast<unsigned long long>(s_ee_perf.fallback_primary[0x00]),
+		static_cast<unsigned long long>(s_ee_perf.fallback_primary[0x01]),
+		static_cast<unsigned long long>(s_ee_perf.fallback_primary[0x10]),
+		static_cast<unsigned long long>(s_ee_perf.fallback_primary[0x11]),
+		static_cast<unsigned long long>(s_ee_perf.fallback_primary[0x12]),
+		static_cast<unsigned long long>(s_ee_perf.fallback_primary[0x1c]),
+		static_cast<unsigned long long>(s_ee_perf.fallback_primary[OP_LQC2]),
+		static_cast<unsigned long long>(s_ee_perf.fallback_primary[OP_SQC2]));
+
+	std::fprintf(stderr, "@@EE_PERF2@@ likely_tails=%llu waitloop_blocks=%llu\n",
+		static_cast<unsigned long long>(s_ee_perf.likely_tails),
+		static_cast<unsigned long long>(s_ee_perf.waitloop_blocks));
+
+	// Exact ranking of the remaining interpreter fallbacks by primary opcode, so
+	// testers' logs identify precisely which instruction groups to natively
+	// implement next (the fixed fb_* fields above only cover a known subset).
+	u32 top_op[8] = {};
+	u64 top_cnt[8] = {};
+	for (u32 i = 0; i < 64; i++)
+	{
+		const u64 c = s_ee_perf.fallback_primary[i];
+		if (c == 0)
+			continue;
+		for (u32 j = 0; j < 8; j++)
+		{
+			if (c > top_cnt[j])
+			{
+				for (u32 k = 7; k > j; k--)
+				{
+					top_cnt[k] = top_cnt[k - 1];
+					top_op[k] = top_op[k - 1];
+				}
+				top_cnt[j] = c;
+				top_op[j] = i;
+				break;
+			}
+		}
+	}
+	std::fprintf(stderr,
+		"@@EE_PERF_FB@@ top: 0x%02x=%llu 0x%02x=%llu 0x%02x=%llu 0x%02x=%llu 0x%02x=%llu 0x%02x=%llu 0x%02x=%llu 0x%02x=%llu\n",
+		top_op[0], static_cast<unsigned long long>(top_cnt[0]),
+		top_op[1], static_cast<unsigned long long>(top_cnt[1]),
+		top_op[2], static_cast<unsigned long long>(top_cnt[2]),
+		top_op[3], static_cast<unsigned long long>(top_cnt[3]),
+		top_op[4], static_cast<unsigned long long>(top_cnt[4]),
+		top_op[5], static_cast<unsigned long long>(top_cnt[5]),
+		top_op[6], static_cast<unsigned long long>(top_cnt[6]),
+		top_op[7], static_cast<unsigned long long>(top_cnt[7]));
+	std::fflush(stderr);
+}
+#endif
+
 // Defined below (block-compile helpers) — used by recTranslateOp's COP2 inline path.
 static void recEmitInterpInline(u32 op);
 static bool recTranslateOp(u32 op);
@@ -470,6 +589,8 @@ static bool recIOSJITProfileIsLoadStore(u32 opcode)
 		case OP_SW:
 		case OP_LD:
 		case OP_SD:
+		case 0x22: case 0x26: case 0x2A: case 0x2E: // LWL/LWR/SWL/SWR
+		case 0x1A: case 0x1B: case 0x2C: case 0x2D: // LDL/LDR/SDL/SDR
 			return true;
 		default:
 			return false;
@@ -932,6 +1053,7 @@ static void recConstApplyNativeEffects(u32 op, RecGprConstState& state)
 
 		case OP_LQ: case OP_LB: case OP_LH: case OP_LW:
 		case OP_LBU: case OP_LHU: case OP_LWU: case OP_LD:
+		case 0x22: case 0x26: case 0x1A: case 0x1B: // LWL/LWR/LDL/LDR merge into rt
 			recConstSetUnknown(state, rt);
 			return;
 
@@ -1152,11 +1274,18 @@ struct RecGprCacheEntry
 
 struct RecGprCacheState
 {
-	RecGprCacheEntry entries[7];
+	RecGprCacheEntry entries[8];
 	u32 age = 1;
 };
 
-static constexpr int REC_GPR_CACHE_REGS[7] = {22, 23, 24, 25, 26, 27, 28};
+// AAPCS64 callee-saved registers dedicated to the guest-GPR cache. x19/x21 hold
+// &cpuRegs / the vtlb vmap base; x20 was reserved for a fastmem base that never got
+// wired up (the vmap path is the fast path), so it serves as the 8th cache slot. All
+// of these survive the C helper calls a block makes (vtlb slow path, inline
+// interpreter ops): the VU rec saves x19-x28 in its prologue, the IOP rec only
+// touches x19 (saved), and the EE rec itself exits via fastjmp which restores the
+// full caller context.
+static constexpr int REC_GPR_CACHE_REGS[8] = {20, 22, 23, 24, 25, 26, 27, 28};
 
 static const a64::Register& recCacheReg(size_t index)
 {
@@ -1173,6 +1302,9 @@ static void recCacheEmitFlushEntry(const RecGprCacheEntry& entry, size_t index)
 	if (!entry.valid || !entry.dirty)
 		return;
 
+#if ARMSX2_IOS_EE_PERF_PROBE
+	s_ee_perf.cache_writebacks++;
+#endif
 	armAsm->Str(recCacheReg(index), a64::MemOperand(RESTATEPTR, EE_GPR_OFFSET(entry.guest)));
 }
 
@@ -1272,6 +1404,10 @@ static size_t recCacheAllocate(RecGprCacheState& cache, u32 guest, u32 pin_a = 0
 	}
 	else
 	{
+#if ARMSX2_IOS_EE_PERF_PROBE
+		if (cache.entries[victim].valid && cache.entries[victim].dirty)
+			s_ee_perf.cache_spills++;
+#endif
 		recCacheFlushEntry(cache, victim);
 	}
 
@@ -1290,6 +1426,12 @@ static const a64::Register& recCacheLoad(RecGprCacheState& cache, u32 guest)
 
 	int found = recCacheFind(cache, guest);
 	const bool already_cached = (found >= 0);
+#if ARMSX2_IOS_EE_PERF_PROBE
+	if (already_cached)
+		s_ee_perf.cache_hits++;
+	else
+		s_ee_perf.cache_misses++;
+#endif
 	const size_t index = already_cached ? static_cast<size_t>(found) : recCacheAllocate(cache, guest);
 	RecGprCacheEntry& entry = cache.entries[index];
 	entry.age = cache.age++;
@@ -1309,11 +1451,22 @@ static const a64::Register& recCacheDest(RecGprCacheState& cache, u32 guest, u32
 	return recCacheReg(index);
 }
 
-static void recEmitCachedEffectiveAddr(RecGprCacheState& cache, u32 rs, s32 imm, const a64::Register& addr)
+static void recEmitCachedEffectiveAddr(RecGprCacheState& cache, const RecGprConstState& const_state,
+	u32 rs, s32 imm, const a64::Register& addr)
 {
 	if (rs == 0)
 	{
 		armAsm->Mov(addr.W(), imm);
+		return;
+	}
+
+	// Const-propagated address: GPR[rs] is a tracked compile-time constant (LUI/ORI
+	// pairs, hardware register bases, ...), so the whole effective address collapses
+	// to one immediate move instead of a cache load + add.
+	if (const_state.known[rs])
+	{
+		const u32 ea = static_cast<u32>(const_state.value[rs]) + static_cast<u32>(imm);
+		armAsm->Mov(addr.W(), ea);
 		return;
 	}
 
@@ -1374,13 +1527,14 @@ static void recEmitCachedDirectStore(u32 bits, const a64::Register& src, const a
 	}
 }
 
-static bool recTryTranslateCachedLoad(u32 bits, bool sign, u32 rt, u32 rs, s32 imm, RecGprCacheState& cache)
+static bool recTryTranslateCachedLoad(u32 bits, bool sign, u32 rt, u32 rs, s32 imm,
+	RecGprCacheState& cache, const RecGprConstState& const_state)
 {
 	static const a64::Register RADDR = a64::x9;
 	static const a64::Register RHOST = a64::x10;
 	static const a64::Register RTEMP = a64::x11;
 
-	recEmitCachedEffectiveAddr(cache, rs, imm, RADDR);
+	recEmitCachedEffectiveAddr(cache, const_state, rs, imm, RADDR);
 	const RecGprCacheState pre_load_cache = cache;
 
 	const a64::Register& dst = (rt == 0) ? RTEMP : recCacheDest(cache, rt, rs);
@@ -1401,12 +1555,13 @@ static bool recTryTranslateCachedLoad(u32 bits, bool sign, u32 rt, u32 rs, s32 i
 	return true;
 }
 
-static bool recTryTranslateCachedStore(u32 bits, u32 rt, u32 rs, s32 imm, RecGprCacheState& cache)
+static bool recTryTranslateCachedStore(u32 bits, u32 rt, u32 rs, s32 imm,
+	RecGprCacheState& cache, const RecGprConstState& const_state)
 {
 	static const a64::Register RADDR = a64::x9;
 	static const a64::Register RHOST = a64::x10;
 
-	recEmitCachedEffectiveAddr(cache, rs, imm, RADDR);
+	recEmitCachedEffectiveAddr(cache, const_state, rs, imm, RADDR);
 	const a64::Register& src = recCacheLoad(cache, rt);
 	const RecGprCacheState pre_store_cache = cache;
 
@@ -1424,12 +1579,13 @@ static bool recTryTranslateCachedStore(u32 bits, u32 rt, u32 rs, s32 imm, RecGpr
 	return true;
 }
 
-static bool recTryTranslateCachedLoadQuad(u32 rt, u32 rs, s32 imm, RecGprCacheState& cache)
+static bool recTryTranslateCachedLoadQuad(u32 rt, u32 rs, s32 imm,
+	RecGprCacheState& cache, const RecGprConstState& const_state)
 {
 	static const a64::Register RADDR = a64::x9;
 	static const a64::Register RHOST = a64::x10;
 
-	recEmitCachedEffectiveAddr(cache, rs, imm, RADDR);
+	recEmitCachedEffectiveAddr(cache, const_state, rs, imm, RADDR);
 	armAsm->And(RADDR.W(), RADDR.W(), ~0x0F);
 	const RecGprCacheState pre_load_cache = cache;
 
@@ -1456,12 +1612,13 @@ static bool recTryTranslateCachedLoadQuad(u32 rt, u32 rs, s32 imm, RecGprCacheSt
 	return true;
 }
 
-static bool recTryTranslateCachedStoreQuad(u32 rt, u32 rs, s32 imm, RecGprCacheState& cache)
+static bool recTryTranslateCachedStoreQuad(u32 rt, u32 rs, s32 imm,
+	RecGprCacheState& cache, const RecGprConstState& const_state)
 {
 	static const a64::Register RADDR = a64::x9;
 	static const a64::Register RHOST = a64::x10;
 
-	recEmitCachedEffectiveAddr(cache, rs, imm, RADDR);
+	recEmitCachedEffectiveAddr(cache, const_state, rs, imm, RADDR);
 	armAsm->And(RADDR.W(), RADDR.W(), ~0x0F);
 
 	// SQ reads the whole 128-bit GPR from memory. If prior scalar cached ops dirtied
@@ -1665,7 +1822,7 @@ static bool recTryTranslateCachedConstOp(u32 op, RecGprConstState& const_state, 
 	}
 }
 
-static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache)
+static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache, const RecGprConstState& const_state)
 {
 	const u32 opcode = op >> 26;
 	const u32 rs = (op >> 21) & 0x1f;
@@ -1734,33 +1891,30 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache)
 				return true;
 			const a64::Register& src = recCacheLoad(cache, rs);
 			const a64::Register& dst = recCacheDest(cache, rt, rs);
+			// The vixl MacroAssembler encodes these as single logical-immediate
+			// instructions when the mask is encodable (0xff, 0xffff, ... — the common
+			// cases) and only falls back to materializing into a scratch register
+			// otherwise, so this is never worse than the manual Mov+op pair.
 			if (opcode == 0x0C)
 			{
 				if (imm_u == 0)
 					armAsm->Mov(dst, 0);
 				else
-				{
-					armAsm->Mov(RXVIXLSCRATCH, imm_u);
-					armAsm->And(dst, src, RXVIXLSCRATCH);
-				}
+					armAsm->And(dst, src, imm_u);
 			}
 			else if (opcode == 0x0D)
 			{
-				move_x(dst, src);
-				if (imm_u != 0)
-				{
-					armAsm->Mov(RXVIXLSCRATCH, imm_u);
-					armAsm->Orr(dst, dst, RXVIXLSCRATCH);
-				}
+				if (imm_u == 0)
+					move_x(dst, src);
+				else
+					armAsm->Orr(dst, src, imm_u);
 			}
 			else
 			{
-				move_x(dst, src);
-				if (imm_u != 0)
-				{
-					armAsm->Mov(RXVIXLSCRATCH, imm_u);
-					armAsm->Eor(dst, dst, RXVIXLSCRATCH);
-				}
+				if (imm_u == 0)
+					move_x(dst, src);
+				else
+					armAsm->Eor(dst, src, imm_u);
 			}
 			return true;
 		}
@@ -1781,20 +1935,20 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache)
 				return true;
 			}
 
-		case OP_LB:  return recTryTranslateCachedLoad(8,  true,  rt, rs, imm, cache);
-		case OP_LBU: return recTryTranslateCachedLoad(8,  false, rt, rs, imm, cache);
-		case OP_LH:  return recTryTranslateCachedLoad(16, true,  rt, rs, imm, cache);
-		case OP_LHU: return recTryTranslateCachedLoad(16, false, rt, rs, imm, cache);
-		case OP_LW:  return recTryTranslateCachedLoad(32, true,  rt, rs, imm, cache);
-		case OP_LWU: return recTryTranslateCachedLoad(32, false, rt, rs, imm, cache);
-		case OP_LD:  return recTryTranslateCachedLoad(64, false, rt, rs, imm, cache);
-		case OP_LQ:  return recTryTranslateCachedLoadQuad(rt, rs, imm, cache);
+		case OP_LB:  return recTryTranslateCachedLoad(8,  true,  rt, rs, imm, cache, const_state);
+		case OP_LBU: return recTryTranslateCachedLoad(8,  false, rt, rs, imm, cache, const_state);
+		case OP_LH:  return recTryTranslateCachedLoad(16, true,  rt, rs, imm, cache, const_state);
+		case OP_LHU: return recTryTranslateCachedLoad(16, false, rt, rs, imm, cache, const_state);
+		case OP_LW:  return recTryTranslateCachedLoad(32, true,  rt, rs, imm, cache, const_state);
+		case OP_LWU: return recTryTranslateCachedLoad(32, false, rt, rs, imm, cache, const_state);
+		case OP_LD:  return recTryTranslateCachedLoad(64, false, rt, rs, imm, cache, const_state);
+		case OP_LQ:  return recTryTranslateCachedLoadQuad(rt, rs, imm, cache, const_state);
 
-		case OP_SB: return recTryTranslateCachedStore(8,  rt, rs, imm, cache);
-		case OP_SH: return recTryTranslateCachedStore(16, rt, rs, imm, cache);
-		case OP_SW: return recTryTranslateCachedStore(32, rt, rs, imm, cache);
-		case OP_SD: return recTryTranslateCachedStore(64, rt, rs, imm, cache);
-		case OP_SQ: return recTryTranslateCachedStoreQuad(rt, rs, imm, cache);
+		case OP_SB: return recTryTranslateCachedStore(8,  rt, rs, imm, cache, const_state);
+		case OP_SH: return recTryTranslateCachedStore(16, rt, rs, imm, cache, const_state);
+		case OP_SW: return recTryTranslateCachedStore(32, rt, rs, imm, cache, const_state);
+		case OP_SD: return recTryTranslateCachedStore(64, rt, rs, imm, cache, const_state);
+		case OP_SQ: return recTryTranslateCachedStoreQuad(rt, rs, imm, cache, const_state);
 
 		case 0x00:
 			break;
@@ -1984,32 +2138,121 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache)
 	}
 }
 
+// Cache-side mirror of recConstApplyNativeEffects: after a native (non-cached)
+// generator ran, discard the cached copy of every GPR it wrote to memory, so the
+// cache never holds a stale value. Ops whose inline-interpreter handler can touch
+// arbitrary CPU state (COP0/COP2/LQC2/SQC2) kill the whole cache, exactly like the
+// const tracker. Keeping this switch in lockstep with recConstApplyNativeEffects is
+// the correctness contract for the precise-invalidation path below.
+static void recCacheApplyNativeEffects(u32 op, RecGprCacheState& cache)
+{
+	const u32 opcode = op >> 26;
+	const u32 rs = (op >> 21) & 0x1f;
+	const u32 rt = (op >> 16) & 0x1f;
+	const u32 rd = (op >> 11) & 0x1f;
+	const u32 funct = op & 0x3f;
+
+	switch (opcode)
+	{
+		case 0x00:
+			switch (funct)
+			{
+				case 0x11: // MTHI
+				case 0x13: // MTLO
+				case 0x18: // MULT
+				case 0x19: // MULTU
+				case 0x1A: // DIV
+				case 0x1B: // DIVU
+					if (funct == 0x18 || funct == 0x19)
+						recCacheDiscardGuest(cache, rd);
+					return;
+				default:
+					recCacheDiscardGuest(cache, rd);
+					return;
+			}
+
+		case 0x08: case 0x09: case 0x0A: case 0x0B:
+		case 0x0C: case 0x0D: case 0x0E: case 0x0F:
+		case 0x18: case 0x19:
+			recCacheDiscardGuest(cache, rt);
+			return;
+
+		case OP_LQ: case OP_LB: case OP_LH: case OP_LW:
+		case OP_LBU: case OP_LHU: case OP_LWU: case OP_LD:
+		case 0x22: case 0x26: case 0x1A: case 0x1B: // LWL/LWR/LDL/LDR merge into rt
+			recCacheDiscardGuest(cache, rt);
+			return;
+
+		case 0x11: // COP1: MFC1/CFC1 write rt, other native FPU ops do not touch GPRs.
+			if (rs == 0x00 || rs == 0x02)
+				recCacheDiscardGuest(cache, rt);
+			return;
+
+		case 0x10: // COP0 inline interpreter may touch CPU state.
+		case 0x12: // COP2 inline interpreter may move VU data through GPRs.
+		case OP_LQC2:
+		case OP_SQC2:
+			recCacheKillAll(cache);
+			return;
+
+		case 0x1C:
+			recCacheDiscardGuest(cache, rd);
+			return;
+
+		default:
+			return;
+	}
+}
+
 static bool recTranslateOpOptimized(u32 op, RecGprConstState& const_state, RecGprCacheState& cache)
 {
 	if (recTryTranslateCachedConstOp(op, const_state, cache))
-		return true;
-
-	if (recTryTranslateCachedOp(op, cache))
 	{
+#if ARMSX2_IOS_EE_PERF_PROBE
+		s_ee_perf.const_ops++;
+#endif
+		return true;
+	}
+
+	if (recTryTranslateCachedOp(op, cache, const_state))
+	{
+#if ARMSX2_IOS_EE_PERF_PROBE
+		s_ee_perf.cached_ops++;
+#endif
 		if (!recConstApplyCachedEffects(op, const_state))
 			recConstApplyNativeEffects(op, const_state);
 		return true;
 	}
 
+	// Native generators (and the interpreter fallback) read and write guest GPRs
+	// directly through cpuRegs in memory: write every dirty cached value back first
+	// so they observe current state. Entries stay valid (clean), so subsequent
+	// cached ops keep their registers — the previous flush-AND-kill here threw the
+	// whole cache away around every MULT/DIV/MMI/COP1 op in mixed blocks.
 	recCacheFlushAll(cache);
-	recCacheKillAll(cache);
 
 	if (recTryTranslateConstOp(op, const_state))
 	{
+#if ARMSX2_IOS_EE_PERF_PROBE
+		s_ee_perf.const_ops++;
+#endif
+		// The const store wrote the destination GPR to memory behind the cache's back.
+		recCacheApplyNativeEffects(op, cache);
 		return true;
 	}
 
 	if (!recTranslateOp(op))
 	{
+		// Caller falls back to the inline interpreter, which can write any GPR.
+		recCacheKillAll(cache);
 		recConstKillAll(const_state);
 		return false;
 	}
 
+#if ARMSX2_IOS_EE_PERF_PROBE
+	s_ee_perf.native_ops++;
+#endif
+	recCacheApplyNativeEffects(op, cache);
 	recConstApplyNativeEffects(op, const_state);
 	return true;
 }
@@ -2309,6 +2552,17 @@ static bool recTranslateOp(u32 op)
 		case OP_SW: armEmitStoreGpr(32, rt, rs, imm); return true;
 		case OP_SD: armEmitStoreGpr(64, rt, rs, imm); return true;
 
+		// Unaligned load/store byte-merge forms (interpreter-exact; heavily used in
+		// memcpy-style loops — previously interpreter single-steps).
+		case 0x22: armEmitLWL(rt, rs, imm); return true;
+		case 0x26: armEmitLWR(rt, rs, imm); return true;
+		case 0x2A: armEmitSWL(rt, rs, imm); return true;
+		case 0x2E: armEmitSWR(rt, rs, imm); return true;
+		case 0x1A: armEmitLDL(rt, rs, imm); return true;
+		case 0x1B: armEmitLDR(rt, rs, imm); return true;
+		case 0x2C: armEmitSDL(rt, rs, imm); return true;
+		case 0x2D: armEmitSDR(rt, rs, imm); return true;
+
 		// 128-bit quadword load/store (16-byte aligned).
 		case OP_LQ: armEmitLoadQuad(rt, rs, imm); return true;
 		case OP_SQ: armEmitStoreQuad(rt, rs, imm); return true;
@@ -2587,6 +2841,205 @@ static bool recIsHandledBranch(u32 op)
 	}
 }
 
+// Branch-likely forms (delay slot nullified when not taken). These get native
+// codegen via armEmitBranchLikelyTest + a conditional skip over the delay-slot
+// code in recRecompile; previously every one forced an interpreter single-step
+// block (a C call + full dispatcher round-trip per execution).
+static bool recIsLikelyBranch(u32 op)
+{
+#if defined(__APPLE__)
+	if (recIOSJITProfileWantsBranches())
+		return false;
+#endif
+
+	const u32 opcode = op >> 26;
+	const u32 rs = (op >> 21) & 0x1f;
+	const u32 rt = (op >> 16) & 0x1f;
+	switch (opcode)
+	{
+		case 0x14: // BEQL
+		case 0x15: // BNEL
+		case 0x16: // BLEZL
+		case 0x17: // BGTZL
+			return true;
+		case 0x01: // REGIMM: BLTZL / BGEZL
+			return rt == 0x02 || rt == 0x03;
+		case 0x11: // COP1: BC1FL / BC1TL
+			return rs == 0x08 && (rt == 0x02 || rt == 0x03);
+		default:
+			return false;
+	}
+}
+
+// --------------------------------------------------------------------------------------
+//  Wait-loop (idle-loop) detection
+// --------------------------------------------------------------------------------------
+// A block that ends with a branch back to its own start and whose body carries NO
+// register state between iterations (every written GPR derives only from memory
+// loads / constants / regs not written in the loop) is a poll loop: its condition
+// can only change through an external event (interrupt, DMA, MTVU). Spinning it
+// one tiny block at a time until cpuRegs.nextEventCycle burns a full host core —
+// the classic EE-at-99% heat case. For such blocks the dispatch tail bumps
+// cpuRegs.cycle up to nextEventCycle when the branch was taken, so the next event
+// fires after one iteration instead of millions. This mirrors the x86 rec's
+// WaitLoop speedhack semantics; conditional loops are gated behind
+// EmuConfig.Speedhacks.WaitLoop (default on), unconditional self-loops (which can
+// ONLY exit via an event, making the skip exact) are always optimized.
+//
+// The dataflow check walks the body+delay ops in program order: an op may only
+// read a register that is (a) never written in the loop, (b) $zero, or (c) already
+// (re)defined earlier in this iteration from allowed sources. A loop-carried
+// counter (`addiu t0,t0,-1`) reads its own previous-iteration value and is
+// rejected, so calibration/delay loops keep their exact iteration counts.
+static constexpr u32 REC_WAITLOOP_MAX_OPS = 8;
+
+// Decode the GPRs an allowed op reads/writes. Returns false if the op is not in
+// the allowed (side-effect-free, natively compiled) set.
+static bool recWaitLoopClassifyOp(u32 op, u32* reads, u32* writes)
+{
+	const u32 opcode = op >> 26;
+	const u32 rs = (op >> 21) & 0x1f;
+	const u32 rt = (op >> 16) & 0x1f;
+	const u32 rd = (op >> 11) & 0x1f;
+	const u32 funct = op & 0x3f;
+
+	*reads = 0;
+	*writes = 0;
+
+	if (op == 0) // NOP
+		return true;
+
+	switch (opcode)
+	{
+		case 0x00: // SPECIAL: pure ALU/shift/select subset only
+			switch (funct)
+			{
+				case 0x00: case 0x02: case 0x03: // SLL/SRL/SRA
+				case 0x38: case 0x3A: case 0x3B: // DSLL/DSRL/DSRA
+				case 0x3C: case 0x3E: case 0x3F: // DSLL32/DSRL32/DSRA32
+					*reads = (1u << rt);
+					*writes = (1u << rd);
+					return true;
+				case 0x04: case 0x06: case 0x07: // SLLV/SRLV/SRAV
+				case 0x14: case 0x16: case 0x17: // DSLLV/DSRLV/DSRAV
+					*reads = (1u << rt) | (1u << rs);
+					*writes = (1u << rd);
+					return true;
+				case 0x20: case 0x21: case 0x22: case 0x23: // ADD/ADDU/SUB/SUBU
+				case 0x24: case 0x25: case 0x26: case 0x27: // AND/OR/XOR/NOR
+				case 0x2A: case 0x2B:                       // SLT/SLTU
+				case 0x2C: case 0x2D: case 0x2E: case 0x2F: // DADD/DADDU/DSUB/DSUBU
+					*reads = (1u << rs) | (1u << rt);
+					*writes = (1u << rd);
+					return true;
+				case 0x0A: case 0x0B: // MOVZ/MOVN (rd is read AND written)
+					*reads = (1u << rs) | (1u << rt) | (1u << rd);
+					*writes = (1u << rd);
+					return true;
+				default:
+					return false;
+			}
+
+		case 0x08: case 0x09: case 0x0A: case 0x0B: // ADDI/ADDIU/SLTI/SLTIU
+		case 0x0C: case 0x0D: case 0x0E:            // ANDI/ORI/XORI
+		case 0x18: case 0x19:                       // DADDI/DADDIU
+			*reads = (1u << rs);
+			*writes = (1u << rt);
+			return true;
+
+		case 0x0F: // LUI (pure constant)
+			*writes = (1u << rt);
+			return true;
+
+		case OP_LB: case OP_LBU: case OP_LH: case OP_LHU:
+		case OP_LW: case OP_LWU: case OP_LD: // scalar loads: rt = mem[rs+imm]
+			*reads = (1u << rs);
+			*writes = (1u << rt);
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+// Run the dataflow check over the loop body (+ branch sources + delay slot).
+// `ops` are the straight-line body ops in order; `branch_reads` the GPRs the
+// branch condition reads; `delay_op` the delay-slot instruction. Program order
+// per iteration is: body ops, branch condition read, delay slot.
+static bool recWaitLoopBodyIsPure(const u32* ops, u32 num_ops, u32 branch_reads, u32 delay_op)
+{
+	// +1 slot for the delay op.
+	u32 op_reads[REC_WAITLOOP_MAX_OPS + 1];
+	u32 op_writes[REC_WAITLOOP_MAX_OPS + 1];
+
+	for (u32 i = 0; i < num_ops; i++)
+	{
+		if (!recWaitLoopClassifyOp(ops[i], &op_reads[i], &op_writes[i]))
+			return false;
+	}
+	if (!recWaitLoopClassifyOp(delay_op, &op_reads[num_ops], &op_writes[num_ops]))
+		return false;
+
+	// All registers written anywhere in the loop (delay slot included — it runs
+	// before the next iteration's body). $zero writes are discarded by codegen.
+	u32 written = 0;
+	for (u32 i = 0; i <= num_ops; i++)
+		written |= op_writes[i] & ~1u;
+
+	// Program-order scan: reading a written-in-loop register before it has been
+	// redefined this iteration means loop-carried state (e.g. a decrementing
+	// counter) -> reject.
+	u32 defined = 0;
+	for (u32 i = 0; i < num_ops; i++)
+	{
+		if (((op_reads[i] & ~1u) & written & ~defined) != 0)
+			return false;
+		defined |= op_writes[i] & ~1u;
+	}
+	// Branch condition reads happen after the body...
+	if (((branch_reads & ~1u) & written & ~defined) != 0)
+		return false;
+	// ...and the delay slot runs last.
+	if (((op_reads[num_ops] & ~1u) & written & ~defined) != 0)
+		return false;
+
+	return true;
+}
+
+// GPRs a handled branch op's condition reads.
+static u32 recBranchConditionReads(u32 op)
+{
+	const u32 opcode = op >> 26;
+	const u32 rs = (op >> 21) & 0x1f;
+	const u32 rt = (op >> 16) & 0x1f;
+	switch (opcode)
+	{
+		case 0x02: return 0;                          // J
+		case 0x04: case 0x05: return (1u << rs) | (1u << rt); // BEQ/BNE
+		case 0x06: case 0x07: return (1u << rs);      // BLEZ/BGTZ
+		case 0x01: // REGIMM: BLTZ/BGEZ only — the AL forms write a link register.
+			return (rt == 0x00 || rt == 0x01) ? (1u << rs) : 0xffffffffu;
+		default: return 0xffffffffu;                  // anything else: not a candidate
+	}
+}
+
+// Is this branch unconditionally taken (compile-time)? Such a self-loop can only
+// exit via an event, so skipping its cycles is exact, not a speedhack.
+static bool recBranchIsUnconditional(u32 op)
+{
+	const u32 opcode = op >> 26;
+	const u32 rs = (op >> 21) & 0x1f;
+	const u32 rt = (op >> 16) & 0x1f;
+	switch (opcode)
+	{
+		case 0x02: return true;                       // J
+		case 0x04: return rs == rt;                   // BEQ r,r
+		case 0x06: return rs == 0;                    // BLEZ $zero
+		case 0x01: return rt == 0x01 && rs == 0;      // BGEZ $zero
+		default: return false;
+	}
+}
+
 // Emit cpuRegs.code = op, then call the interpreter's handler for `op`. Used for a
 // delay-slot instruction the straight-line generators can't handle. Does NOT touch
 // cpuRegs.pc (the branch generator already committed the next PC, and a normal
@@ -2603,7 +3056,13 @@ static void recEmitInterpInline(u32 op)
 static void recEmitOp(u32 op, RecGprConstState& const_state, RecGprCacheState& cache_state)
 {
 	if (!recTranslateOpOptimized(op, const_state, cache_state))
+	{
+#if ARMSX2_IOS_EE_PERF_PROBE
+		s_ee_perf.inline_interp_ops++;
+		recPerfCountFallback(op);
+#endif
 		recEmitInterpInline(op);
+	}
 }
 
 // cpuRegs.pc = imm (block fallthrough / early-exit target).
@@ -2613,6 +3072,14 @@ static void recEmitWritePc(u32 pc)
 	armAsm->Str(RSCRATCHADDR.W(), a64::MemOperand(RESTATEPTR, EE_PC_OFFSET));
 }
 
+// Tail-dispatch to a compile-time-known next PC. This deliberately stays an
+// *indirect* jump through the block's recLUT slot rather than a direct B to the
+// target block: the slot is the single point recClear/dyna_block_discard rewrite on
+// SMC invalidation, so a stale block can never be entered through here. Emitting a
+// direct block->block branch would require backpatching every inbound link on
+// invalidation (x86-style linked-list per block) — do NOT change this to a direct
+// jump without implementing that. The cost is only adrp+add+ldr+br, and the slot
+// load is a same-cacheline hit in steady state.
 static void recEmitDispatchToKnownPc(u32 pc)
 {
 	armMoveAddressToReg(RXARG3, recPtrToBlock(pc));
@@ -2836,15 +3303,31 @@ static void recGenDispatchers()
 // (DispatcherReg re-reads cpuRegs.pc and chains into the next block); otherwise fall
 // to DispatcherEvent to service events first. `add_cycles` is false for interpreter
 // single-step blocks, which charge their own cycles inside intExecuteOneInst.
-static void recEmitEventTestAndDispatch(u32 scaled_cycles, bool add_cycles, bool known_dispatch_pc, u32 dispatch_pc)
+// `waitloop_selfpc`: non-zero marks this block as a detected wait/idle loop with
+// the given start PC. The tail then checks whether the branch was taken back to
+// the loop start and, if so, bumps cpuRegs.cycle up to nextEventCycle so the next
+// event fires after one iteration instead of the EE busy-spinning host-side until
+// the event (the main EE-at-99%/heat case for polling loops).
+static void recEmitEventTestAndDispatch(u32 scaled_cycles, bool add_cycles, bool known_dispatch_pc, u32 dispatch_pc,
+	u32 waitloop_selfpc = 0)
 {
 	armAsm->Ldr(RXARG1, a64::MemOperand(RESTATEPTR, EE_CYCLE_OFFSET)); // x0 = cpuRegs.cycle (u64)
 	if (add_cycles)
-	{
 		armAsm->Add(RXARG1, RXARG1, scaled_cycles);
-		armAsm->Str(RXARG1, a64::MemOperand(RESTATEPTR, EE_CYCLE_OFFSET));
-	}
 	armAsm->Ldr(RXARG2, a64::MemOperand(RESTATEPTR, EE_NEXTEVENTCYCLE_OFFSET));
+	if (waitloop_selfpc != 0)
+	{
+		a64::Label no_bump;
+		armAsm->Ldr(RWARG3, a64::MemOperand(RESTATEPTR, EE_PC_OFFSET));
+		armAsm->Mov(RWARG4, waitloop_selfpc);
+		armAsm->Cmp(RWARG3, RWARG4);
+		armAsm->B(&no_bump, a64::ne); // branch not taken back to loop start: normal tail
+		armAsm->Cmp(RXARG1, RXARG2);
+		armAsm->Csel(RXARG1, RXARG2, RXARG1, a64::lt); // cycle = max(cycle, nextEventCycle)
+		armAsm->Bind(&no_bump);
+	}
+	if (add_cycles || waitloop_selfpc != 0)
+		armAsm->Str(RXARG1, a64::MemOperand(RESTATEPTR, EE_CYCLE_OFFSET));
 	armAsm->Cmp(RXARG1, RXARG2);
 
 	if (known_dispatch_pc)
@@ -2981,7 +3464,13 @@ static void recRecompile(u32 startpc)
 	u32 compiled = 0;
 	bool interp_step = false;
 	bool known_dispatch_pc = false;
+	[[maybe_unused]] bool branch_tail = false;
 	u32 dispatch_pc = 0;
+	[[maybe_unused]] const char* tail_reason = "pagecross";
+	u32 waitloop_selfpc = 0;
+	u32 waitloop_ops[REC_WAITLOOP_MAX_OPS];
+	u32 waitloop_num_ops = 0;
+	bool waitloop_possible = true;
 	RecGprConstState const_state;
 	RecGprCacheState cache_state;
 
@@ -3006,6 +3495,8 @@ static void recRecompile(u32 startpc)
 		{
 			// Terminate the block: branch generator + delay slot + dispatch tail.
 			raw_cycles += info.cycles;
+			branch_tail = true;
+			tail_reason = "branch";
 			known_dispatch_pc = recGetKnownBranchTarget(op, pc, const_state, &dispatch_pc);
 			recCacheFlushAll(cache_state);
 			recCacheKillAll(cache_state);
@@ -3016,6 +3507,66 @@ static void recRecompile(u32 startpc)
 			raw_cycles += R5900::GetInstruction(delay_op).cycles;
 			recEmitOp(delay_op, const_state, cache_state); // delay slot — must not write cpuRegs.pc
 			endpc = pc + 8;
+
+			// Wait-loop detection: does this branch loop back to the block start with a
+			// body that carries no register state between iterations? Non-linking forms
+			// only (J/BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ). Unconditional self-loops can only
+			// exit via an event, so the skip is exact and always enabled; conditional
+			// (polling) loops follow the WaitLoop speedhack toggle like the x86 rec.
+			{
+				const u32 opc = op >> 26;
+				const u32 looptarget = (opc == 0x02) ?
+					(((op & 0x03ffffff) << 2) | ((pc + 4) & 0xf0000000u)) :
+					((pc + 4) + (static_cast<u32>(static_cast<s32>(static_cast<s16>(op))) << 2));
+				const u32 cond_reads = recBranchConditionReads(op);
+				const bool unconditional = recBranchIsUnconditional(op);
+
+				if (looptarget == startpc && waitloop_possible && waitloop_num_ops == compiled &&
+					cond_reads != 0xffffffffu && (unconditional || EmuConfig.Speedhacks.WaitLoop) &&
+					recWaitLoopBodyIsPure(waitloop_ops, waitloop_num_ops, cond_reads, delay_op))
+				{
+					waitloop_selfpc = startpc;
+					tail_reason = "waitloop";
+#if ARMSX2_IOS_EE_PERF_PROBE
+					s_ee_perf.waitloop_blocks++;
+#endif
+				}
+			}
+			break;
+		}
+
+		if (recIsLikelyBranch(op))
+		{
+			// Branch-likely: delay slot executes ONLY when taken. Emit the condition
+			// test + PC select, then jump over the delay-slot code when not taken.
+			// The cache/const state diverges across the two paths, so it is flushed
+			// and discarded inside the taken path before the skip label.
+			raw_cycles += info.cycles;
+			branch_tail = true;
+			tail_reason = "branch_likely";
+
+			const u32 btarget = (pc + 4) + (static_cast<u32>(static_cast<s32>(static_cast<s16>(op))) << 2);
+			const u32 fallthrough = pc + 8;
+
+			recCacheFlushAll(cache_state);
+			recCacheKillAll(cache_state);
+
+			const a64::Condition taken = armEmitBranchLikelyTest(op, btarget, fallthrough);
+			a64::Label skip_delay;
+			armAsm->B(&skip_delay, a64::InvertCondition(taken));
+
+			const u32 delay_op = memRead32(pc + 4);
+			raw_cycles += R5900::GetInstruction(delay_op).cycles;
+			recEmitOp(delay_op, const_state, cache_state);
+			recCacheFlushAll(cache_state);
+			recCacheKillAll(cache_state);
+			recConstKillAll(const_state);
+
+			armAsm->Bind(&skip_delay);
+			endpc = pc + 8;
+#if ARMSX2_IOS_EE_PERF_PROBE
+			s_ee_perf.likely_tails++;
+#endif
 			break;
 		}
 
@@ -3023,6 +3574,12 @@ static void recRecompile(u32 startpc)
 		// they never read cpuRegs.code, so nothing to set here at compile time.)
 		if (recTranslateOpOptimized(op, const_state, cache_state))
 		{
+			// Record the body for wait-loop analysis (only short blocks qualify).
+			if (waitloop_num_ops < REC_WAITLOOP_MAX_OPS)
+				waitloop_ops[waitloop_num_ops++] = op;
+			else
+				waitloop_possible = false;
+
 			raw_cycles += info.cycles;
 			pc += 4;
 			endpc = pc;
@@ -3031,12 +3588,16 @@ static void recRecompile(u32 startpc)
 				recEmitWritePc(pc); // resume at the next instruction
 				known_dispatch_pc = true;
 				dispatch_pc = pc;
+				tail_reason = "maxinsts";
 				break;
 			}
 			continue;
 		}
 
 		// Un-compilable op (likely branch / syscall / COP0 / MMI SIMD / ...).
+#if ARMSX2_IOS_EE_PERF_PROBE
+		recPerfCountFallback(op);
+#endif
 		if (compiled == 0)
 		{
 			// Block starts on it — emit a one-shot interpreter single-step block. It
@@ -3046,6 +3607,7 @@ static void recRecompile(u32 startpc)
 			armEmitCall(reinterpret_cast<const void*>(intExecuteOneInst));
 			endpc = pc + 4;
 			interp_step = true;
+			tail_reason = "interp1";
 			break;
 		}
 
@@ -3053,6 +3615,7 @@ static void recRecompile(u32 startpc)
 		recEmitWritePc(pc);
 		known_dispatch_pc = true;
 		dispatch_pc = pc;
+		tail_reason = "uncompilable";
 		break;
 	}
 
@@ -3060,7 +3623,7 @@ static void recRecompile(u32 startpc)
 	recCacheKillAll(cache_state);
 
 	recEmitEventTestAndDispatch(interp_step ? 0 : recScaleBlockCycles(raw_cycles), !interp_step,
-		!interp_step && known_dispatch_pc, dispatch_pc);
+		!interp_step && known_dispatch_pc, dispatch_pc, waitloop_selfpc);
 
 	// Apply SMC protection (must emit any checksum prologue into this block's stream before
 	// armEndBlock flushes it). `block_entry` is what subsequent dispatches jump to.
@@ -3085,6 +3648,24 @@ static void recRecompile(u32 startpc)
 	// Install the block so subsequent dispatches to startpc (and its address mirrors)
 	// branch straight into it instead of recompiling.
 	*recPtrToBlock(startpc) = reinterpret_cast<uptr>(block_entry);
+
+#if ARMSX2_IOS_EE_PERF_PROBE
+	// Compile-time-only accounting: none of this runs inside emitted blocks, so the
+	// hot path is unaffected. recPerfLog rate-limits itself (first 16 blocks, then
+	// every 2048th compile).
+	s_ee_perf.blocks++;
+	s_ee_perf.guest_ops += compiled;
+	if (interp_step)
+		s_ee_perf.interp_blocks++;
+	if (branch_tail)
+		s_ee_perf.branch_tails++;
+	if (!interp_step && known_dispatch_pc)
+		s_ee_perf.known_tails++;
+	else
+		s_ee_perf.generic_tails++;
+	recPerfLog(tail_reason, startpc, endpc, compiled, interp_step,
+		!interp_step && known_dispatch_pc, raw_cycles);
+#endif
 #if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	if (recompile_log_index >= 0)
 	{

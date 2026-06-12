@@ -19,6 +19,10 @@
 
 #include "fmt/format.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <array>
 #include <atomic>
 #include <memory>
@@ -39,6 +43,10 @@ enum : u32
 	FIRST_EXTERNAL_INPUT_SOURCE = static_cast<u32>(InputSourceType::Pointer) + 1u,
 	LAST_EXTERNAL_INPUT_SOURCE = static_cast<u32>(InputSourceType::Count),
 };
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+extern "C" void ARMSX2_iOSUpdatePadVibration(u32 pad_index, float large_intensity, float small_intensity);
+#endif
 
 // ------------------------------------------------------------------------
 // Event Handler Type
@@ -1394,6 +1402,13 @@ void InputManager::SetUSBVibrationIntensity(u32 port, float large_or_single_moto
 
 void InputManager::SetPadVibrationIntensity(u32 pad_index, float large_or_single_motor_intensity, float small_motor_intensity)
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	// iOS feeds controller input through the app's direct SDL/GameController bridge
+	// rather than PCSX2's configurable motor bindings, so mirror every pad rumble
+	// command into the iOS rumble queue before the generic binding path below.
+	ARMSX2_iOSUpdatePadVibration(pad_index, large_or_single_motor_intensity, small_motor_intensity);
+#endif
+
 	for (PadVibrationBinding& pad : s_pad_vibration_array)
 	{
 		if (pad.pad_index != pad_index)
@@ -1443,6 +1458,11 @@ void InputManager::SetPadVibrationIntensity(u32 pad_index, float large_or_single
 
 void InputManager::PauseVibration()
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	for (u32 pad_index = 0; pad_index < Pad::NUM_CONTROLLER_PORTS; pad_index++)
+		ARMSX2_iOSUpdatePadVibration(pad_index, 0.0f, 0.0f);
+#endif
+
 	for (PadVibrationBinding& binding : s_pad_vibration_array)
 	{
 		for (u32 motor_index = 0; motor_index < MAX_MOTORS_PER_PAD; motor_index++)
