@@ -8,6 +8,7 @@
 extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 extern "C" bool ARMSX2_IsSDLFullscreen();
 #include "Common.h"
+#include "Config.h"
 #include "CDVD/CDVD.h"
 #include "CDVD/CDVDcommon.h"
 #include "VMManager.h"
@@ -456,11 +457,11 @@ static dispatch_queue_t ARMSX2RetroAchievementsQueue()
 }
 
 static constexpr bool ARMSX2RetroAchievementsAvailable = true;
-static constexpr bool ARMSX2RetroAchievementsHardcoreAvailable = false;
+static constexpr bool ARMSX2RetroAchievementsHardcoreAvailable = true;
 
 static NSString* ARMSX2RetroAchievementsUnavailableMessage()
 {
-    return @"Hardcore mode is hidden until RetroAchievements approval is complete.";
+    return @"RetroAchievements is temporarily unavailable in this build.";
 }
 
 static void ARMSX2SaveBaseSettingBool(const char* section, const char* key, bool value);
@@ -484,6 +485,18 @@ static bool ARMSX2EnsureAchievementsClientInitialized()
         return Achievements::Initialize();
 
     return true;
+}
+
+static bool ARMSX2RetroAchievementsHardcoreActive()
+{
+    return EmuConfig.Achievements.Enabled && Achievements::IsHardcoreModeActive();
+}
+
+static void ARMSX2LogRetroAchievementsHardcoreBlock(const char* action)
+{
+    std::fprintf(stderr, "@@RA_HARDCORE_BLOCK@@ action=%s\n", action ? action : "unknown");
+    std::fflush(stderr);
+    NSLog(@"[ARMSX2Bridge] RetroAchievements Hardcore blocked action=%s", action ? action : "unknown");
 }
 
 static void ARMSX2SaveBaseSettingBool(const char* section, const char* key, bool value)
@@ -1303,6 +1316,55 @@ static float ARMSX2NormalizeIOSNominalScalar(float value)
     return std::isfinite(value) ? std::clamp(value, 0.05f, 10.0f) : 1.0f;
 }
 
+static float ARMSX2EnforceRetroAchievementsHardcoreFloatSetting(const char* section, const char* key, float value)
+{
+    if (!ARMSX2RetroAchievementsHardcoreActive())
+        return value;
+
+    if (std::strcmp(section, "Framerate") == 0) {
+        if (std::strcmp(key, "NominalScalar") == 0 && value < 1.0f) {
+            ARMSX2LogRetroAchievementsHardcoreBlock("slowdown_nominal_scalar");
+            return 1.0f;
+        }
+        if (std::strcmp(key, "SlomoScalar") == 0 && value < 1.0f) {
+            ARMSX2LogRetroAchievementsHardcoreBlock("slowdown_slomo_scalar");
+            return 1.0f;
+        }
+    } else if (std::strcmp(section, "EmuCore/GS") == 0) {
+        if (std::strcmp(key, "FramerateNTSC") == 0 &&
+            std::fabs(value - Pcsx2Config::GSOptions::DEFAULT_FRAME_RATE_NTSC) > 0.001f) {
+            ARMSX2LogRetroAchievementsHardcoreBlock("framerate_ntsc_override");
+            return Pcsx2Config::GSOptions::DEFAULT_FRAME_RATE_NTSC;
+        }
+        if (std::strcmp(key, "FrameratePAL") == 0 &&
+            std::fabs(value - Pcsx2Config::GSOptions::DEFAULT_FRAME_RATE_PAL) > 0.001f) {
+            ARMSX2LogRetroAchievementsHardcoreBlock("framerate_pal_override");
+            return Pcsx2Config::GSOptions::DEFAULT_FRAME_RATE_PAL;
+        }
+    }
+
+    return value;
+}
+
+static bool ARMSX2ShouldBlockRetroAchievementsHardcoreBoolSetting(const char* section, const char* key, bool value)
+{
+    if (!value || !ARMSX2RetroAchievementsHardcoreActive())
+        return false;
+
+    if (std::strcmp(section, "EmuCore") == 0) {
+        if (std::strcmp(key, "EnableCheats") == 0) {
+            ARMSX2LogRetroAchievementsHardcoreBlock("enable_cheats");
+            return true;
+        }
+        if (std::strcmp(key, "EnableRecordingTools") == 0 || std::strcmp(key, "EnablePINE") == 0) {
+            ARMSX2LogRetroAchievementsHardcoreBlock(key);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, float value)
 {
     if (std::strcmp(section, "Framerate") == 0) {
@@ -1529,6 +1591,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                                 BOOL enableGameDBHardwareFixes)
 {
     FileSystem::CreateDirectoryPath(EmuFolders::GameSettings.c_str(), false);
+    if (enableCheats && (ARMSX2RetroAchievementsHardcoreActive() || EmuConfig.Achievements.HardcoreMode)) {
+        ARMSX2LogRetroAchievementsHardcoreBlock("per_game_enable_cheats");
+        enableCheats = NO;
+    }
 
     const std::string settingsPath = VMManager::GetGameSettingsPath(serial, crc);
     INISettingsInterface si(settingsPath);
@@ -2630,6 +2696,12 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 
 + (void)setINIInt:(nonnull NSString *)section key:(nonnull NSString *)key value:(int)value {
     if (!g_p44_settings_interface) return;
+    if (ARMSX2RetroAchievementsHardcoreActive() &&
+        std::strcmp(section.UTF8String, "EmuCore/Speedhacks") == 0 &&
+        std::strcmp(key.UTF8String, "EECycleRate") == 0 && value < 0) {
+        ARMSX2LogRetroAchievementsHardcoreBlock("ee_underclock");
+        value = 0;
+    }
     g_p44_settings_interface->SetIntValue(section.UTF8String, key.UTF8String, value);
     g_p44_settings_interface->Save();
     ARMSX2ApplyLiveGSIntSetting(section.UTF8String, key.UTF8String, value);
@@ -2637,6 +2709,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 
 + (void)setINIBool:(nonnull NSString *)section key:(nonnull NSString *)key value:(BOOL)value {
     if (!g_p44_settings_interface) return;
+    if (ARMSX2ShouldBlockRetroAchievementsHardcoreBoolSetting(section.UTF8String, key.UTF8String, value))
+        value = NO;
     g_p44_settings_interface->SetBoolValue(section.UTF8String, key.UTF8String, value);
     g_p44_settings_interface->Save();
     ARMSX2ApplyLiveGSBoolSetting(section.UTF8String, key.UTF8String, value);
@@ -2645,8 +2719,9 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 + (void)setINIFloat:(nonnull NSString *)section key:(nonnull NSString *)key value:(float)value {
     if (!g_p44_settings_interface) return;
     float valueToStore = value;
+    valueToStore = ARMSX2EnforceRetroAchievementsHardcoreFloatSetting(section.UTF8String, key.UTF8String, valueToStore);
     if (std::strcmp(section.UTF8String, "Framerate") == 0 && std::strcmp(key.UTF8String, "NominalScalar") == 0)
-        valueToStore = ARMSX2NormalizeIOSNominalScalar(value);
+        valueToStore = ARMSX2NormalizeIOSNominalScalar(valueToStore);
 
     g_p44_settings_interface->SetFloatValue(section.UTF8String, key.UTF8String, valueToStore);
     g_p44_settings_interface->Save();
@@ -2690,6 +2765,11 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         break;
     default:
         break;
+    }
+
+    if (ARMSX2RetroAchievementsHardcoreActive() && limiterMode == LimiterModeType::Slomo) {
+        ARMSX2LogRetroAchievementsHardcoreBlock("slomo_limiter_mode");
+        limiterMode = LimiterModeType::Nominal;
     }
 
     Host::RunOnCPUThread([limiterMode]() {
@@ -3091,6 +3171,11 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 #pragma mark - PNACH cheats/patches
 
 + (nullable NSString *)pnachPathForCurrentGameAsCheat:(BOOL)asCheat {
+    if (asCheat && (ARMSX2RetroAchievementsHardcoreActive() || EmuConfig.Achievements.HardcoreMode)) {
+        ARMSX2LogRetroAchievementsHardcoreBlock("pnach_cheat_import_current_game");
+        return nil;
+    }
+
     std::string serial;
     u32 crc = 0;
     if (!ARMSX2GetCurrentSaveStateIdentity(&serial, &crc)) {
@@ -3102,6 +3187,11 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 }
 
 + (nullable NSString *)pnachPathForISO:(nonnull NSString *)isoName asCheat:(BOOL)asCheat {
+    if (asCheat && (ARMSX2RetroAchievementsHardcoreActive() || EmuConfig.Achievements.HardcoreMode)) {
+        ARMSX2LogRetroAchievementsHardcoreBlock("pnach_cheat_import_game");
+        return nil;
+    }
+
     NSString* path = ARMSX2ResolveISOPath(isoName);
     if (path.length == 0) {
         NSLog(@"[ARMSX2Bridge] PNACH path unavailable for %@: ISO not found", isoName);
@@ -3387,6 +3477,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     }
 
     return result;
+}
+
++ (BOOL)isRetroAchievementsHardcoreActive {
+    return ARMSX2RetroAchievementsHardcoreActive() ? YES : NO;
 }
 
 + (void)setRetroAchievementsEnabled:(BOOL)enabled {

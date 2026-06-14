@@ -40,6 +40,7 @@ final class FileImportHandler: @unchecked Sendable {
     static let gameContentTypes: [UTType] = broaderContentTypes(for: gameExtensionList)
     static let pnachContentTypes: [UTType] = Array(Set([.item, .data, .content, .text, .plainText] + contentTypes(for: pnachExtensionList + ["txt", "patch"])))
     static let pnachImportNeedsGameMessage = "PNACH patches need to be imported for a specific game. Boot a game first or long-press a game in your library, then import the patch."
+    static let pnachCheatBlockedByHardcoreMessage = "PNACH cheat import is blocked while RetroAchievements Hardcore Mode is enabled."
 
     private init() {}
 
@@ -153,6 +154,13 @@ final class FileImportHandler: @unchecked Sendable {
 
     @discardableResult
     func importPNACHURLs(_ urls: [URL], asCheat: Bool = true, presentsAlert: Bool = true) -> String {
+        if asCheat && Self.retroAchievementsHardcoreEnabledOrActive() {
+            if presentsAlert {
+                presentImportResult(Self.pnachCheatBlockedByHardcoreMessage)
+            }
+            return Self.pnachCheatBlockedByHardcoreMessage
+        }
+
         let destinationPath = ARMSX2Bridge.pnachPathForCurrentGame(asCheat: asCheat)
         let results = urls.map { importPNACHFile($0, destinationPath: destinationPath, asCheat: asCheat) }
         return finishPNACHImport(results, presentsAlert: presentsAlert)
@@ -160,6 +168,13 @@ final class FileImportHandler: @unchecked Sendable {
 
     @discardableResult
     func importPNACHURLs(_ urls: [URL], forISO isoName: String, asCheat: Bool = true, presentsAlert: Bool = true) -> String {
+        if asCheat && Self.retroAchievementsHardcoreEnabledOrActive() {
+            if presentsAlert {
+                presentImportResult(Self.pnachCheatBlockedByHardcoreMessage)
+            }
+            return Self.pnachCheatBlockedByHardcoreMessage
+        }
+
         let destinationPath = ARMSX2Bridge.pnachPath(forISO: isoName, asCheat: asCheat)
         let results = urls.map { importPNACHFile($0, destinationPath: destinationPath, asCheat: asCheat) }
         return finishPNACHImport(results, presentsAlert: presentsAlert)
@@ -292,6 +307,10 @@ final class FileImportHandler: @unchecked Sendable {
             NSLog("[ARMSX2 iOS Import] PNACH file has non-standard extension, attempting text import: %@", fileName)
         }
 
+        guard !(asCheat && Self.retroAchievementsHardcoreEnabledOrActive()) else {
+            return .failure(Self.pnachCheatBlockedByHardcoreMessage)
+        }
+
         guard let destinationPath, !destinationPath.isEmpty else {
             return .failure(Self.pnachImportNeedsGameMessage)
         }
@@ -372,6 +391,13 @@ final class FileImportHandler: @unchecked Sendable {
 
     private static func unsupportedAutomaticImportMessage(for fileName: String) -> String {
         "ARMSX2 could not import \(fileName). Try importing it from the matching Games, BIOS, or PNACH patch option."
+    }
+
+    private static func retroAchievementsHardcoreEnabledOrActive() -> Bool {
+        let state = ARMSX2Bridge.retroAchievementsState()
+        let active = (state["hardcoreActive"] as? NSNumber)?.boolValue ?? false
+        let preference = (state["hardcorePreference"] as? NSNumber)?.boolValue ?? false
+        return active || preference || ARMSX2Bridge.isRetroAchievementsHardcoreActive()
     }
 
     private static func unreadablePNACHImportMessage(for fileName: String) -> String {

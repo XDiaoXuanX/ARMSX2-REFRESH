@@ -1403,6 +1403,7 @@ private struct SaveStatesPanel: View {
     @State private var slots: [ARMSX2SaveStateSlotInfo] = []
     @State private var busySlot: Int? = nil
     @State private var pendingOverwrite: ARMSX2SaveStateSlotInfo? = nil
+    @State private var hardcoreActive = false
 
     let statusHandler: (String, Bool) -> Void
 
@@ -1432,6 +1433,7 @@ private struct SaveStatesPanel: View {
                                 onSave: { save(slot) },
                                 onLoad: { load(slot) },
                                 onOverwrite: { pendingOverwrite = slot },
+                                loadDisabled: hardcoreActive,
                                 settings: settings
                             )
                         }
@@ -1440,7 +1442,9 @@ private struct SaveStatesPanel: View {
                 }
             }
             .safeAreaInset(edge: .top) {
-                Text(settings.localized("Empty slots can save. Occupied slots can load or overwrite."))
+                Text(settings.localized(hardcoreActive ?
+                    "Hardcore mode allows saving states for debugging, but loading states is blocked." :
+                    "Empty slots can save. Occupied slots can load or overwrite."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1458,6 +1462,9 @@ private struct SaveStatesPanel: View {
             }
             .onAppear(perform: refresh)
             .onReceive(NotificationCenter.default.publisher(for: runtimeMenuStateChangedNotification)) { _ in
+                refresh()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ARMSX2RetroAchievementsStateChanged"))) { _ in
                 refresh()
             }
             .confirmationDialog(
@@ -1487,6 +1494,7 @@ private struct SaveStatesPanel: View {
 
     private func refresh() {
         slots = ARMSX2Bridge.saveStateSlots()
+        hardcoreActive = ARMSX2Bridge.isRetroAchievementsHardcoreActive()
     }
 
     private func save(_ slot: ARMSX2SaveStateSlotInfo) {
@@ -1505,6 +1513,11 @@ private struct SaveStatesPanel: View {
     }
 
     private func load(_ slot: ARMSX2SaveStateSlotInfo) {
+        guard !hardcoreActive else {
+            statusHandler(settings.localized("Hardcore mode blocks loading save states."), true)
+            return
+        }
+
         let slotNumber = slot.slot
         busySlot = slotNumber
         ARMSX2Bridge.loadState(fromSlot: slotNumber) { success in
@@ -1528,6 +1541,7 @@ private struct SaveStatesPanel: View {
 private struct SpeedControlPanel: View {
     @Bindable var settings: SettingsStore
     @Environment(\.dismiss) private var dismiss
+    @State private var hardcoreActive = false
 
     var body: some View {
         NavigationStack {
@@ -1566,7 +1580,13 @@ private struct SpeedControlPanel: View {
                 }
 
                 Section(settings.localized("Frame Limiter")) {
-                    Toggle(settings.localized("Enable Limiter"), isOn: $settings.frameLimiterEnabled)
+                    Toggle(settings.localized("Enable Limiter"), isOn: Binding(
+                        get: { settings.frameLimiterEnabled },
+                        set: { enabled in
+                            settings.frameLimiterEnabled = enabled
+                            enforceHardcoreSpeedFloorIfNeeded()
+                        }
+                    ))
 
                     if settings.frameLimiterEnabled {
                         VStack(alignment: .leading, spacing: 10) {
@@ -1579,7 +1599,13 @@ private struct SpeedControlPanel: View {
                             }
 
                             Slider(
-                                value: $settings.targetFPS,
+                                value: Binding(
+                                    get: { settings.targetFPS },
+                                    set: { value in
+                                        settings.targetFPS = value
+                                        enforceHardcoreSpeedFloorIfNeeded()
+                                    }
+                                ),
                                 in: SettingsStore.minTargetFPS...SettingsStore.maxTargetFPS,
                                 step: 1.0
                             )
@@ -1594,6 +1620,14 @@ private struct SpeedControlPanel: View {
                         }
                     } else {
                         Text(settings.localized("Limiter is OFF. Games can run above normal speed and may draw more power."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if hardcoreActive {
+                    Section(settings.localized("Hardcore Mode")) {
+                        Text(settings.localized("Hardcore mode blocks slowdown and frame advance. Fast forward stays available; Normal Speed is locked at 100% or higher."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1622,13 +1656,26 @@ private struct SpeedControlPanel: View {
                 }
             }
             .onAppear {
-                refreshFastForwardState()
+                refreshRuntimeState()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ARMSX2RetroAchievementsStateChanged"))) { _ in
+                refreshRuntimeState()
             }
         }
     }
 
-    private func refreshFastForwardState() {
+    private func refreshRuntimeState() {
         settings.fastForwardRuntimeEnabled = ARMSX2Bridge.limiterMode() == 1
+        hardcoreActive = ARMSX2Bridge.isRetroAchievementsHardcoreActive()
+        enforceHardcoreSpeedFloorIfNeeded()
+    }
+
+    private func enforceHardcoreSpeedFloorIfNeeded() {
+        guard hardcoreActive else { return }
+        let minimumFPS = settings.ntscFramerate
+        if settings.frameLimiterEnabled && settings.targetFPS < minimumFPS {
+            settings.targetFPS = minimumFPS
+        }
     }
 
     private func quickFastForwardButton(_ scalar: Float) -> some View {
@@ -1643,7 +1690,9 @@ private struct SpeedControlPanel: View {
         Button(Self.formatCompactFPS(fps)) {
             settings.frameLimiterEnabled = true
             settings.targetFPS = fps
+            enforceHardcoreSpeedFloorIfNeeded()
         }
+        .disabled(hardcoreActive && fps < settings.ntscFramerate)
         .buttonStyle(.bordered)
         .font(.caption.monospacedDigit())
     }
@@ -1669,6 +1718,7 @@ private struct SaveStateSlotRow: View {
     let onSave: () -> Void
     let onLoad: () -> Void
     let onOverwrite: () -> Void
+    let loadDisabled: Bool
     let settings: SettingsStore
 
     var body: some View {
@@ -1717,6 +1767,7 @@ private struct SaveStateSlotRow: View {
                         Label(settings.localized("Load"), systemImage: "arrow.down.circle")
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(loadDisabled)
                     .frame(maxWidth: .infinity)
 
                     Button(action: onOverwrite) {

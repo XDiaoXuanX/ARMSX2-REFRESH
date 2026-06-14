@@ -87,6 +87,12 @@ struct RetroAchievementsSettingsView: View {
                             set: { newValue in
                                 hardcoreEnabled = newValue
                                 ARMSX2Bridge.setRetroAchievementsHardcore(newValue)
+                                if newValue && bool("hasActiveGame") && !bool("hardcoreActive") {
+                                    showMessage(
+                                        title: "Hardcore Mode",
+                                        body: settings.localized("Hardcore mode will apply after a full reset of the current game.")
+                                    )
+                                }
                                 refreshSoon()
                             }
                         ))
@@ -126,7 +132,7 @@ struct RetroAchievementsSettingsView: View {
                     Text(settings.localized("Modes"))
                 } footer: {
                     Text(settings.localized(hardcoreSupported ?
-                        "Hardcore is enforced by the core and can restrict cheats, save states, and other non-hardcore features while active." :
+                        "Hardcore blocks cheat engines, PNACH cheat imports, slowdown, frame advance, and save-state loading. Turning Hardcore on during a running game applies after a full reset." :
                         "Hardcore mode is hidden until RetroAchievements approval is complete."))
                 }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "BuildVersion.h"
+#include "Achievements.h"
 #include "Config.h"
 #include "Counters.h"
 #include "GS/GS.h"
@@ -88,7 +89,7 @@ extern "C" bool ARMSX2_iOSShouldShowDeviceStatsOverlay();
 extern "C" int ARMSX2_iOSGetDeviceStatsOverlaySeverity();
 extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine();
 
-static constexpr const char* ARMSX2_IOS_OSD_BRAND = "ARMSX2 iOS 2.2.1";
+static constexpr const char* ARMSX2_IOS_OSD_BRAND = "ARMSX2 iOS 2.2.2";
 static constexpr const char* ARMSX2_IOS_PCSX2_CORE_VERSION_FALLBACK = "2.7.394";
 
 static const char* ARMSX2IOSJitState(bool enabled)
@@ -426,6 +427,8 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 							ARMSX2_IOS_PCSX2_CORE_VERSION_FALLBACK);
 					}
 				}
+				if (Achievements::IsHardcoreModeActive())
+					s_speed_line.append_format("{}RA:HC", s_speed_line.empty() ? "" : " | ");
 #else
 				if (GSConfig.OsdShowVersion)
 					s_speed_line.append_format("{}PCSX2 {}", s_speed_line.empty() ? "" : " | ", BuildVersion::GitRev);
