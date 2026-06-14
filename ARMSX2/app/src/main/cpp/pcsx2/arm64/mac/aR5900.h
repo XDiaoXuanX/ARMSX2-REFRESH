@@ -26,11 +26,10 @@
 // here once; do not reuse them as scratch inside generators.
 //
 //   x19 = &cpuRegs              (base for all guest GPR / PC / HI/LO accesses)
-//   x20 = fastmem (4GB) base    (vtlb fast path; analogous to x86 RFASTMEMBASE/rbp)
+//   x20 = EE GPR cache register (the vtlb vmap path via x21 is the fast path)
 //   x21 = vtlb table base       (assigned for real in Phase 2)
 //
 #define RESTATEPTR vixl::aarch64::x19
-#define REFASTMEMBASE vixl::aarch64::x20
 #define REVTLBPTR vixl::aarch64::x21
 
 // --------------------------------------------------------------------------------------
@@ -38,8 +37,8 @@
 // --------------------------------------------------------------------------------------
 // Emit a call to the C++ vtlb_memRead / vtlb_memWrite helpers — semantically
 // identical to the interpreter's load/store ops (same virtual-memory path, so
-// these are correct by construction). The fastmem fast path (direct access via
-// REFASTMEMBASE + SIGSEGV backpatch through vtlb_DynBackpatchLoadStore) is Phase 2.2.
+// these are correct by construction). The vtlb vmap path through REVTLBPTR is
+// the fast path used by the ARM64 backend.
 //
 //   bits  : 8 / 16 / 32 / 64 (use the *Quad helpers for 128-bit).
 //   sign  : sign-extend (true) vs zero-extend (false) the loaded value into the GPR.
@@ -191,6 +190,22 @@ void armEmitCVT_S(u32 fd, u32 fs);
 // whole 128-bit GPR is loaded/stored via the Quad vtlb helpers (NEON q access).
 void armEmitLoadQuad(u32 rt, u32 rs, s32 imm);
 void armEmitStoreQuad(u32 rt, u32 rs, s32 imm);
+
+// --------------------------------------------------------------------------------------
+//  Unaligned load/store opcode generators (LWL/LWR/SWL/SWR, LDL/LDR/SDL/SDR)
+// --------------------------------------------------------------------------------------
+// Bit-exact ports of the interpreter's byte-merge semantics. The aligned
+// word/doubleword is read through the vtlb, merged with GPR[rt] according to the
+// runtime low address bits, and store forms write the merged value back. These are
+// common in copy loops and are expensive when they force interpreter single-steps.
+void armEmitLWL(u32 rt, u32 rs, s32 imm);
+void armEmitLWR(u32 rt, u32 rs, s32 imm);
+void armEmitSWL(u32 rt, u32 rs, s32 imm);
+void armEmitSWR(u32 rt, u32 rs, s32 imm);
+void armEmitLDL(u32 rt, u32 rs, s32 imm);
+void armEmitLDR(u32 rt, u32 rs, s32 imm);
+void armEmitSDL(u32 rt, u32 rs, s32 imm);
+void armEmitSDR(u32 rt, u32 rs, s32 imm);
 
 // --------------------------------------------------------------------------------------
 //  EE immediate arithmetic opcode generators (Phase 3.1)
@@ -356,9 +371,15 @@ void armEmitBGTZ(u32 rs, u32 target, u32 fallthrough);
 void armEmitBLTZAL(u32 rs, u32 target, u32 fallthrough, u32 linkpc);
 void armEmitBGEZAL(u32 rs, u32 target, u32 fallthrough, u32 linkpc);
 // COP1 FP-condition branches (test the FCR31 C bit). BC1F branches when C==0,
-// BC1T when C!=0. The likely forms (BC1FL/BC1TL) stay on interpreter fallback.
+// BC1T when C!=0.
 void armEmitBC1F(u32 target, u32 fallthrough);
 void armEmitBC1T(u32 target, u32 fallthrough);
+
+// Branch-likely forms evaluate the condition, write
+// cpuRegs.pc = taken ? target : fallthrough, and return the ARM64 condition that
+// is true when the branch is taken. The block compiler uses that live flags result
+// to skip the delay slot when the branch is not taken.
+vixl::aarch64::Condition armEmitBranchLikelyTest(u32 op, u32 target, u32 fallthrough);
 
 // --------------------------------------------------------------------------------------
 //  MMI 128-bit SIMD opcode generators (Phase 5.4)
