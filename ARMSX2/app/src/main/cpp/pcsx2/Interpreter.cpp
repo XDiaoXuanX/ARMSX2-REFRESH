@@ -294,7 +294,9 @@ void intSetBranch()
 
 // Single-step entry used by the macOS-port arm64 recompiler when it hands an op
 // back to the interpreter. Mirrors execI without the fastjmp exit (rec drives
-// its own exits).
+// its own exits). Always flush cycles, including for branch ops, because the
+// interpreter branch helpers only flush for intCpu. Without this, branch-only
+// guest wait loops can freeze cpuRegs.cycle and starve pending events.
 void intExecuteOneInst()
 {
 	const u32 thispc = cpuRegs.pc;
@@ -306,8 +308,7 @@ void intExecuteOneInst()
 
 	opcode.interpret();
 
-	if (!(opcode.flags & IS_BRANCH))
-		intUpdateCPUCycles();
+	intUpdateCPUCycles();
 }
 
 ////////////////////////////////////////////////////////////////////
