@@ -121,6 +121,7 @@ object InGameOverlay {
     }
 
     private val state = mutableStateOf<State>(State.Root)
+    private val settingsOnly = mutableStateOf(false)
 
     // Tab selection inside the Root state. Tabs are config groups —
     // PlayingNow holds the existing pause-menu options (Resume / Save
@@ -238,14 +239,27 @@ object InGameOverlay {
      * native is correct regardless of where the persisted bytes landed.
      */
     fun saveSettings(updated: Settings) {
+        val previous = settingsState.value
         settingsState.value = updated
         ConfigStore.save(settingsScope.value, currentSerial.value, updated)
-        updated.applyTo()
+        if (Main.eState.value == EmuState.STOPPED) {
+            updated.applyTo()
+        } else {
+            applySafeLiveDelta(previous, updated)
+        }
+    }
+
+    private fun applySafeLiveDelta(previous: Settings, updated: Settings) {
+        if (previous.frameLimitEnable != updated.frameLimitEnable) {
+            NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", updated.frameLimitEnable.toString())
+            NativeApp.speedhackLimitermode(if (updated.frameLimitEnable) 0 else 3)
+        }
     }
 
     /** Open the overlay. Pauses the VM. Safe to call when already open. */
     fun open() {
         if (WindowImpl.overlayVisible.value) return
+        settingsOnly.value = false
         pausedByOverlay = (Main.eState.value == EmuState.RUNNING)
         // ALWAYS pause while the overlay is up — even if eState already
         // says PAUSED. The Kotlin flag can run ahead of the actual VM,
@@ -290,9 +304,23 @@ object InGameOverlay {
         WindowImpl.overlayVisible.value = true
     }
 
+    /** Open the same settings tabs from the stopped/library UI. */
+    fun openGlobalSettings() {
+        if (WindowImpl.overlayVisible.value) return
+        settingsOnly.value = true
+        pausedByOverlay = false
+        state.value = State.Root
+        currentTab.value = Tab.Performance
+        currentSerial.value = null
+        settingsScope.value = SettingsScope.Global
+        settingsState.value = ConfigStore.loadGlobal()
+        WindowImpl.overlayVisible.value = true
+    }
+
     private fun closeAndResume() {
         WindowImpl.overlayVisible.value = false
         state.value = State.Root
+        settingsOnly.value = false
         // Always resume if the VM is paused — close-paths that should
         // preserve a paused VM (Change Disc picker, library, edit mode)
         // go through closeKeepingState instead. The earlier
@@ -307,6 +335,7 @@ object InGameOverlay {
     private fun closeKeepingState() {
         WindowImpl.overlayVisible.value = false
         state.value = State.Root
+        settingsOnly.value = false
         pausedByOverlay = false
     }
 
@@ -363,7 +392,7 @@ object InGameOverlay {
                     // PlayingNow's actions (Resume / Save State / etc.)
                     // are session controls, not persisted settings — no
                     // notion of "global vs game" applies.
-                    if (currentTab.value != Tab.PlayingNow) {
+                    if (currentTab.value != Tab.PlayingNow && !settingsOnly.value) {
                         Spacer(Modifier.height(4.dp))
                         ScopeToggle()
                     }
@@ -757,7 +786,12 @@ object InGameOverlay {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Tab.values().forEach { tab ->
+            val tabs = if (settingsOnly.value) {
+                listOf(Tab.Performance, Tab.Renderer, Tab.Recompiler)
+            } else {
+                Tab.values().toList()
+            }
+            tabs.forEach { tab ->
                 val active = currentTab.value == tab
                 Column(
                     modifier = Modifier

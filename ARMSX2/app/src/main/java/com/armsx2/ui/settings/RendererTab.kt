@@ -11,7 +11,6 @@ import androidx.compose.ui.Modifier
 import com.armsx2.Main
 import com.armsx2.config.Settings
 import com.armsx2.ui.InGameOverlay
-import kr.co.iefriends.pcsx2.NativeApp
 
 /**
  * Renderer section of the in-game settings overlay.
@@ -20,10 +19,8 @@ import kr.co.iefriends.pcsx2.NativeApp
  * which honors the overlay's scope toggle (Global / Game). Upscale is
  * the one outlier — it has its own dedicated `Main.upscale` state that's
  * also consumed by `Main.applyRendererPrefs` and the setup wizard, so
- * the slider mutates that state directly + calls
- * `NativeApp.renderUpscalemultiplier` for live-apply, mirroring the
- * existing toolbar behavior. (Upscale therefore stays global-only for
- * now; the rest of this tab is per-game-aware.)
+ * the slider mutates that state directly. Renderer changes are applied
+ * on the next boot/restart instead of rebuilding GS while a game is live.
  */
 @Composable
 fun RendererTab(state: MutableState<Settings>) {
@@ -46,7 +43,6 @@ fun RendererTab(state: MutableState<Settings>) {
             onChange = { mult ->
                 Main.upscale.value = mult
                 Main.prefs.edit().putInt("upscale", mult).apply()
-                NativeApp.renderUpscalemultiplier(mult.toFloat())
             },
         )
         SettingsDivider()
@@ -123,7 +119,6 @@ fun RendererTab(state: MutableState<Settings>) {
             selectedIndex = s.gpuProfile.coerceIn(0, 3),
             onChange = {
                 apply(s.copy(gpuProfile = it))
-                Main.restart()
             },
         )
     }
