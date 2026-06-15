@@ -1,0 +1,59 @@
+name: Build ARMSX2 iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show environment
+        run: |
+          echo "macOS:"
+          sw_vers
+          echo ""
+          echo "Xcode:"
+          xcodebuild -version
+          echo ""
+          echo "Xcode path:"
+          xcode-select -p
+          echo ""
+          echo "CMake:"
+          cmake --version
+          echo ""
+          echo "Repository root:"
+          ls -la
+          echo ""
+          echo "Scripts:"
+          ls -la scripts || true
+          echo ""
+          echo "iOS CMake source:"
+          ls -la app/src/main/cpp || true
+
+      - name: Ensure scripts are executable
+        run: |
+          chmod +x scripts/generate-ios-xcode.sh
+          chmod +x scripts/build-ios-ipa.sh
+
+      - name: Build unsigned ARMSX2 IPA
+        run: |
+          ./scripts/build-ios-ipa.sh
+
+      - name: Show generated IPA
+        run: |
+          find build-ios-xcode -name "*.ipa" -print -exec ls -lh {} \;
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARMSX2-iOS-unsigned-ipa
+          path: build-ios-xcode/ARMSX2-iOS-unsigned.ipa
