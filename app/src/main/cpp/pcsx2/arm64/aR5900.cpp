@@ -3111,6 +3111,26 @@ static u32 recScaleBlockCycles(u32 raw)
 	return (scale_cycles < 1) ? 1 : scale_cycles;
 }
 
+// True for ops that run the interpreter inline AND need a live, current cpuRegs.cycle.
+// COP2 / VU0-macro ops (opcode 0x12, excluding BC2 branches) sync VU state from
+// cpuRegs.cycle, so commit the block's accumulated cycles before executing them.
+static bool recOpNeedsCycleFlush(u32 op)
+{
+	return (op >> 26) == 0x12 && ((op >> 21) & 0x1f) != 0x08;
+}
+
+// Emit: cpuRegs.cycle += recScaleBlockCycles(raw). Used mid-block before inline
+// COP2/VU0-macro interpreter calls so they observe current EE time.
+static void recEmitFlushCycles(u32 raw)
+{
+	if (raw == 0)
+		return;
+
+	armAsm->Ldr(RSCRATCHADDR, a64::MemOperand(RESTATEPTR, EE_CYCLE_OFFSET));
+	armAsm->Add(RSCRATCHADDR, RSCRATCHADDR, recScaleBlockCycles(raw));
+	armAsm->Str(RSCRATCHADDR, a64::MemOperand(RESTATEPTR, EE_CYCLE_OFFSET));
+}
+
 // Install a freshly-compiled block's self-modifying-code protection and return the pointer
 // to record in its recLUT slot. Direct port of x86 memory_protect_recompiled_code
 // (iR5900.cpp), adapted to this port's body-first layout: the caller has already emitted
@@ -3463,6 +3483,10 @@ static void recRecompile(u32 startpc)
 	u32 pc = startpc;
 	u32 endpc = startpc;
 	u32 raw_cycles = 0;
+	const u32 ee_cycle_mult = 2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1);
+	const auto eeOpCycles = [ee_cycle_mult](u32 opc) -> u32 {
+		return (opc == 0 ? 9u : static_cast<u32>(R5900::GetInstruction(opc).cycles)) * ee_cycle_mult;
+	};
 	u32 compiled = 0;
 	bool interp_step = false;
 	bool known_dispatch_pc = false;
@@ -3491,12 +3515,11 @@ static void recRecompile(u32 startpc)
 		}
 
 		const u32 op = memRead32(pc);
-		const R5900::OPCODE& info = R5900::GetInstruction(op);
 
 		if (recIsHandledBranch(op))
 		{
 			// Terminate the block: branch generator + delay slot + dispatch tail.
-			raw_cycles += info.cycles;
+			raw_cycles += eeOpCycles(op);
 			branch_tail = true;
 			tail_reason = "branch";
 			known_dispatch_pc = recGetKnownBranchTarget(op, pc, const_state, &dispatch_pc);
@@ -3506,7 +3529,7 @@ static void recRecompile(u32 startpc)
 			recConstApplyBranchLink(op, pc, const_state);
 
 			const u32 delay_op = memRead32(pc + 4);
-			raw_cycles += R5900::GetInstruction(delay_op).cycles;
+			raw_cycles += eeOpCycles(delay_op);
 			recEmitOp(delay_op, const_state, cache_state); // delay slot — must not write cpuRegs.pc
 			endpc = pc + 8;
 
@@ -3543,7 +3566,7 @@ static void recRecompile(u32 startpc)
 			// test + PC select, then jump over the delay-slot code when not taken.
 			// The cache/const state diverges across the two paths, so it is flushed
 			// and discarded inside the taken path before the skip label.
-			raw_cycles += info.cycles;
+			raw_cycles += eeOpCycles(op);
 			branch_tail = true;
 			tail_reason = "branch_likely";
 
@@ -3558,7 +3581,7 @@ static void recRecompile(u32 startpc)
 			armAsm->B(&skip_delay, a64::InvertCondition(taken));
 
 			const u32 delay_op = memRead32(pc + 4);
-			raw_cycles += R5900::GetInstruction(delay_op).cycles;
+			raw_cycles += eeOpCycles(delay_op);
 			recEmitOp(delay_op, const_state, cache_state);
 			recCacheFlushAll(cache_state);
 			recCacheKillAll(cache_state);
@@ -3572,6 +3595,14 @@ static void recRecompile(u32 startpc)
 			break;
 		}
 
+		const bool needs_cycle_flush = recOpNeedsCycleFlush(op);
+		if (needs_cycle_flush)
+		{
+			raw_cycles += eeOpCycles(op);
+			recEmitFlushCycles(raw_cycles);
+			raw_cycles = 0;
+		}
+
 		// Straight-line op we can codegen? (Generators decode from `op` directly;
 		// they never read cpuRegs.code, so nothing to set here at compile time.)
 		if (recTranslateOpOptimized(op, const_state, cache_state))
@@ -3582,7 +3613,8 @@ static void recRecompile(u32 startpc)
 			else
 				waitloop_possible = false;
 
-			raw_cycles += info.cycles;
+			if (!needs_cycle_flush)
+				raw_cycles += eeOpCycles(op);
 			pc += 4;
 			endpc = pc;
 			if (++compiled >= MAX_BLOCK_INSTS)

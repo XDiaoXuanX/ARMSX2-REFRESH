@@ -465,6 +465,11 @@ static bool IsIOSBlackGame(const std::string& name)
 	return name == "Black";
 }
 
+static bool IsIOSSonicUnleashedGame(const std::string& name)
+{
+	return name == "Sonic Unleashed";
+}
+
 // Midnight Club 3 (DUB Edition + DUB Edition Remix). Its GameDB entry uses the
 // GSC_MidnightClub3 skip-count callback to drop broken bloom draws. The callback
 // only ever *skips* draws (no extra barriers or copies), which makes it one of
@@ -601,7 +606,9 @@ static bool IsIOSMetalAllowedAutoGSHWCallback(const GameDatabaseSchema::GameEntr
 		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
 		{
 			static const s16 burnout_games = GSLookupBeforeDrawFunctionId("OI_BurnoutGames");
-			return (IsIOSBurnoutMetalCallbackGame(entry.name) || IsIOSBlackGame(entry.name)) && value == burnout_games;
+			static const s16 sonic_unleashed = GSLookupBeforeDrawFunctionId("OI_SonicUnleashed");
+			return ((IsIOSBurnoutMetalCallbackGame(entry.name) || IsIOSBlackGame(entry.name)) && value == burnout_games) ||
+				(IsIOSSonicUnleashedGame(entry.name) && value == sonic_unleashed);
 		}
 
 		default:
@@ -629,7 +636,9 @@ static bool IsIOSMetalAllowedCompatLabOffGSHWFix(const GameDatabaseSchema::GameE
 		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
 		{
 			static const s16 burnout_games = GSLookupBeforeDrawFunctionId("OI_BurnoutGames");
-			return (IsIOSBurnoutMetalCallbackGame(entry.name) || IsIOSBlackGame(entry.name)) && value == burnout_games;
+			static const s16 sonic_unleashed = GSLookupBeforeDrawFunctionId("OI_SonicUnleashed");
+			return ((IsIOSBurnoutMetalCallbackGame(entry.name) || IsIOSBlackGame(entry.name)) && value == burnout_games) ||
+				(IsIOSSonicUnleashedGame(entry.name) && value == sonic_unleashed);
 		}
 
 		default:

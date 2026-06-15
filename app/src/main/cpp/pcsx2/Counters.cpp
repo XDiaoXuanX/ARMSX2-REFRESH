@@ -3,6 +3,8 @@
 
 #include <time.h>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 #include "Common.h"
 #include "R3000A.h"
@@ -20,6 +22,10 @@
 #include "Recording/InputRecording.h"
 #include "VMManager.h"
 #include "VUmicro.h"
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 static const uint EECNT_FUTURE_TARGET = 0x10000000;
 
@@ -479,8 +485,22 @@ static __fi void DoFMVSwitch()
 	if (EmuConfig.Gamefixes.SoftwareRendererFMVHack && EmuConfig.GS.UseHardwareRenderer())
 	{
 		DevCon.Warning("FMV Switch");
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		const std::string serial = VMManager::GetDiscSerial();
+		std::fprintf(stderr,
+			"@@IOS_FMV_SWITCH_BEGIN@@ serial=\"%s\" state=%d renderer=%d interlace=%d hw=1\n",
+			serial.c_str(), new_fmv_state ? 1 : 0, static_cast<int>(EmuConfig.GS.Renderer),
+			static_cast<int>(EmuConfig.GS.InterlaceMode));
+		std::fflush(stderr);
+#endif
 		// we don't use the sw toggle here, because it'll change back to auto if set to sw
 		MTGS::SetSoftwareRendering(new_fmv_state, new_fmv_state ? GSInterlaceMode::AdaptiveTFF : EmuConfig.GS.InterlaceMode, false);
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		std::fprintf(stderr,
+			"@@IOS_FMV_SWITCH_END@@ serial=\"%s\" state=%d\n",
+			serial.c_str(), new_fmv_state ? 1 : 0);
+		std::fflush(stderr);
+#endif
 	}
 }
 
