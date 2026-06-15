@@ -8262,7 +8262,8 @@ void recArmVU1::Execute(u32 cycles)
 		// optimization path), so OnDispatch always returns nullptr after
 		// bumping the per-slot dispatch counter + periodic top-N log.
 		// Steady-state cost on cache hit: ~6 instructions.
-		(void)VU1Fingerprint::OnDispatch(pc);
+		if (VU1Fingerprint::Enabled())
+			(void)VU1Fingerprint::OnDispatch(pc);
 
 		// Content-keyed lookup: scan the slot's deque for a variant whose
 		// snapshot matches live VU1.Micro at `pc`. A hit bubbles the variant

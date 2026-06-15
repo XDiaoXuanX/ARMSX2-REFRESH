@@ -11967,7 +11967,7 @@ SCUS-97328:
   clampModes:
     vuClampMode: 2 # Text in GT mode works.
   gsHWFixes:
-    recommendedBlendingLevel: 3 # Improves banding in car showcase as well as car brightness and sheen.
+    minimumBlendingLevel: 3 # Fixes car body reflections/brightness on Android hardware renderers.
     halfPixelOffset: 4 # Fixes weird edge shadows and depth bleed which happens on the edge as well.
     autoFlush: 1 # Helps lens flare and sun occlusion somewhat but doesn't full fix it.
     getSkipCount: "GSC_PolyphonyDigitalGames" # Fixes post-processing.

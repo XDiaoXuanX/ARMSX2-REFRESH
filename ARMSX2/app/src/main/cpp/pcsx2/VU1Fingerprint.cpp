@@ -17,17 +17,14 @@
 #include <array>
 #include <chrono>
 #include <fmt/format.h>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
 
 namespace
 {
-    // Toggle dump logging. Default ON so a release build still collects
-    // frequency data — log volume is bounded (~30 unique-upload lines and one
-    // top-N block every 10s) so it's harmless to leave enabled.
-    constexpr bool kDumpEnabled = true;
-
     // VU1 micro-mem is 16 KiB = 2048 pairs. Per-pair (8-byte) cache.
     constexpr u32 kSlotCount = 2048;
     constexpr u32 kVU1MicroSize = 0x4000;
@@ -238,6 +235,15 @@ namespace
 namespace VU1Fingerprint
 {
 
+bool Enabled()
+{
+    static const bool s_enabled = [] {
+        const char* value = std::getenv("ARMSX2_VU1_FINGERPRINT");
+        return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return s_enabled;
+}
+
 u64 ComputeHash(const u8* code, size_t bytes)
 {
     return GSXXH3_64bits(code, bytes);
@@ -245,11 +251,14 @@ u64 ComputeHash(const u8* code, size_t bytes)
 
 void OnUpload(u32 vu_idx, u32 addr, const u8* code, size_t bytes)
 {
+    if (!Enabled())
+        return;
+
     // Invalidate the lookup cache unconditionally — the dispatcher will
     // re-hash on next visit to any affected PC. Epoch bump is cheap.
     s_cache_epoch++;
 
-    if (!kDumpEnabled || bytes == 0)
+    if (bytes == 0)
         return;
 
     const u64 hash = ComputeHash(code, bytes);
@@ -268,6 +277,9 @@ void OnUpload(u32 vu_idx, u32 addr, const u8* code, size_t bytes)
 
 const KernelEntry* OnDispatch(u32 pc)
 {
+    if (!Enabled())
+        return nullptr;
+
     if (pc >= kVU1MicroSize) [[unlikely]]
         return nullptr;
 

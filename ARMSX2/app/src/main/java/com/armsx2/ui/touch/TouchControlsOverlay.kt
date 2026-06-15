@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -51,7 +52,10 @@ import com.armsx2.EmuState
 import com.armsx2.Main
 import com.armsx2.R
 import com.armsx2.ui.Colors
+import com.armsx2.ui.InGameOverlay
 import com.armsx2.ui.WindowImpl
+import compose.icons.LineAwesomeIcons
+import compose.icons.lineawesomeicons.CogSolid
 import kr.co.iefriends.pcsx2.NativeApp
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -76,7 +80,6 @@ fun TouchControlsOverlay() {
     // is running) — it sits on top of the surface, the touch buttons
     // shouldn't paint over the library cards.
     if (WindowImpl.showLibrary.value && !edit) return
-    if (!TouchControls.visible.value && !edit) return
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val w = maxWidth
@@ -88,6 +91,17 @@ fun TouchControlsOverlay() {
             OverlayDims.last = OverlayDims.Dims(widthPx, heightPx)
         }
         val layout = TouchControls.activeLayout.value
+
+        if (!edit) {
+            InGameSettingsButton(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(14.dp),
+            )
+        }
+
+        val showPad = TouchControls.visible.value || edit
+        if (!showPad) return@BoxWithConstraints
 
         if (edit) {
             // Dim backdrop. Two jobs:
@@ -162,6 +176,30 @@ fun TouchControlsOverlay() {
         if (TouchControls.profileDialogOpen.value) {
             ProfilePicker(onDismiss = { TouchControls.profileDialogOpen.value = false })
         }
+    }
+}
+
+/* -------------------------------------------------------------------- */
+/*  In-game settings shortcut                                            */
+/* -------------------------------------------------------------------- */
+
+@Composable
+private fun InGameSettingsButton(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .background(Color(0xFF111111).copy(alpha = 0.55f))
+            .border(1.dp, Color.White.copy(alpha = 0.20f), CircleShape)
+            .clickable { InGameOverlay.open() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = LineAwesomeIcons.CogSolid,
+            contentDescription = "Open in-game settings",
+            tint = Color.White.copy(alpha = 0.92f),
+            modifier = Modifier.size(23.dp),
+        )
     }
 }
 

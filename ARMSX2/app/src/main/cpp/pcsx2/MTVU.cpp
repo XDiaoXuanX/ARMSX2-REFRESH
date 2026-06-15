@@ -7,8 +7,14 @@
 #include "VMManager.h"
 #include "VU1Fingerprint.h"
 #include "Vif_Dynarec.h"
+#include "common/Console.h"
+#include "common/Timer.h"
 
 #include <thread>
+
+#ifndef ARMSX2_ANDROID_VU_PROBES
+#define ARMSX2_ANDROID_VU_PROBES 0
+#endif
 
 VU_Thread vu1Thread;
 
@@ -178,7 +184,21 @@ void VU_Thread::ExecuteRingBuffer()
 					if (addr != -1)
 						VU1.VI[REG_TPC].UL = addr & 0x7FF;
 					CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
+#if defined(__ANDROID__) && ARMSX2_ANDROID_VU_PROBES
+					static u32 s_mtvu_execute_sample_counter = 0;
+					const bool sample_execute = ((++s_mtvu_execute_sample_counter & 0x7f) == 0);
+					const u64 execute_start = sample_execute ? Common::Timer::GetCurrentValue() : 0;
+#endif
 					CpuVU1->Execute(vu1RunCycles);
+#if defined(__ANDROID__) && ARMSX2_ANDROID_VU_PROBES
+					if (sample_execute)
+					{
+						const u64 execute_ticks = Common::Timer::GetCurrentValue() - execute_start;
+						Console.WriteLnFmt("@@MTVU_EXEC_SAMPLE@@ cycles={} vu_cycle={} tpc=0x{:04x} usec={:.2f}",
+							vu1RunCycles, VU1.cycle, VU1.VI[REG_TPC].UL,
+							Common::Timer::ConvertValueToSeconds(execute_ticks) * 1000000.0);
+					}
+#endif
 					gifUnit.gifPath[GIF_PATH_1].FinishGSPacketMTVU();
 					pending_xgkick_posts++; // Batched → flushed before NEXT execute or at loop end
 					vuCycles[vuCycleIdx].store(VU1.cycle, std::memory_order_release);
@@ -191,10 +211,13 @@ void VU_Thread::ExecuteRingBuffer()
 					u32 size = Read();
 					CpuVU1->Clear(vu_micro_addr, size);
 					Read(&VU1.Micro[vu_micro_addr], size);
-					// Fingerprint observation runs on the VU thread (this
-					// thread) so the per-PC lookup cache invalidation lands
-					// in the same thread as the dispatcher that reads it.
-					VU1Fingerprint::OnUpload(1, vu_micro_addr, &VU1.Micro[vu_micro_addr], size);
+					if (VU1Fingerprint::Enabled())
+					{
+						// Fingerprint observation runs on the VU thread (this
+						// thread) so the per-PC lookup cache invalidation lands
+						// in the same thread as the dispatcher that reads it.
+						VU1Fingerprint::OnUpload(1, vu_micro_addr, &VU1.Micro[vu_micro_addr], size);
+					}
 					break;
 				}
 				case MTVU_VU_WRITE_DATA:
@@ -477,7 +500,20 @@ bool VU_Thread::IsDone()
 void VU_Thread::WaitVU()
 {
 	MTVU_LOG("MTVU - WaitVU!");
+#if defined(__ANDROID__) && ARMSX2_ANDROID_VU_PROBES
+	static std::atomic<u32> s_mtvu_wait_sample_counter{0};
+	const bool sample_wait = ((s_mtvu_wait_sample_counter.fetch_add(1, std::memory_order_relaxed) & 0x7f) == 0);
+	const u64 wait_start = sample_wait ? Common::Timer::GetCurrentValue() : 0;
+#endif
 	semaEvent.WaitForEmpty();
+#if defined(__ANDROID__) && ARMSX2_ANDROID_VU_PROBES
+	if (sample_wait)
+	{
+		const u64 wait_ticks = Common::Timer::GetCurrentValue() - wait_start;
+		Console.WriteLnFmt("@@MTVU_WAIT_SAMPLE@@ usec={:.2f}",
+			Common::Timer::ConvertValueToSeconds(wait_ticks) * 1000000.0);
+	}
+#endif
 }
 
 void VU_Thread::ExecuteVU(u32 vu_addr, u32 vif_top, u32 vif_itop, u32 fbrst)

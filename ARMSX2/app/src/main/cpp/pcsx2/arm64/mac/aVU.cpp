@@ -31,6 +31,7 @@
 
 #include "common/AlignedMalloc.h"
 #include "common/Perf.h"
+#include "common/Timer.h"
 
 #include <algorithm>
 #include <vector>
@@ -46,6 +47,7 @@ alignas(16) microVU microVU1;
 // Whole-program comparison on search (matches the x86 default — off). Cloned here
 // rather than pulled from the x86-coupled microVU_Misc.h. doConstProp lives in aVU.h.
 static constexpr bool doWholeProgCompare = false;
+static constexpr bool kVerboseMicroVUCacheLog = false;
 
 // recCall function-pointer types (x86: microVU.h). startFunct/startFunctXG point at
 // the dispatcher code emitted by 7.2d; the provider Execute paths call through these.
@@ -528,7 +530,8 @@ void mVUinit(microVU& mVU, uint vuIndex)
 	mVU.progSize     = (mVU.index ? 0x4000 : 0x1000) / 4;
 	mVU.progMemMask  =  mVU.progSize-1;
 	mVU.cache        = vuIndex ? SysMemory::GetVU1Rec() : SysMemory::GetVU0Rec();
-	mVU.prog.codeEnd = (vuIndex ? SysMemory::GetVU1RecEnd() : SysMemory::GetVU0RecEnd()) - (mVUcacheSafeZone * _1mb);
+	mVU.prog.codeReserveEnd = (vuIndex ? SysMemory::GetVU1RecEnd() : SysMemory::GetVU0RecEnd());
+	mVU.prog.codeEnd = mVU.prog.codeReserveEnd - (mVUcacheSafeZone * _1mb);
 
 	mVU.regAlloc.reset(new microRegAlloc(mVU.index));
 }
@@ -639,12 +642,15 @@ static microProgram* mVUcreateProg(microVU& mVU, int startPC)
 	prog->startPC = startPC;
 	if (doWholeProgCompare)
 		mVUcacheProg(mVU, *prog); // Cache Micro Program
-	double cacheSize = (double)((uptr)mVU.prog.codeEnd - (uptr)mVU.prog.codeStart);
-	double cacheUsed = ((double)((uptr)mVU.prog.codePtr - (uptr)mVU.prog.codeStart)) / (double)_1mb;
-	double cachePerc = ((double)((uptr)mVU.prog.codePtr - (uptr)mVU.prog.codeStart)) / cacheSize * 100;
-	ConsoleColors c = mVU.index ? Color_Orange : Color_Magenta;
-	DevCon.WriteLn(c, "microVU%d: Cached Prog = [%03d] [PC=%04x] [List=%02d] (Cache=%3.3f%%) [%3.1fmb]",
-		mVU.index, prog->idx, startPC * 8, mVU.prog.prog[startPC]->size() + 1, cachePerc, cacheUsed);
+	if constexpr (kVerboseMicroVUCacheLog)
+	{
+		double cacheSize = (double)((uptr)mVU.prog.codeEnd - (uptr)mVU.prog.codeStart);
+		double cacheUsed = ((double)((uptr)mVU.prog.codePtr - (uptr)mVU.prog.codeStart)) / (double)_1mb;
+		double cachePerc = ((double)((uptr)mVU.prog.codePtr - (uptr)mVU.prog.codeStart)) / cacheSize * 100;
+		ConsoleColors c = mVU.index ? Color_Orange : Color_Magenta;
+		DevCon.WriteLn(c, "microVU%d: Cached Prog = [%03d] [PC=%04x] [List=%02d] (Cache=%3.3f%%) [%3.1fmb]",
+			mVU.index, prog->idx, startPC * 8, mVU.prog.prog[startPC]->size() + 1, cachePerc, cacheUsed);
+	}
 	return prog;
 }
 

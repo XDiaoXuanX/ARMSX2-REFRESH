@@ -25,7 +25,10 @@ data class Settings(
     val eeCycleRate: Int = 0,
     /** EmuCore/Speedhacks/EECycleSkip — 0..3. 0 = no skip. */
     val eeCycleSkip: Int = 0,
-    /** EmuCore/Speedhacks/vuThread — Multi-Threaded VU1 (MTVU). */
+    /** EmuCore/Speedhacks/vuThread — Multi-Threaded VU1 (MTVU).
+     *  Kept on by default for the mac ARM64 backend. Old Android Refresh
+     *  config blobs may contain mtvu=false, so loading/merging ignores stale
+     *  persisted values while the live toggle can still A/B a running game. */
     val mtvu: Boolean = true,
     /** EmuCore/Speedhacks/vu1Instant — completes VU1 in one cycle. */
     val vu1Instant: Boolean = true,
@@ -72,19 +75,16 @@ data class Settings(
      *  path on every memory op. */
     val enableFastmem: Boolean = true,
 
-    // ---- macOS-port arm64 backend A/B toggles ----
-    // Per-CPU switch between our original arm64 backend and the namespaced
-    // macOS-port backend (pcsx2_macrec). Defaults: original EE/IOP/VU0,
-    // mac VU1. VMManager picks at VM init; flipping requires a VM restart.
-    // Bisect a regression by flipping individual CPUs.
-    /** EmuCore/CPU/Recompiler/UseMacEE — mac arm64 EE recompiler. */
-    val useMacEE: Boolean = false,
-    /** EmuCore/CPU/Recompiler/UseMacIOP — mac arm64 IOP recompiler. */
-    val useMacIOP: Boolean = false,
-    /** EmuCore/CPU/Recompiler/UseMacVU0 — mac arm64 VU0 recompiler. */
-    val useMacVU0: Boolean = false,
-    /** EmuCore/CPU/Recompiler/UseMacVU1 — mac arm64 VU1 recompiler.
-     *  Default ON: mac VU1 + original EE/IOP/VU0 is the shipping JIT config. */
+    // ---- macOS/PCSX2 ARM64 backend compatibility flags ----
+    // Hidden from UI and forced on. Kept only so older JSON/INI/per-game blobs
+    // with UseMac* keys still parse without losing the rest of their settings.
+    /** EmuCore/CPU/Recompiler/UseMacEE — legacy, forced on. */
+    val useMacEE: Boolean = true,
+    /** EmuCore/CPU/Recompiler/UseMacIOP — legacy, forced on. */
+    val useMacIOP: Boolean = true,
+    /** EmuCore/CPU/Recompiler/UseMacVU0 — legacy, forced on. */
+    val useMacVU0: Boolean = true,
+    /** EmuCore/CPU/Recompiler/UseMacVU1 — legacy, forced on. */
     val useMacVU1: Boolean = true,
 
     // ---- microVU-style compile-time pipeline-stall folding ----
@@ -172,10 +172,12 @@ data class Settings(
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableVU0", "bool", recVU0.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableVU1", "bool", recVU1.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "EnableFastmem", "bool", enableFastmem.toString())
-        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacEE", "bool", useMacEE.toString())
-        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacIOP", "bool", useMacIOP.toString())
-        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacVU0", "bool", useMacVU0.toString())
-        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacVU1", "bool", useMacVU1.toString())
+        // Force the single macOS/PCSX2 ARM64 backend. VMManager also ignores
+        // stale UseMac* values, but writing true cleans old persisted settings.
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacEE", "bool", "true")
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacIOP", "bool", "true")
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacVU0", "bool", "true")
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacVU1", "bool", "true")
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1InlineFmacStall", "bool", vu1InlineFmacStall.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1CrossBlockPState", "bool", vu1CrossBlockPState.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1InlineDrainTestPipes", "bool", vu1InlineDrainTestPipes.toString())
@@ -202,7 +204,7 @@ data class Settings(
     fun toJson(): JSONObject = JSONObject().apply {
         put("eeCycleRate", eeCycleRate)
         put("eeCycleSkip", eeCycleSkip)
-        put("mtvu", mtvu)
+        put("mtvu", true)
         put("vu1Instant", vu1Instant)
         put("vuFlagHack", vuFlagHack)
         put("fastCDVD", fastCDVD)
@@ -217,10 +219,6 @@ data class Settings(
         put("recVU0", recVU0)
         put("recVU1", recVU1)
         put("enableFastmem", enableFastmem)
-        put("useMacEE", useMacEE)
-        put("useMacIOP", useMacIOP)
-        put("useMacVU0", useMacVU0)
-        put("useMacVU1", useMacVU1)
         put("vu1InlineFmacStall", vu1InlineFmacStall)
         put("vu1CrossBlockPState", vu1CrossBlockPState)
         put("vu1InlineDrainTestPipes", vu1InlineDrainTestPipes)
@@ -244,7 +242,7 @@ data class Settings(
             return Settings(
                 eeCycleRate = json.optInt("eeCycleRate", def.eeCycleRate),
                 eeCycleSkip = json.optInt("eeCycleSkip", def.eeCycleSkip),
-                mtvu = json.optBoolean("mtvu", def.mtvu),
+                mtvu = true,
                 vu1Instant = json.optBoolean("vu1Instant", def.vu1Instant),
                 vuFlagHack = json.optBoolean("vuFlagHack", def.vuFlagHack),
                 fastCDVD = json.optBoolean("fastCDVD", def.fastCDVD),
@@ -259,10 +257,10 @@ data class Settings(
                 recVU0 = json.optBoolean("recVU0", def.recVU0),
                 recVU1 = json.optBoolean("recVU1", def.recVU1),
                 enableFastmem = json.optBoolean("enableFastmem", def.enableFastmem),
-                useMacEE = json.optBoolean("useMacEE", def.useMacEE),
-                useMacIOP = json.optBoolean("useMacIOP", def.useMacIOP),
-                useMacVU0 = json.optBoolean("useMacVU0", def.useMacVU0),
-                useMacVU1 = json.optBoolean("useMacVU1", def.useMacVU1),
+                useMacEE = true,
+                useMacIOP = true,
+                useMacVU0 = true,
+                useMacVU1 = true,
                 vu1InlineFmacStall = json.optBoolean("vu1InlineFmacStall", def.vu1InlineFmacStall),
                 vu1CrossBlockPState = json.optBoolean("vu1CrossBlockPState", def.vu1CrossBlockPState),
                 vu1InlineDrainTestPipes = json.optBoolean("vu1InlineDrainTestPipes", def.vu1InlineDrainTestPipes),
@@ -292,7 +290,6 @@ data class Settings(
             val j = JSONObject()
             if (current.eeCycleRate         != base.eeCycleRate)         j.put("eeCycleRate", current.eeCycleRate)
             if (current.eeCycleSkip         != base.eeCycleSkip)         j.put("eeCycleSkip", current.eeCycleSkip)
-            if (current.mtvu                != base.mtvu)                j.put("mtvu", current.mtvu)
             if (current.vu1Instant          != base.vu1Instant)          j.put("vu1Instant", current.vu1Instant)
             if (current.vuFlagHack          != base.vuFlagHack)          j.put("vuFlagHack", current.vuFlagHack)
             if (current.fastCDVD            != base.fastCDVD)            j.put("fastCDVD", current.fastCDVD)
@@ -307,10 +304,6 @@ data class Settings(
             if (current.recVU0              != base.recVU0)              j.put("recVU0", current.recVU0)
             if (current.recVU1              != base.recVU1)              j.put("recVU1", current.recVU1)
             if (current.enableFastmem       != base.enableFastmem)       j.put("enableFastmem", current.enableFastmem)
-            if (current.useMacEE            != base.useMacEE)            j.put("useMacEE", current.useMacEE)
-            if (current.useMacIOP           != base.useMacIOP)           j.put("useMacIOP", current.useMacIOP)
-            if (current.useMacVU0           != base.useMacVU0)           j.put("useMacVU0", current.useMacVU0)
-            if (current.useMacVU1           != base.useMacVU1)           j.put("useMacVU1", current.useMacVU1)
             if (current.vu1InlineFmacStall  != base.vu1InlineFmacStall)  j.put("vu1InlineFmacStall", current.vu1InlineFmacStall)
             if (current.vu1CrossBlockPState != base.vu1CrossBlockPState) j.put("vu1CrossBlockPState", current.vu1CrossBlockPState)
             if (current.vu1InlineDrainTestPipes != base.vu1InlineDrainTestPipes) j.put("vu1InlineDrainTestPipes", current.vu1InlineDrainTestPipes)
@@ -330,7 +323,7 @@ data class Settings(
         fun merge(base: Settings, overrides: JSONObject): Settings = Settings(
             eeCycleRate = if (overrides.has("eeCycleRate")) overrides.getInt("eeCycleRate") else base.eeCycleRate,
             eeCycleSkip = if (overrides.has("eeCycleSkip")) overrides.getInt("eeCycleSkip") else base.eeCycleSkip,
-            mtvu = if (overrides.has("mtvu")) overrides.getBoolean("mtvu") else base.mtvu,
+            mtvu = true,
             vu1Instant = if (overrides.has("vu1Instant")) overrides.getBoolean("vu1Instant") else base.vu1Instant,
             vuFlagHack = if (overrides.has("vuFlagHack")) overrides.getBoolean("vuFlagHack") else base.vuFlagHack,
             fastCDVD = if (overrides.has("fastCDVD")) overrides.getBoolean("fastCDVD") else base.fastCDVD,
@@ -345,10 +338,10 @@ data class Settings(
             recVU0 = if (overrides.has("recVU0")) overrides.getBoolean("recVU0") else base.recVU0,
             recVU1 = if (overrides.has("recVU1")) overrides.getBoolean("recVU1") else base.recVU1,
             enableFastmem = if (overrides.has("enableFastmem")) overrides.getBoolean("enableFastmem") else base.enableFastmem,
-            useMacEE = if (overrides.has("useMacEE")) overrides.getBoolean("useMacEE") else base.useMacEE,
-            useMacIOP = if (overrides.has("useMacIOP")) overrides.getBoolean("useMacIOP") else base.useMacIOP,
-            useMacVU0 = if (overrides.has("useMacVU0")) overrides.getBoolean("useMacVU0") else base.useMacVU0,
-            useMacVU1 = if (overrides.has("useMacVU1")) overrides.getBoolean("useMacVU1") else base.useMacVU1,
+            useMacEE = true,
+            useMacIOP = true,
+            useMacVU0 = true,
+            useMacVU1 = true,
             vu1InlineFmacStall = if (overrides.has("vu1InlineFmacStall")) overrides.getBoolean("vu1InlineFmacStall") else base.vu1InlineFmacStall,
             vu1CrossBlockPState = if (overrides.has("vu1CrossBlockPState")) overrides.getBoolean("vu1CrossBlockPState") else base.vu1CrossBlockPState,
             vu1InlineDrainTestPipes = if (overrides.has("vu1InlineDrainTestPipes")) overrides.getBoolean("vu1InlineDrainTestPipes") else base.vu1InlineDrainTestPipes,

@@ -34,6 +34,10 @@ namespace VU1Fingerprint
         u32 fake_cycles;     // cycles to inject into VU1.cycle after the kernel runs
     };
 
+    // Runtime diagnostic gate. Disabled by default; set
+    // ARMSX2_VU1_FINGERPRINT=1 when collecting VU1 telemetry.
+    bool Enabled();
+
     // Compute the xxh3-64 hash of a byte range.
     u64 ComputeHash(const u8* code, size_t bytes);
 

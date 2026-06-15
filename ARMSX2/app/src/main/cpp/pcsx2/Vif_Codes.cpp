@@ -352,7 +352,7 @@ static __fi void _vifCode_MPG(int idx, u32 addr, const u32* data, int size)
 		data += (vuMemSize - addr) / 4;
 		memcpy(VUx.Micro, data, size * 4);
 
-		if (idx)
+		if (idx && VU1Fingerprint::Enabled())
 		{
 			VU1Fingerprint::OnUpload(1, addr, VUx.Micro + addr, vuMemSize - addr);
 			VU1Fingerprint::OnUpload(1, 0, VUx.Micro, size * 4);
@@ -372,7 +372,7 @@ static __fi void _vifCode_MPG(int idx, u32 addr, const u32* data, int size)
 			CpuVU1->Clear(addr, size * 4);
 		memcpy(VUx.Micro + addr, data, size * 4); //from tests, memcpy is 1fps faster on Grandia 3 than memcpy
 
-		if (idx)
+		if (idx && VU1Fingerprint::Enabled())
 			VU1Fingerprint::OnUpload(1, addr, VUx.Micro + addr, size * 4);
 
 		vifX.tag.addr += size * 4;

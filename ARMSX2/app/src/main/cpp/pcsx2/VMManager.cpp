@@ -674,6 +674,10 @@ void VMManager::LoadCoreSettings(SettingsInterface& si)
 	// Force MTVU off when playing back GS dumps, it doesn't get used.
 	if (GSDumpReplayer::IsReplayingDump())
 		EmuConfig.Speedhacks.vuThread = false;
+#if defined(__ANDROID__)
+	else
+		EmuConfig.Speedhacks.vuThread = true;
+#endif
 }
 
 void VMManager::LoadInputBindings(SettingsInterface& si, std::unique_lock<std::mutex>& lock)
@@ -2710,7 +2714,7 @@ void VMManager::InitializeCPUProviders()
 #ifndef INTERP_VU1
 	CpuArmVU1.Reserve();
 #endif
-	// Reserve the macOS-port backends too; UpdateCPUImplementations picks per-CPU.
+	// Reserve the macOS/PCSX2 ARM64 backend used by UpdateCPUImplementations.
 	pcsx2_macrec::recCpu.Reserve();
 	pcsx2_macrec::psxRec.Reserve();
 	pcsx2_macrec::CpuMicroVU0.Reserve();
@@ -2781,37 +2785,37 @@ void VMManager::UpdateCPUImplementations()
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 #elif defined(__aarch64__) || defined(_M_ARM64)
-	// Per-CPU A/B between the original arm64 backend and the macOS-port backend
-	// (namespaced as pcsx2_macrec). UseMac* flags live in EmuConfig.Cpu.Recompiler.
+	// Android refresh now uses the macOS/PCSX2 ARM64 backend as the single
+	// recompiler path. Keep the regular Enable* toggles as rec-vs-interpreter
+	// fallbacks, but ignore legacy UseMac* A/B settings so old per-game configs
+	// cannot mix two ARM64 backends at runtime.
 #ifdef INTERP_EE
 	Cpu = &intCpu;
 #else
-	R5900cpu* eeRec = EmuConfig.Cpu.Recompiler.UseMacEE ? &pcsx2_macrec::recCpu : &recCpu;
-	Cpu = CHECK_EEREC ? eeRec : &intCpu;
+	Cpu = CHECK_EEREC ? &pcsx2_macrec::recCpu : &intCpu;
 #endif
 #ifdef INTERP_VU0
 	CpuVU0 = static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 #else
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0
-		? (EmuConfig.Cpu.Recompiler.UseMacVU0
-			? static_cast<BaseVUmicroCPU*>(&pcsx2_macrec::CpuMicroVU0)
-			: static_cast<BaseVUmicroCPU*>(&CpuArmVU0))
+		? static_cast<BaseVUmicroCPU*>(&pcsx2_macrec::CpuMicroVU0)
 		: static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 #endif
 #ifdef INTERP_VU1
 	CpuVU1 = static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 #else
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1
-		? (EmuConfig.Cpu.Recompiler.UseMacVU1
-			? static_cast<BaseVUmicroCPU*>(&pcsx2_macrec::CpuMicroVU1)
-			: static_cast<BaseVUmicroCPU*>(&CpuArmVU1))
+		? static_cast<BaseVUmicroCPU*>(&pcsx2_macrec::CpuMicroVU1)
 		: static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 #endif
 #ifdef INTERP_IOP
 	psxCpu = &psxInt;
 #else
-	R3000Acpu* iopRec = EmuConfig.Cpu.Recompiler.UseMacIOP ? &pcsx2_macrec::psxRec : &psxRec;
-	psxCpu = CHECK_IOPREC ? iopRec : &psxInt;
+	psxCpu = CHECK_IOPREC ? &pcsx2_macrec::psxRec : &psxInt;
+#endif
+#ifdef __ANDROID__
+	const bool mtvu = EmuConfig.Speedhacks.vuThread;
+	Console.WriteLnFmt("@@ANDROID_BACKEND@@ ee=mac iop=mac vu0=mac vu1=mac mtvu={}", mtvu);
 #endif
 #else
 	Cpu = &intCpu;
@@ -3679,6 +3683,21 @@ static u64 ClusterAffinityMaskForOSId(u32 os_id)
 	return mask;
 }
 
+static u32 ProcessorClusterId(const cpuinfo_processor* proc)
+{
+	return (proc && proc->cluster) ? proc->cluster->cluster_id : 0;
+}
+
+static u64 ProcessorCoreFrequency(const cpuinfo_processor* proc)
+{
+	return (proc && proc->core) ? proc->core->frequency : 0;
+}
+
+static u64 ProcessorClusterFrequency(const cpuinfo_processor* proc)
+{
+	return (proc && proc->cluster) ? proc->cluster->frequency : 0;
+}
+
 static void InitializeProcessorList()
 {
 	if (!cpuinfo_initialize())
@@ -3705,7 +3724,17 @@ static void InitializeProcessorList()
 	// Prioritize faster cores in heterogeneous CPUs.
 	std::sort(processors.begin(), processors.end(),
 		[](const cpuinfo_processor* lhs, const cpuinfo_processor* rhs) {
-			return (lhs->core->frequency > rhs->core->frequency);
+			const u64 lhs_cluster_freq = ProcessorClusterFrequency(lhs);
+			const u64 rhs_cluster_freq = ProcessorClusterFrequency(rhs);
+			if (lhs_cluster_freq != rhs_cluster_freq)
+				return lhs_cluster_freq > rhs_cluster_freq;
+
+			const u64 lhs_core_freq = ProcessorCoreFrequency(lhs);
+			const u64 rhs_core_freq = ProcessorCoreFrequency(rhs);
+			if (lhs_core_freq != rhs_core_freq)
+				return lhs_core_freq > rhs_core_freq;
+
+			return GetProcessorIdForProcessor(lhs) > GetProcessorIdForProcessor(rhs);
 		});
 
 	SmallString str;
@@ -3716,6 +3745,15 @@ static void InitializeProcessorList()
 		const u32 proc_id = GetProcessorIdForProcessor(proc);
 		str.append_format("{}{}", (proc == processors.front()) ? "" : ", ", proc_id);
 		s_processor_list.push_back(proc_id);
+		Console.WriteLnFmt("@@ANDROID_CPUINFO@@ os={} cluster={} cluster_freq={} core={} core_freq={} smt={} cluster_start={} cluster_count={}",
+			proc_id,
+			ProcessorClusterId(proc),
+			ProcessorClusterFrequency(proc),
+			proc->core ? proc->core->core_id : 0,
+			ProcessorCoreFrequency(proc),
+			proc->smt_id,
+			proc->cluster ? proc->cluster->processor_start : 0,
+			proc->cluster ? proc->cluster->processor_count : 0);
 	}
 	Console.WriteLn(str.view());
 
@@ -3858,13 +3896,30 @@ void VMManager::SetEmuThreadAffinities()
 	const u32 gs_index = s_processor_list[mtvu ? 2 : 1];
 	INFO_LOG("Processor order assignment: EE={}, VU={}, GS={}", ee_index, vu_index, gs_index);
 
+#ifdef __ANDROID__
+	const u64 ee_single_affinity = static_cast<u64>(1) << ee_index;
+	const u64 vu_single_affinity = static_cast<u64>(1) << vu_index;
+	const u64 gs_single_affinity = static_cast<u64>(1) << gs_index;
+	const u64 performance_cluster_affinity =
+		ClusterAffinityMaskForOSId(ee_index) |
+		(mtvu ? ClusterAffinityMaskForOSId(vu_index) : 0) |
+		ClusterAffinityMaskForOSId(gs_index);
+	const u64 ee_affinity = performance_cluster_affinity ? performance_cluster_affinity : ee_single_affinity;
+	const u64 vu_affinity = performance_cluster_affinity ? performance_cluster_affinity : vu_single_affinity;
+	const u64 gs_affinity = performance_cluster_affinity ? performance_cluster_affinity : gs_single_affinity;
+	Console.WriteLnFmt("@@ANDROID_AFFINITY@@ mode={} ee_pick={} vu_pick={} gs_pick={} ee_mask=0x{:x} vu_mask=0x{:x} gs_mask=0x{:x}",
+		performance_cluster_affinity ? "performance_cluster" : "single_core",
+		ee_index, vu_index, gs_index, ee_affinity, vu_affinity, gs_affinity);
+#else
 	const u64 ee_affinity = static_cast<u64>(1) << ee_index;
+	const u64 vu_affinity = static_cast<u64>(1) << vu_index;
+	const u64 gs_affinity = static_cast<u64>(1) << gs_index;
+#endif
 	INFO_LOG("  EE thread is on processor {} (0x{:x})", ee_index, ee_affinity);
 	s_vm_thread_handle.SetAffinity(ee_affinity);
 
 	if (EmuConfig.Speedhacks.vuThread)
 	{
-		const u64 vu_affinity = static_cast<u64>(1) << vu_index;
 		INFO_LOG("  VU thread is on processor {} (0x{:x})", vu_index, vu_affinity);
 		vu1Thread.GetThreadHandle().SetAffinity(vu_affinity);
 	}
@@ -3873,9 +3928,15 @@ void VMManager::SetEmuThreadAffinities()
 		vu1Thread.GetThreadHandle().SetAffinity(0);
 	}
 
-	const u64 gs_affinity = static_cast<u64>(1) << gs_index;
 	INFO_LOG("  GS thread is on processor {} (0x{:x})", gs_index, gs_affinity);
 	MTGS::GetThreadHandle().SetAffinity(gs_affinity);
+
+#ifdef __ANDROID__
+	Console.WriteLnFmt("@@ANDROID_PRIORITY@@ ee={} vu={} gs={}",
+		s_vm_thread_handle.SetNicePriority(-2),
+		EmuConfig.Speedhacks.vuThread ? vu1Thread.GetThreadHandle().SetNicePriority(-2) : false,
+		MTGS::GetThreadHandle().SetNicePriority(-1));
+#endif
 
 	// Try to find some threads for the software renderer.
 	// They should be in the same cluster as the main GS thread. If they're not, for example,
