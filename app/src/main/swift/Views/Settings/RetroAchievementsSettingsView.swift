@@ -131,9 +131,9 @@ struct RetroAchievementsSettingsView: View {
                 } header: {
                     Text(settings.localized("Modes"))
                 } footer: {
-                    Text(settings.localized(hardcoreSupported ?
-                        "Hardcore blocks cheat engines, PNACH cheat imports, slowdown, frame advance, and save-state loading. Turning Hardcore on during a running game applies after a full reset." :
-                        "Hardcore mode is hidden until RetroAchievements approval is complete."))
+                    if hardcoreSupported {
+                        Text(settings.localized("Hardcore blocks cheat engines, PNACH cheat imports, slowdown, frame advance, and save-state loading. Turning Hardcore on during a running game applies after a full reset."))
+                    }
                 }
 
                 Section(settings.localized("Current Game")) {

@@ -457,7 +457,7 @@ static dispatch_queue_t ARMSX2RetroAchievementsQueue()
 }
 
 static constexpr bool ARMSX2RetroAchievementsAvailable = true;
-static constexpr bool ARMSX2RetroAchievementsHardcoreAvailable = true;
+static constexpr bool ARMSX2RetroAchievementsHardcoreAvailable = false;
 
 static NSString* ARMSX2RetroAchievementsUnavailableMessage()
 {
