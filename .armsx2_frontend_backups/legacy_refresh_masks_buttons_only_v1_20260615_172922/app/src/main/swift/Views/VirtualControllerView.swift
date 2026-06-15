@@ -822,161 +822,6 @@ struct ActionButtonsView: View {
     }
 }
 
-
-// [ARMSX2] Refresh Legacy PNG masks applied to real virtual buttons only.
-//
-// Buttons-only version: this does NOT touch PadLayoutEditView.swift.
-// The real virtual-pad buttons use the alpha channel of the bundled
-// ARMSX2 Refresh Legacy PNG assets as their interaction geometry:
-//
-//   app/src/main/assets/app_icons/controller_skins/legacy_refresh/*.png
-//
-// This is the same mask source used by the legacy-refresh editor geometry script,
-// but here it is applied to the actual buttons/touch surfaces instead of the editor.
-private final class ARMSX2LegacyAlphaBitmap {
-    let width: Int
-    let height: Int
-    let alpha: [UInt8]
-
-    init?(image: UIImage) {
-        guard let cgImage = image.cgImage else { return nil }
-        width = cgImage.width
-        height = cgImage.height
-        guard width > 0, height > 0 else { return nil }
-
-        var rgba = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(
-            data: &rgba,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return nil
-        }
-
-        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        var a = [UInt8](repeating: 0, count: width * height)
-        for i in 0..<(width * height) {
-            a[i] = rgba[i * 4 + 3]
-        }
-        alpha = a
-    }
-
-    func containsUnitPoint(x unitX: CGFloat, y unitY: CGFloat, threshold: UInt8 = 18) -> Bool {
-        guard unitX >= 0, unitX <= 1, unitY >= 0, unitY <= 1 else { return false }
-        let px = min(max(Int(unitX * CGFloat(width)), 0), width - 1)
-        let py = min(max(Int(unitY * CGFloat(height)), 0), height - 1)
-        return alpha[py * width + px] > threshold
-    }
-}
-
-private final class ARMSX2LegacyMaskedButton: UIButton {
-    var maskButton: ARMSX2PadButton = .select {
-        didSet {
-            if oldValue != maskButton {
-                alphaBitmap = nil
-            }
-        }
-    }
-
-    // The visible button can sit inside a larger SwiftUI frame. The hit-test must
-    // use the visible button size, not the expanded frame. Example: SELECT remains
-    // 40x22 even if the container is wider/taller.
-    var maskVisualSize: CGSize = .zero
-
-    private var alphaBitmap: ARMSX2LegacyAlphaBitmap?
-
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        guard bounds.contains(point), bounds.width > 0, bounds.height > 0 else {
-            return false
-        }
-
-        guard let image = ControllerAsset.image(named: ControllerAsset.fileName(for: maskButton), skin: .legacyRefresh) else {
-            return super.point(inside: point, with: event)
-        }
-
-        if alphaBitmap == nil {
-            alphaBitmap = ARMSX2LegacyAlphaBitmap(image: image)
-        }
-
-        guard let bitmap = alphaBitmap else {
-            return super.point(inside: point, with: event)
-        }
-
-        let visualSize = CGSize(
-            width: maskVisualSize.width > 0 ? min(maskVisualSize.width, bounds.width) : bounds.width,
-            height: maskVisualSize.height > 0 ? min(maskVisualSize.height, bounds.height) : bounds.height
-        )
-
-        let visualRect = CGRect(
-            x: bounds.midX - visualSize.width / 2,
-            y: bounds.midY - visualSize.height / 2,
-            width: visualSize.width,
-            height: visualSize.height
-        )
-
-        guard visualRect.contains(point), image.size.width > 0, image.size.height > 0 else {
-            return false
-        }
-
-        // Match SwiftUI .scaledToFit() inside the visual button rectangle.
-        let scale = min(visualRect.width / image.size.width, visualRect.height / image.size.height)
-        let fitted = CGRect(
-            x: visualRect.midX - image.size.width * scale / 2,
-            y: visualRect.midY - image.size.height * scale / 2,
-            width: image.size.width * scale,
-            height: image.size.height * scale
-        )
-
-        guard fitted.contains(point), fitted.width > 0, fitted.height > 0 else {
-            return false
-        }
-
-        let unitX = (point.x - fitted.minX) / fitted.width
-        let unitY = (point.y - fitted.minY) / fitted.height
-        return bitmap.containsUnitPoint(x: unitX, y: unitY)
-    }
-}
-
-private struct ARMSX2LegacyMaskPressEffect: View {
-    let button: ARMSX2PadButton
-    let color: Color
-    let isPressed: Bool
-    let opacity: Double
-
-    var body: some View {
-        if isPressed,
-           let image = ControllerAsset.image(named: ControllerAsset.fileName(for: button), skin: .legacyRefresh) {
-            Image(uiImage: image)
-                .resizable()
-                .renderingMode(.template)
-                .interpolation(.high)
-                .antialiased(true)
-                .scaledToFit()
-                .foregroundStyle(color.opacity(0.34 * opacity))
-                .overlay {
-                    Image(uiImage: image)
-                        .resizable()
-                        .renderingMode(.template)
-                        .interpolation(.high)
-                        .antialiased(true)
-                        .scaledToFit()
-                        .foregroundStyle(color.opacity(0.42 * opacity))
-                        .blendMode(.plusLighter)
-                }
-                .shadow(color: color.opacity(0.42 * opacity), radius: 9)
-                .scaleEffect(0.92)
-                .animation(.easeOut(duration: 0.06), value: isPressed)
-        }
-    }
-}
-// [/ARMSX2] Refresh Legacy PNG masks applied to real virtual buttons only.
-
 private struct ControllerPressEffect<S: InsettableShape>: View {
     let shape: S
     let color: Color
@@ -1001,23 +846,17 @@ private struct ControllerPressEffect<S: InsettableShape>: View {
 }
 
 private func ARMSX2UsesUIKitPadPressSurface() -> Bool {
-    // Required for ARMSX2 Refresh Legacy alpha-mask button geometry.
-    // The SwiftUI fallback only has rectangular contentShape support here.
-    true
+    ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27
 }
 
 @MainActor
 private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     let content: Content
     let onPress: (Bool) -> Void
-    let maskButton: ARMSX2PadButton
-    let maskVisualSize: CGSize
 
-    init(onPress: @escaping (Bool) -> Void, maskButton: ARMSX2PadButton, maskVisualSize: CGSize, @ViewBuilder content: () -> Content) {
+    init(onPress: @escaping (Bool) -> Void, @ViewBuilder content: () -> Content) {
         self.content = content()
         self.onPress = onPress
-        self.maskButton = maskButton
-        self.maskVisualSize = maskVisualSize
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1025,9 +864,7 @@ private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIButton {
-        let button = ARMSX2LegacyMaskedButton(type: .custom)
-        button.maskButton = maskButton
-        button.maskVisualSize = maskVisualSize
+        let button = UIButton(type: .custom)
         button.backgroundColor = .clear
         button.isExclusiveTouch = false
 
@@ -1050,10 +887,6 @@ private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIButton, context: Context) {
-        if let masked = uiView as? ARMSX2LegacyMaskedButton {
-            masked.maskButton = maskButton
-            masked.maskVisualSize = maskVisualSize
-        }
         context.coordinator.onPress = onPress
         context.coordinator.hostingController.rootView = content
     }
@@ -1101,7 +934,7 @@ struct PSBtn: View {
     var body: some View {
         if ARMSX2UsesUIKitPadPressSurface() {
             ZStack {
-                UIKitPadPressSurface(onPress: updatePressed, maskButton: btn, maskVisualSize: CGSize(width: sz, height: sz)) {
+                UIKitPadPressSurface(onPress: updatePressed) {
                     buttonFace
                         .frame(width: sz, height: sz)
                 }
@@ -1131,7 +964,7 @@ struct PSBtn: View {
                 .fill(.clear)
 
             if !padUsesFullSkin || on {
-                ARMSX2LegacyMaskPressEffect(button: btn, color: clr, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+                ControllerPressEffect(shape: Circle(), color: clr, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
             }
 
             if !padUsesFullSkin {
@@ -1176,7 +1009,7 @@ struct PadBtn: View {
     var body: some View {
         if ARMSX2UsesUIKitPadPressSurface() {
             ZStack {
-                UIKitPadPressSurface(onPress: updatePressed, maskButton: btn, maskVisualSize: CGSize(width: w, height: h)) {
+                UIKitPadPressSurface(onPress: updatePressed) {
                     buttonFace
                         .frame(width: w, height: h)
                 }
@@ -1207,7 +1040,7 @@ struct PadBtn: View {
                 .fill(.clear)
 
             if !padUsesFullSkin || on {
-                ARMSX2LegacyMaskPressEffect(button: btn, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+                ControllerPressEffect(shape: shape, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
             }
 
             if !padUsesFullSkin {
