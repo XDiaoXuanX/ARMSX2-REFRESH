@@ -17,6 +17,7 @@
 #include "common/ZipHelpers.h"
 #include "pcsx2/GS.h"
 #include "pcsx2/VMManager.h"
+#include "pcsx2/Patch.h"
 #include "pcsx2/R5900.h"
 #include "PerformanceMetrics.h"
 #include "GameList.h"
@@ -335,6 +336,13 @@ extern "C"
 JNIEXPORT jstring JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_getGameSerial(JNIEnv *env, jclass clazz) {
     std::string ret = VMManager::GetDiscSerial();
+    return env->NewStringUTF(ret.c_str());
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getGameCRC(JNIEnv *env, jclass clazz) {
+    std::string ret = StringUtil::StdStringFromFormat("%08X", VMManager::GetCurrentCRC());
     return env->NewStringUTF(ret.c_str());
 }
 
@@ -850,6 +858,25 @@ Java_kr_co_iefriends_pcsx2_NativeApp_commitSettings(JNIEnv *env, jclass clazz) {
         +EmuConfig.Speedhacks.vu1Instant,
         +EmuConfig.Speedhacks.fastCDVD,
         +EmuConfig.Speedhacks.vuFlagHack);
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_reloadPatches(JNIEnv *env, jclass clazz) {
+    if (!VMManager::HasValidVM())
+        return static_cast<jint>(Patch::GetActiveCheatsCount());
+
+    ScopedVMPause vm_pause;
+    if (!vm_pause.parked())
+    {
+        Console.WriteLn("@@ANDROID_PNACH@@ reload skipped: cpu_not_parked");
+        return -1;
+    }
+
+    VMManager::ReloadPatches(true, true, true, true);
+    const u32 active_cheats = Patch::GetActiveCheatsCount();
+    Console.WriteLnFmt("@@ANDROID_PNACH@@ reload active_cheats={}", active_cheats);
+    return static_cast<jint>(active_cheats);
 }
 
 extern "C"
@@ -2043,17 +2070,15 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runEeSeqTests(JNIEnv*, jclass) { RunEeSeqTe
 // list scanner to attach real game IDs to entries (instead of guessing
 // from filenames).
 //
-// Handles three on-disk sector layouts so .iso (DVD-style 2048-byte data
-// sectors) and .bin (raw CD-format 2352-byte sectors, typical for older
-// CD-ROM-format PS2 games) both work:
+// Handles multiple on-disk sector layouts so .iso (DVD-style 2048-byte data
+// sectors), .bin/raw CD images, and CHDs all work:
 //
 //   2048 / 0    plain ISO — every byte is data
 //   2352 / 16   Mode 1 raw — 12 byte sync, 4 byte header, 2048 data, 288 ECC
 //   2352 / 24   Mode 2 Form 1 raw — 16 sync+header, 8 subheader, 2048 data, 280 ECC
 //
-// We try them in order and the first one that finds a valid PVD wins.
-// CHD / CSO / GZ remain unsupported (they need libchdr / libuu1 / libz);
-// those formats fall back to filename parsing on the Kotlin side.
+// We try them in order and the first one that finds a valid PVD wins. CSO/ZSO
+// and GZ still fall back to filename parsing on the Kotlin side.
 //
 // fd ownership: consumed (closed via fclose on the wrapping FILE*),
 // matching the IsBIOSFromFd contract.
@@ -2067,10 +2092,11 @@ namespace {
 using DiscReader = std::function<bool(std::uint32_t lba, std::uint32_t skip, void* buf, std::size_t size)>;
 
 // FILE*-backed reader for plain ISO (2048/0) and raw .bin (2352/16, 2352/24).
-static DiscReader MakeFileReader(std::FILE* fp, std::uint32_t sectorSize, std::uint32_t dataOffset)
+static DiscReader MakeFileReader(std::FILE* fp, std::uint32_t sectorSize,
+    std::uint32_t dataOffset, std::uint64_t byteBase = 0)
 {
-    return [fp, sectorSize, dataOffset](std::uint32_t lba, std::uint32_t skip, void* buf, std::size_t size) -> bool {
-        const std::uint64_t off = static_cast<std::uint64_t>(lba) * sectorSize + dataOffset + skip;
+    return [fp, sectorSize, dataOffset, byteBase](std::uint32_t lba, std::uint32_t skip, void* buf, std::size_t size) -> bool {
+        const std::uint64_t off = byteBase + static_cast<std::uint64_t>(lba) * sectorSize + dataOffset + skip;
         if (std::fseek(fp, static_cast<long>(off), SEEK_SET) != 0) return false;
         return std::fread(buf, 1, size, fp) == size;
     };
@@ -2081,11 +2107,11 @@ static DiscReader MakeFileReader(std::FILE* fp, std::uint32_t sectorSize, std::u
 // rebuilt cheaply across layout retries).
 static DiscReader MakeChdReader(chd_file* chd, std::uint32_t hunkBytes,
     std::vector<std::uint8_t>& hunkBuf, std::int64_t& cachedHunk,
-    std::uint32_t sectorSize, std::uint32_t dataOffset)
+    std::uint32_t sectorSize, std::uint32_t dataOffset, std::uint64_t byteBase = 0)
 {
-    return [chd, hunkBytes, &hunkBuf, &cachedHunk, sectorSize, dataOffset](
+    return [chd, hunkBytes, &hunkBuf, &cachedHunk, sectorSize, dataOffset, byteBase](
                std::uint32_t lba, std::uint32_t skip, void* buf, std::size_t size) -> bool {
-        std::uint64_t byte_off = static_cast<std::uint64_t>(lba) * sectorSize + dataOffset + skip;
+        std::uint64_t byte_off = byteBase + static_cast<std::uint64_t>(lba) * sectorSize + dataOffset + skip;
         auto* dst = static_cast<std::uint8_t*>(buf);
         std::size_t left = size;
         while (left > 0)
@@ -2227,6 +2253,31 @@ static std::string ProbeSerialWithReader(const DiscReader& read)
     return std::string(platform) + ":" + serial;
 }
 
+template <typename ReaderFactory>
+static std::string ProbeSerialWithLeadIns(std::uint32_t sectorSize, const ReaderFactory& makeReader)
+{
+    constexpr std::uint64_t NERO_LEAD_IN_BYTES = 150ull * 2048ull;
+    const std::uint64_t leadIns[] = {
+        0,
+        NERO_LEAD_IN_BYTES,
+        150ull * static_cast<std::uint64_t>(sectorSize),
+    };
+
+    std::uint64_t lastLeadIn = static_cast<std::uint64_t>(-1);
+    for (std::uint64_t leadIn : leadIns)
+    {
+        if (leadIn == lastLeadIn)
+            continue;
+        lastLeadIn = leadIn;
+
+        std::string serial = ProbeSerialWithReader(makeReader(leadIn));
+        if (!serial.empty())
+            return serial;
+    }
+
+    return {};
+}
+
 // Minimal core_file wrapper around an existing FILE*. libchdr only needs
 // fsize/fread/fseek/fclose; we hand-roll them to avoid bringing in the
 // emulator's heavyweight ChdCoreFileWrapper (which deals with parents and
@@ -2335,9 +2386,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getGameSerialFromFd(JNIEnv* env, jclass, ji
             // wins.
             auto tryLayout = [&](std::uint32_t sectorSize, std::uint32_t dataOffset) {
                 if (!serial.empty()) return;
-                cached_hunk = -1; // forget the previous attempt's hunk
-                auto reader = MakeChdReader(chd, hunk_bytes, hunk_buf, cached_hunk, sectorSize, dataOffset);
-                serial = ProbeSerialWithReader(reader);
+                serial = ProbeSerialWithLeadIns(sectorSize, [&](std::uint64_t byteBase) {
+                    cached_hunk = -1; // forget the previous attempt's hunk
+                    return MakeChdReader(chd, hunk_bytes, hunk_buf, cached_hunk,
+                        sectorSize, dataOffset, byteBase);
+                });
             };
 
             tryLayout(unit_bytes, 0);
@@ -2365,10 +2418,21 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getGameSerialFromFd(JNIEnv* env, jclass, ji
         // Plain ISO / raw .bin path. .iso files are virtually always
         // 2048/0; .bin files are usually 2352/16 (Mode 1 raw); 2352/24
         // (Mode 2 Form 1) is rare on PS2 but cheap to try as a last
-        // resort.
-        if (serial.empty()) serial = ProbeSerialWithReader(MakeFileReader(fp, 2048, 0));
-        if (serial.empty()) serial = ProbeSerialWithReader(MakeFileReader(fp, 2352, 16));
-        if (serial.empty()) serial = ProbeSerialWithReader(MakeFileReader(fp, 2352, 24));
+        // resort. Try PCSX2's 150-sector/Nero-style lead-in variants too,
+        // since some CD-format games otherwise hide their PVD from the
+        // lightweight scanner.
+        if (serial.empty()) serial = ProbeSerialWithLeadIns(2048, [&](std::uint64_t byteBase) {
+            return MakeFileReader(fp, 2048, 0, byteBase);
+        });
+        if (serial.empty()) serial = ProbeSerialWithLeadIns(2352, [&](std::uint64_t byteBase) {
+            return MakeFileReader(fp, 2352, 16, byteBase);
+        });
+        if (serial.empty()) serial = ProbeSerialWithLeadIns(2352, [&](std::uint64_t byteBase) {
+            return MakeFileReader(fp, 2352, 24, byteBase);
+        });
+        if (serial.empty()) serial = ProbeSerialWithLeadIns(2448, [&](std::uint64_t byteBase) {
+            return MakeFileReader(fp, 2448, 24, byteBase);
+        });
         std::fclose(fp);
     }
 

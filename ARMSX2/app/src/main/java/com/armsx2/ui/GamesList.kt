@@ -70,6 +70,10 @@ import kr.co.iefriends.pcsx2.NativeApp
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -164,11 +168,12 @@ object GamesList {
 
     /** Sorted "|" join so ["A","B"] and ["B","A"] produce the same key.
      *  We dedupe within the user's selection in case they accidentally
-     *  pick the same folder twice. The "|v2" suffix invalidates legacy
+     *  pick the same folder twice. The "|v3" suffix invalidates legacy
      *  caches that were built before .img/.mdf/.nrg/.dump were probed for
-     *  serials — bump again any time the probe coverage changes. */
+     *  serials and before DMC2 Dante/Lucia filename fallback landed — bump
+     *  again any time the probe coverage changes. */
     private fun cacheKeyForDirs(dirs: List<String>): String =
-        dirs.toSet().sorted().joinToString("|") + "|v2"
+        dirs.toSet().sorted().joinToString("|") + "|v3"
 
     @Composable
     private fun LibraryScreen(context: Context, romsDirs: List<String>, romsKey: String) {
@@ -942,6 +947,15 @@ object GamesList {
         ) {
             val coverUrl = game.coverUrl
             if (coverUrl != null) {
+                val coverFile = remember(game.serial, game.platform) { coverFileFor(context, game) }
+                val localCoverReady = remember(coverFile?.absolutePath) {
+                    mutableStateOf(coverFile?.let { it.exists() && it.length() > 0L } == true)
+                }
+                LaunchedEffect(coverUrl, coverFile?.absolutePath) {
+                    if (!localCoverReady.value && coverFile != null) {
+                        localCoverReady.value = mirrorCoverToFile(coverUrl, coverFile)
+                    }
+                }
                 // SubcomposeAsyncImage so we can render a real fallback
                 // composable when the cover URL 404s — happens for any
                 // game the xlenore covers repo doesn't have (obscure
@@ -959,9 +973,10 @@ object GamesList {
                     GamePlatform.PS2 -> ContentScale.Crop
                     GamePlatform.PS1 -> ContentScale.Fit
                 }
+                val coverModel: Any = if (localCoverReady.value && coverFile != null) coverFile else coverUrl
                 SubcomposeAsyncImage(
                     model = ImageRequest.Builder(context)
-                        .data(coverUrl)
+                        .data(coverModel)
                         .crossfade(true)
                         .build(),
                     contentDescription = "${game.title} cover",
@@ -974,6 +989,55 @@ object GamesList {
             } else {
                 NoCoverTile(missingSerial = true)
             }
+        }
+    }
+
+    private fun coverFileFor(context: Context, game: GameInfo): File? {
+        val serial = game.serial ?: return null
+        val coversDir = File(Main.assetCopyRoot(context), "covers")
+        return File(coversDir, "$serial.jpg")
+    }
+
+    private suspend fun mirrorCoverToFile(url: String, target: File): Boolean = withContext(Dispatchers.IO) {
+        if (target.exists() && target.length() > 0L)
+            return@withContext true
+
+        val parent = target.parentFile ?: return@withContext false
+        if (!parent.exists() && !parent.mkdirs())
+            return@withContext false
+
+        val tmp = File(parent, ".${target.name}.${System.nanoTime()}.tmp")
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10_000
+                readTimeout = 15_000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "ARMSX2 Android")
+            }
+            if (conn.responseCode !in 200..299)
+                return@withContext false
+
+            conn.inputStream.use { input ->
+                tmp.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            if (tmp.length() <= 0L)
+                return@withContext false
+
+            if (target.exists() && !target.delete())
+                return@withContext false
+            if (!tmp.renameTo(target)) {
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+            target.exists() && target.length() > 0L
+        } catch (_: Exception) {
+            false
+        } finally {
+            tmp.delete()
+            conn?.disconnect()
         }
     }
 

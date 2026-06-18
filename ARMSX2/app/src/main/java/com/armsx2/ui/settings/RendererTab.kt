@@ -38,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.abs
 
 /**
  * Renderer section of the in-game settings overlay.
@@ -49,6 +50,23 @@ import java.io.File
  * uses a narrow native GS helper so it can visibly apply while a game is live
  * without running the full settings commit path.
  */
+private data class UpscaleOption(val value: Float, val label: String)
+
+private val UPSCALE_OPTIONS = listOf(
+    UpscaleOption(1.0f, "Native"),
+    UpscaleOption(1.25f, "1.25x"),
+    UpscaleOption(1.5f, "1.5x"),
+    UpscaleOption(1.75f, "1.75x"),
+    UpscaleOption(2.0f, "2x"),
+    UpscaleOption(2.25f, "2.25x"),
+    UpscaleOption(2.5f, "2.5x"),
+    UpscaleOption(2.75f, "2.75x"),
+    UpscaleOption(3.0f, "3x"),
+    UpscaleOption(3.5f, "3.5x"),
+    UpscaleOption(4.0f, "4x"),
+    UpscaleOption(5.0f, "5x"),
+)
+
 @Composable
 fun RendererTab(state: MutableState<Settings>) {
     val s = state.value
@@ -65,17 +83,20 @@ fun RendererTab(state: MutableState<Settings>) {
         // from the removed first-run setup renderer page into settings.
         RendererBackendSection()
         SettingsDivider()
-        IntSliderRow(
+        val upscaleIndex = UPSCALE_OPTIONS
+            .indexOfFirst { abs(it.value - Main.upscale.value) < 0.01f }
+            .takeIf { it >= 0 } ?: 0
+        SegmentedGridRow(
             label = "Upscale",
-            value = Main.upscale.value,
-            min = 1,
-            max = 5,
-            valueFormatter = { mult -> "${mult}x  ${640 * mult}×${448 * mult}" },
-            onChange = { mult ->
-                if (Main.upscale.value != mult) {
+            options = UPSCALE_OPTIONS.map { it.label },
+            selectedIndex = upscaleIndex,
+            columns = 4,
+            onChange = { index ->
+                val mult = UPSCALE_OPTIONS[index].value
+                if (abs(Main.upscale.value - mult) >= 0.01f) {
                     Main.upscale.value = mult
-                    Main.prefs.edit().putInt("upscale", mult).apply()
-                    NativeApp.renderUpscalemultiplier(mult.toFloat())
+                    Main.prefs.edit().putFloat("upscaleFloat", mult).apply()
+                    NativeApp.renderUpscalemultiplier(mult)
                 }
             },
         )

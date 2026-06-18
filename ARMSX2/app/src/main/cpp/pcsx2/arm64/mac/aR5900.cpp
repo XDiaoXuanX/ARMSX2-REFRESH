@@ -396,6 +396,7 @@ enum : u32
 
 // Defined below (block-compile helpers) — used by recTranslateOp's COP2 inline path.
 static void recEmitInterpInline(u32 op);
+static void recEmitDirectInterpCall(u32 op, const void* fn);
 static void recEmitVU0FinishForCOP2();
 static bool recTranslateOp(u32 op);
 
@@ -2268,7 +2269,11 @@ static bool recTranslateOp(u32 op)
 			// but not finish) still need the finish emitted here.
 			if (rs < 0x10 && !(cpuRegs.code & 1)) // non-interlocked transfer
 				recEmitVU0FinishForCOP2();
-			recEmitInterpInline(op);
+			// Direct dispatch: COP2() just does Int_COP2PrintTable[_Rs_](), so call that
+			// handler directly (resolved now) instead of routing through the thunk +
+			// GetInstruction + COP2() at runtime. rs>=0x10 -> COP2_SPECIAL (does its own
+			// finish); rs in {1,2,5,6} -> QMFC2/CFC2/QMTC2/CTC2. Identical semantics.
+			recEmitDirectInterpCall(op, reinterpret_cast<const void*>(::Int_COP2PrintTable[rs]));
 			return true;
 
 		// COP2 quadword load/store (VF[rt] ↔ memory). Straight-line, no PC write —
@@ -2276,8 +2281,10 @@ static bool recTranslateOp(u32 op)
 		// interlock bit (bit 0 is immediate data), and the handler only vu0Sync()s, so
 		// always force the finish: SQC2 reads a VF; LQC2 for symmetry, matching x86
 		// recLQC2/recSQC2 which sync/finish via the same analysis.
-		case OP_LQC2: recEmitVU0FinishForCOP2(); recEmitInterpInline(op); return true;
-		case OP_SQC2: recEmitVU0FinishForCOP2(); recEmitInterpInline(op); return true;
+		// LQC2/SQC2 are top-level opcodes whose runtime dispatch resolves straight to the
+		// LQC2/SQC2 handler, so call it directly (skip the thunk + GetInstruction).
+		case OP_LQC2: recEmitVU0FinishForCOP2(); recEmitDirectInterpCall(op, reinterpret_cast<const void*>(R5900::GetInstruction(op).interpret)); return true;
+		case OP_SQC2: recEmitVU0FinishForCOP2(); recEmitDirectInterpCall(op, reinterpret_cast<const void*>(R5900::GetInstruction(op).interpret)); return true;
 
 		// CACHE — fully emulated (Cache.cpp doCacheHitOp) but straight-line and writes no
 		// GPR (only CP0.TagLo for the tag variants). Inline-interpret to keep it in-block;
@@ -2835,6 +2842,20 @@ static void recEmitInterpInline(u32 op)
 {
 	armAsm->Mov(RWARG1, op);
 	armEmitCall(reinterpret_cast<const void*>(recInterpInlineThunk));
+}
+
+// Like recEmitInterpInline, but calls a compile-time-resolved interpreter handler
+// directly instead of routing through recInterpInlineThunk -> GetInstruction(op) ->
+// COP2() -> Int_COP2PrintTable[rs] at runtime. Semantically identical (same handler,
+// same cpuRegs.code), it just removes that per-op dispatch chain — used for the hot
+// COP2 / LQC2 / SQC2 ops. `fn` must be the exact handler the runtime dispatch would
+// reach for `op`.
+static void recEmitDirectInterpCall(u32 op, const void* fn)
+{
+	armAsm->Mov(RWARG1, op);                            // w0 = op
+	armMoveAddressToReg(RSCRATCHADDR, &cpuRegs.code);   // x17 = &cpuRegs.code
+	armAsm->Str(RWARG1, a64::MemOperand(RSCRATCHADDR)); // cpuRegs.code = op
+	armEmitCall(fn);
 }
 
 // VU0 micro/macro finish for COP2 ops — emit x86's mVUFinishVU0

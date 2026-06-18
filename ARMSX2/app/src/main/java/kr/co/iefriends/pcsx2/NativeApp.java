@@ -90,8 +90,10 @@ public class NativeApp {
 	 * the UI layer should flag those.
 	 */
 	public static native void commitSettings();
+	public static native int reloadPatches();
 	public static native String getGameTitle(String path);
 	public static native String getGameSerial();
+	public static native String getGameCRC();
 	public static native float getFPS();
 
 	/** Build version string from BuildVersion::GitRev — formatted as
@@ -260,8 +262,8 @@ public class NativeApp {
 	/**
 	 * Read enough of a PS2 disc image to extract its serial (e.g.
 	 * "SLUS-20312"). Walks the ISO9660 directory to find SYSTEM.CNF and
-	 * parses the BOOT2 line. Only handles 2048-byte-sector ISOs today —
-	 * CHD/CSO/etc. return null and the caller falls back to filename
+	 * parses the BOOT2 line. Handles flat ISO/raw-sector images and CHDs;
+	 * CSO/ZSO/GZ still return null and the caller falls back to filename
 	 * parsing. fd is consumed (closed by native).
 	 */
 	public static native String getGameSerialFromFd(int fd);

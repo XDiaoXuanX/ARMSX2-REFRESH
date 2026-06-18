@@ -768,10 +768,10 @@ object SetupImpl {
             contentAlignment = Alignment.Center,
         ) {
             val artRatio = 1440f / 3120f
-            // Page-1 background: the PS-symbol wallpaper fills the whole
-            // screen, including the side gutters around the centered portrait
-            // welcome card in landscape. Only the first setup screen uses it;
-            // page 2 keeps its original dark dashboard.
+            if (maxWidth > maxHeight) {
+                LandscapePowerWelcome(onPower)
+                return@BoxWithConstraints
+            }
             Image(
                 painter = painterResource(id = R.drawable.setup_aero_bg),
                 contentDescription = null,
@@ -802,6 +802,39 @@ object SetupImpl {
                         .clickable(onClick = onPower),
                 )
             }
+        }
+    }
+
+    @Composable
+    private fun LandscapePowerWelcome(onPower: () -> Unit) {
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.TopStart,
+        ) {
+            val frameRatio = 1920f / 1080f
+            val screenRatio = maxWidth.value / maxHeight.value
+            val renderedWidth = if (screenRatio > frameRatio) maxWidth else maxHeight * frameRatio
+            val renderedHeight = if (screenRatio > frameRatio) maxWidth / frameRatio else maxHeight
+            val renderedX = (maxWidth - renderedWidth) / 2f
+            val renderedY = (maxHeight - renderedHeight) / 2f
+            Image(
+                painter = painterResource(id = R.drawable.setup_welcome_landscape),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+            Box(
+                modifier = Modifier
+                    .offset(
+                        x = renderedX + renderedWidth * (1240f / 1920f),
+                        y = renderedY + renderedHeight * (625f / 1080f),
+                    )
+                    .size(
+                        width = renderedWidth * (260f / 1920f),
+                        height = renderedHeight * (274f / 1080f),
+                    )
+                    .clickable(onClick = onPower),
+            )
         }
     }
 

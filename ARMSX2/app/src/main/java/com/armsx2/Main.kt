@@ -220,10 +220,10 @@ class Main: ComponentActivity() {
         // picks at runtime per device. The setup wizard no longer asks; the
         // in-game overlay's Renderer tab is where users override (OpenGL /
         // Software cycle, plus Mali/Adreno-specific paths once those land).
-        // `upscale` (1..5) still persists; it's exposed in the in-game
+        // `upscale` (1.0..5.0) still persists; it's exposed in the in-game
         // overlay's Renderer tab.
         val renderer = mutableStateOf("auto")
-        val upscale = mutableStateOf(1)
+        val upscale = mutableStateOf(1.0f)
 
         /** Active custom Vulkan driver id (matches `CustomDriver.InstalledDriver.id`).
          *  Null = system Vulkan loader. Set from the setup wizard's driver
@@ -468,7 +468,7 @@ class Main: ComponentActivity() {
          *  right override tier; null falls back to global. Resolution
          *  order: per-game JSON overlay → global → hardcoded defaults. */
         private fun applyRendererPrefs() {
-            NativeApp.renderUpscalemultiplier(upscale.value.toFloat())
+            NativeApp.renderUpscalemultiplier(upscale.value)
             // Pin custom Vulkan driver (if any) BEFORE the renderer write —
             // the renderer JNI may trigger MTGS::ApplySettings which can
             // re-open the GS device and run Vulkan::LoadVulkanLibrary. The
@@ -500,6 +500,22 @@ class Main: ComponentActivity() {
             val limit = com.armsx2.ui.InGameOverlay.frameLimitOn.value
             NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", limit.toString())
             NativeApp.speedhackLimitermode(if (limit) 0 else 3)
+        }
+
+        private fun readUpscalePref(): Float {
+            val all = prefs.all
+            fun coerce(raw: Any?): Float? = when (raw) {
+                is Float -> raw
+                is Double -> raw.toFloat()
+                is Int -> raw.toFloat()
+                is Long -> raw.toFloat()
+                is String -> raw.toFloatOrNull()
+                else -> null
+            }?.coerceIn(1.0f, 5.0f)
+
+            return coerce(all["upscaleFloat"])
+                ?: coerce(all["upscale"])
+                ?: 1.0f
         }
 
         /**
@@ -983,7 +999,7 @@ class Main: ComponentActivity() {
             }
         }
         renderer.value = prefs.getString("renderer", "auto") ?: "auto"
-        upscale.value = prefs.getInt("upscale", 1)
+        upscale.value = readUpscalePref()
         customDriverId.value = prefs.getString("customDriverId", null)?.takeIf { it.isNotEmpty() }
         allFilesAccessGranted.value = !needsAllFilesAccess()
         surface.value = SurfaceCallbacks(this)

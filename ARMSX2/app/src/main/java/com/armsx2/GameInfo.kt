@@ -55,12 +55,39 @@ object FilenameParser {
     private val serialRegex = Regex("""([A-Za-z]{4})[\s_-]?(\d{3})\.?(\d{2})""")
     private val tagsRegex = Regex("""[\[(].*?[\])]""")
     private val whitespaceRegex = Regex("""\s+""")
+    private val nonWordRegex = Regex("""[^a-z0-9]+""")
+
+    private data class FilenameAlias(val title: String, val serial: String)
+
+    private fun aliasFor(filenameWithoutExt: String): FilenameAlias? {
+        val normalized = filenameWithoutExt
+            .lowercase()
+            .replace(nonWordRegex, " ")
+            .trim()
+
+        // Some PAL DMC2 CHDs are named by disc character rather than serial,
+        // and their raw-CD layout can be awkward to probe. Keep this narrow so
+        // broader filename-only games still rely on explicit serial tokens.
+        if (!normalized.contains("devil may cry 2"))
+            return null
+
+        return when {
+            normalized.contains("dante") ->
+                FilenameAlias("Devil May Cry 2 [Dante Disc]", "SLES-82011")
+            normalized.contains("lucia") ->
+                FilenameAlias("Devil May Cry 2 [Lucia Disc]", "SLES-82012")
+            else -> null
+        }
+    }
 
     fun parse(filename: String): Pair<String, String?> {
         val withoutExt = filename.substringBeforeLast('.')
         val match = serialRegex.find(withoutExt)
         val serial = match?.let {
             "${it.groupValues[1].uppercase()}-${it.groupValues[2]}${it.groupValues[3]}"
+        }
+        if (serial == null) {
+            aliasFor(withoutExt)?.let { return it.title to it.serial }
         }
         // Strip the matched serial token + any [region] / (lang) tags so the
         // displayed title is the game name rather than the full filename.
