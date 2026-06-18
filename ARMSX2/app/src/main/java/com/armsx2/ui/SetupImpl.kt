@@ -183,7 +183,7 @@ object SetupImpl {
     // ---- Persist + advance helpers ----
 
     /**
-     * Copy the user-selected BIOS into the app's private bios/ directory so
+     * Copy the user-selected BIOS into the active data-root bios/ directory so
      * emucore (which reads via FileSystem::OpenManagedCFile) can load it from
      * a real path. Returns the absolute path on success, null on failure.
      */
@@ -208,7 +208,7 @@ object SetupImpl {
 
         // Same-content fast-path: when the user re-entered setup and the
         // pre-selected row matches the already-configured BIOS by both
-        // filename and the existing private file already exists, skip the
+        // filename and the existing data-root file already exists, skip the
         // copy. The pref already points at outFile and emucore is happy.
         //
         // We DON'T push setSetting from finishBiosStep on a clean install —
@@ -217,16 +217,16 @@ object SetupImpl {
         // Host::SetBaseStringSettingValue with no LAYER_BASE installed
         // null-derefs in LayeredSettingsInterface. The pin is now applied
         // post-init via Main.kickoffEmucoreInit's pushBiosFilenamePin().
-        if (outFile.absolutePath == Main.bios.value && outFile.exists()) {
+        if (outFile.absolutePath == Main.bios.value && outFile.exists() && outFile.length() > 0L) {
             configuredBiosInfo.value = bios.info
             pinBiosIfReady(outFile)
             return outFile.absolutePath
         }
 
         return try {
-            context.contentResolver.openInputStream(bios.uri)?.use { ins ->
-                outFile.outputStream().use { outs -> ins.copyTo(outs) }
-            } ?: return null
+            if (!copyBiosSafely(context, bios, outFile))
+                return null
+
             Main.bios.value = outFile.absolutePath
             Main.prefs.edit().putString("bios", outFile.absolutePath).apply()
             configuredBiosInfo.value = bios.info
@@ -235,6 +235,69 @@ object SetupImpl {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun copyBiosSafely(context: Context, bios: ScannedBios, outFile: File): Boolean {
+        // A common first-run flow is picking <systemDir>/bios as the BIOS
+        // source folder. In that case outFile is the selected file. Opening an
+        // OutputStream to it would truncate the BIOS to 0 B before the read
+        // stream can copy anything, so detect that self-copy and simply accept
+        // the already-valid file.
+        selectedBiosSourceFile(bios)?.let { source ->
+            if (sameFilePath(source, outFile))
+                return outFile.exists() && outFile.length() > 0L
+        }
+
+        val tmp = File(outFile.parentFile, ".${outFile.name}.import.tmp")
+        if (tmp.exists())
+            tmp.delete()
+
+        val copied = context.contentResolver.openInputStream(bios.uri)?.use { ins ->
+            tmp.outputStream().use { outs -> ins.copyTo(outs) }
+        } ?: return false
+
+        if (copied <= 0L || tmp.length() <= 0L) {
+            tmp.delete()
+            return false
+        }
+
+        if (outFile.exists() && !outFile.delete()) {
+            tmp.delete()
+            return false
+        }
+
+        val installed = tmp.renameTo(outFile) || runCatching {
+            tmp.copyTo(outFile, overwrite = true)
+            true
+        }.getOrDefault(false)
+        tmp.delete()
+        return installed && outFile.exists() && outFile.length() > 0L
+    }
+
+    private fun selectedBiosSourceFile(bios: ScannedBios): File? {
+        documentUriToPosix(bios.uri)?.let { return File(it) }
+        val dir = Main.resolveTreeUriToPosix(biosDirUri.value?.toString()) ?: return null
+        return File(dir, bios.displayName)
+    }
+
+    private fun documentUriToPosix(uri: Uri): String? {
+        val docId = runCatching {
+            android.provider.DocumentsContract.getDocumentId(uri)
+        }.getOrNull() ?: return null
+        val parts = docId.split(":", limit = 2)
+        if (parts.size != 2)
+            return null
+        val (volumeId, relPath) = parts
+        return when (volumeId) {
+            "primary" -> "/storage/emulated/0/$relPath"
+            else -> "/storage/$volumeId/$relPath"
+        }
+    }
+
+    private fun sameFilePath(a: File, b: File): Boolean {
+        val ca = runCatching { a.canonicalFile }.getOrDefault(a.absoluteFile)
+        val cb = runCatching { b.canonicalFile }.getOrDefault(b.absoluteFile)
+        return ca == cb
     }
 
     private fun pinBiosIfReady(file: File) {

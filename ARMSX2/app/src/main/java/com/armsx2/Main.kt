@@ -743,6 +743,42 @@ class Main: ComponentActivity() {
             }
         }
 
+        private fun sameFilePath(a: File, b: File): Boolean {
+            val ca = runCatching { a.canonicalFile }.getOrDefault(a.absoluteFile)
+            val cb = runCatching { b.canonicalFile }.getOrDefault(b.absoluteFile)
+            return ca == cb
+        }
+
+        private fun copyFileViaTemp(src: File, target: File): Boolean {
+            if (sameFilePath(src, target))
+                return target.exists() && target.length() > 0L
+            if (!src.exists() || src.length() <= 0L)
+                return false
+
+            val parent = target.parentFile ?: return false
+            if (!parent.exists() && !parent.mkdirs())
+                return false
+
+            val tmp = File(parent, ".${target.name}.migrate.tmp")
+            if (tmp.exists())
+                tmp.delete()
+
+            return runCatching {
+                src.copyTo(tmp, overwrite = true)
+                if (tmp.length() <= 0L)
+                    return@runCatching false
+                if (target.exists() && !target.delete())
+                    return@runCatching false
+                val installed = tmp.renameTo(target) || runCatching {
+                    tmp.copyTo(target, overwrite = true)
+                    true
+                }.getOrDefault(false)
+                installed && target.exists() && target.length() > 0L
+            }.getOrDefault(false).also {
+                tmp.delete()
+            }
+        }
+
         fun getSupportedGLESVersion(context: Context): Double {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             val info = am.deviceConfigurationInfo
@@ -830,13 +866,16 @@ class Main: ComponentActivity() {
         bios.value?.takeIf { it.isNotEmpty() }?.let { current ->
             val src = File(current)
             val target = File(File(assetCopyRoot(applicationContext), "bios").apply { mkdirs() }, src.name)
-            if (target.absolutePath != src.absolutePath) {
-                val present = target.exists() ||
-                    (src.exists() && runCatching { src.copyTo(target, overwrite = true) }.isSuccess)
+            if (!sameFilePath(target, src)) {
+                val present = (target.exists() && target.length() > 0L) ||
+                    copyFileViaTemp(src, target)
                 if (present) {
                     bios.value = target.absolutePath
                     prefs.edit().putString("bios", target.absolutePath).apply()
                 }
+            } else if (target.exists() && target.length() > 0L) {
+                bios.value = target.absolutePath
+                prefs.edit().putString("bios", target.absolutePath).apply()
             }
         }
 
