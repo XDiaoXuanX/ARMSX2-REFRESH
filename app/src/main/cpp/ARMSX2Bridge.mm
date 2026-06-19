@@ -1208,6 +1208,60 @@ static BOOL ARMSX2IsControllerSkinImageName(NSString* name)
            [ext isEqualToString:@"jpeg"] || [ext isEqualToString:@"webp"];
 }
 
+static NSString* ARMSX2ControllerSkinJSONImportKey(NSString* name)
+{
+    NSString* last = name.lastPathComponent.lowercaseString;
+    if (last.length == 0 || ![last.pathExtension.lowercaseString isEqualToString:@"json"])
+        return nil;
+
+    return last;
+}
+
+static BOOL ARMSX2IsControllerSkinImportName(NSString* name, NSSet<NSString*>* allowedJSONNames)
+{
+    if (ARMSX2IsControllerSkinImageName(name))
+        return YES;
+
+    NSString* key = ARMSX2ControllerSkinJSONImportKey(name);
+    return key.length > 0 && [allowedJSONNames containsObject:key];
+}
+
+static NSMutableSet<NSString*>* ARMSX2AllowedControllerSkinJSONNames(zip_t* zf, zip_int64_t count)
+{
+    NSMutableSet<NSString*>* allowedJSONNames = [NSMutableSet setWithObject:@"manifest.json"];
+    for (zip_uint64_t i = 0; i < static_cast<zip_uint64_t>(std::max<zip_int64_t>(count, 0)); i++) {
+        zip_stat_t stat = {};
+        if (zip_stat_index(zf, i, ZIP_FL_ENC_GUESS, &stat) != 0 || !stat.name)
+            continue;
+
+        NSString* entryName = [NSString stringWithUTF8String:stat.name];
+        if (![ARMSX2ControllerSkinJSONImportKey(entryName) isEqualToString:@"manifest.json"])
+            continue;
+
+        auto file = zip_fopen_index_managed(zf, i, ZIP_FL_ENC_GUESS);
+        if (!file)
+            continue;
+
+        std::optional<std::vector<u8>> data = ReadBinaryFileInZip(file.get());
+        if (!data.has_value() || data->empty())
+            continue;
+
+        NSData* manifestData = [NSData dataWithBytes:data->data() length:data->size()];
+        id manifestObject = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil];
+        if (![manifestObject isKindOfClass:NSDictionary.class])
+            continue;
+
+        id layoutValue = [(NSDictionary*)manifestObject objectForKey:@"layout"];
+        if (![layoutValue isKindOfClass:NSString.class])
+            continue;
+
+        NSString* layoutKey = ARMSX2ControllerSkinJSONImportKey((NSString*)layoutValue);
+        if (layoutKey.length > 0)
+            [allowedJSONNames addObject:layoutKey];
+    }
+    return allowedJSONNames;
+}
+
 static NSString* ARMSX2SanitizedSkinFileName(NSString* name)
 {
     NSString* last = name.lastPathComponent;
@@ -1925,6 +1979,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 
 + (nonnull NSArray<NSURL *> *)extractControllerSkinArchiveAtURL:(nonnull NSURL *)archiveURL
                                                     toDirectory:(nonnull NSURL *)destinationDirectory {
+    static const zip_uint64_t kMaxSkinArchiveEntryBytes = 16 * 1024 * 1024;
+    static const NSUInteger kMaxSkinArchiveEntries = 64;
+    static const zip_int64_t kMaxSkinArchiveTotalEntries = 512;
+
     NSMutableArray<NSURL *> *extracted = [NSMutableArray array];
     if (!archiveURL.isFileURL || !destinationDirectory.isFileURL)
         return extracted;
@@ -1948,13 +2006,24 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     }
 
     const zip_int64_t count = zip_get_num_entries(zf.get(), 0);
+    if (count > kMaxSkinArchiveTotalEntries) {
+        NSLog(@"[ARMSX2 iOS Skins] Skin archive has too many entries (%lld); skipping %@.",
+              static_cast<long long>(count), archiveURL.lastPathComponent);
+        return extracted;
+    }
+    NSSet<NSString*>* allowedJSONNames = ARMSX2AllowedControllerSkinJSONNames(zf.get(), count);
     for (zip_uint64_t i = 0; i < static_cast<zip_uint64_t>(std::max<zip_int64_t>(count, 0)); i++) {
+        if (extracted.count >= kMaxSkinArchiveEntries)
+            break;
+
         zip_stat_t stat = {};
         if (zip_stat_index(zf.get(), i, ZIP_FL_ENC_GUESS, &stat) != 0 || !stat.name)
             continue;
+        if ((stat.valid & ZIP_STAT_SIZE) && stat.size > kMaxSkinArchiveEntryBytes)
+            continue;
 
         NSString *entryName = [NSString stringWithUTF8String:stat.name];
-        if (entryName.length == 0 || [entryName hasSuffix:@"/"] || !ARMSX2IsControllerSkinImageName(entryName))
+        if (entryName.length == 0 || [entryName hasSuffix:@"/"] || !ARMSX2IsControllerSkinImportName(entryName, allowedJSONNames))
             continue;
 
         auto file = zip_fopen_index_managed(zf.get(), i, ZIP_FL_ENC_GUESS);
@@ -1975,7 +2044,7 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
             [extracted addObject:destinationURL];
     }
 
-    NSLog(@"[ARMSX2 iOS Skins] Extracted %lu image(s) from %@",
+    NSLog(@"[ARMSX2 iOS Skins] Extracted %lu skin file(s) from %@",
           static_cast<unsigned long>(extracted.count), archiveURL.lastPathComponent);
     return extracted;
 }
