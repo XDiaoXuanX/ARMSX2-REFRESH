@@ -23,6 +23,8 @@ object TouchControls {
     private const val KEY_PROFILES = "touch.profiles"
     private const val KEY_ACTIVE = "touch.active"
     private const val KEY_OPACITY = "touch.opacity"
+    private const val KEY_FACE_MULTI = "touch.faceMulti"
+    private const val KEY_VIS_MODE = "touch.visibilityMode"
 
     /** Visible to the user. False when a controller is being used (latched
      *  off in onControllerInputDetected); flipped back on by any screen
@@ -59,6 +61,22 @@ object TouchControls {
     /** Master opacity 0.20..1.00. Persisted. */
     val opacity = mutableStateOf(0.55f)
 
+    /** When enabled, the face-button diamond has a shared hit layer so a
+     *  single thumb can slide/press between Cross/Square/Circle/Triangle and
+     *  emit overlapping button presses. */
+    val faceMultiTouch = mutableStateOf(false)
+
+    /** On-screen touch controls visibility. 0 = Never show (for physical-
+     *  controls devices like the RP6 — also hides the settings cog so nothing
+     *  overlaps R1); 1..10 = auto-hide after that many seconds of no touch;
+     *  11 = Auto — show on screen touch, hide when a controller is used (the
+     *  default / legacy behavior). Persisted. */
+    val visibilityMode = mutableStateOf(11)
+
+    /** Bumped on every touch interaction (screen tap or on-screen button press)
+     *  so the auto-hide timer restarts. Not persisted. */
+    val interactionTick = mutableStateOf(0)
+
     /** Set true once load() has run — used to avoid clobbering disk state
      *  on first composition. */
     private var loaded = false
@@ -92,6 +110,9 @@ object TouchControls {
         val match = list.firstOrNull { it.name == active } ?: list.first()
         activeLayout.value = match.layout.copy()
         opacity.value = Main.prefs.getFloat(KEY_OPACITY, 0.55f).coerceIn(0.20f, 1.0f)
+        faceMultiTouch.value = Main.prefs.getBoolean(KEY_FACE_MULTI, false)
+        visibilityMode.value = Main.prefs.getInt(KEY_VIS_MODE, 11).coerceIn(0, 11)
+        if (visibilityMode.value == 0) visible.value = false
     }
 
     private fun persist() {
@@ -101,7 +122,26 @@ object TouchControls {
             .putString(KEY_PROFILES, arr.toString())
             .putString(KEY_ACTIVE, activeProfileName.value)
             .putFloat(KEY_OPACITY, opacity.value)
+            .putBoolean(KEY_FACE_MULTI, faceMultiTouch.value)
+            .putInt(KEY_VIS_MODE, visibilityMode.value)
             .apply()
+    }
+
+    /** Set the on-screen controls visibility mode (see [visibilityMode]). */
+    fun setVisibilityMode(mode: Int) {
+        visibilityMode.value = mode.coerceIn(0, 11)
+        // Reflect immediately: Never hides; any other mode shows.
+        visible.value = visibilityMode.value != 0
+        interactionTick.value++
+        persist()
+    }
+
+    /** Note a touch interaction (screen tap or on-screen button press): show
+     *  the controls (unless disabled) and restart the auto-hide timer. */
+    fun noteTouchInteraction() {
+        if (visibilityMode.value == 0) return
+        if (!visible.value) visible.value = true
+        interactionTick.value++
     }
 
     /** Replace the layout of the active profile with the live edit state. */
@@ -164,6 +204,11 @@ object TouchControls {
         persist()
     }
 
+    fun setFaceMultiTouch(enabled: Boolean) {
+        faceMultiTouch.value = enabled
+        persist()
+    }
+
     /** Update a single button in the live layout. */
     fun updateButton(id: TouchButtonId, transform: (TouchButtonCfg) -> TouchButtonCfg) {
         val current = activeLayout.value
@@ -172,15 +217,17 @@ object TouchControls {
     }
 
     /** Latched off the touch controls when a controller key/axis fires.
-     *  Idempotent — only writes state when a flip is needed. */
+     *  Only in "Auto" mode (11) — when an auto-hide timeout is set (1..10) the
+     *  timer owns hiding, and "Never" (0) is already hidden. Idempotent. */
     fun onControllerInputDetected() {
-        if (visible.value) visible.value = false
+        if (visibilityMode.value == 11 && visible.value) visible.value = false
     }
 
     /** Latched on by any pointer-down on the surface so a controller user
-     *  who touches the screen sees the controls again. */
+     *  who touches the screen sees the controls again (and restarts the
+     *  auto-hide timer). No-op when controls are disabled. */
     fun onSurfaceTouched() {
-        if (!visible.value) visible.value = true
+        noteTouchInteraction()
     }
 }
 

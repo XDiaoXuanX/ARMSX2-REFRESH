@@ -52,6 +52,7 @@
 
 #include "fmt/format.h"
 
+#include <atomic>
 #include <fstream>
 
 Pcsx2Config::GSOptions GSConfig;
@@ -466,6 +467,19 @@ void GSgifTransfer2(u8* mem, u32 size)
 void GSgifTransfer3(u8* mem, u32 size)
 {
 	g_gs_renderer->Transfer<2>(const_cast<u8*>(mem), size);
+}
+
+// Manual frameskip target (Android). Set from the UI thread via the JNI
+// setFrameSkip, read on the GS thread in GSRenderer::VSync. Relaxed atomic — a
+// stale read at most mis-skips a single frame, which is harmless.
+static std::atomic<u32> s_manual_frameskip{0};
+void GSSetManualFrameSkip(u32 frames)
+{
+	s_manual_frameskip.store(frames, std::memory_order_relaxed);
+}
+u32 GSGetManualFrameSkip()
+{
+	return s_manual_frameskip.load(std::memory_order_relaxed);
 }
 
 void GSvsync(u32 field, bool registers_written)

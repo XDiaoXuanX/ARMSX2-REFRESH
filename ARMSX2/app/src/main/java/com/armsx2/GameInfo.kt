@@ -1,6 +1,23 @@
 package com.armsx2
 
 import android.net.Uri
+import androidx.compose.runtime.mutableStateOf
+
+/**
+ * Box-art style for the library: 2D flat scans (the "default" mirror, JPG) or
+ * 3D rendered cases (the "3d" mirror, PNG). Both come from the same xlenore
+ * repos. Persisted in Main.prefs and read by [GameInfo.coverUrl], so flipping
+ * it recomposes the grid and re-downloads covers in the chosen style.
+ */
+object CoverArtStyle {
+    private const val KEY = "library.coverArt3d"
+    val use3d = mutableStateOf(false)
+    fun load() { use3d.value = Main.prefs.getBoolean(KEY, false) }
+    fun set(value: Boolean) {
+        use3d.value = value
+        Main.prefs.edit().putBoolean(KEY, value).apply()
+    }
+}
 
 /**
  * One row in the games-list screen. Today the title/serial come from
@@ -32,12 +49,17 @@ data class GameInfo(
     val platform: GamePlatform = GamePlatform.PS2,
 ) {
     val coverUrl: String? get() = serial?.let { s ->
-        when (platform) {
-            GamePlatform.PS2 ->
-                "https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/$s.jpg"
-            GamePlatform.PS1 ->
-                "https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/default/$s.jpg"
+        val repo = when (platform) {
+            GamePlatform.PS2 -> "ps2-covers"
+            GamePlatform.PS1 -> "psx-covers"
         }
+        // 3D cases live under covers/3d/*.png; flat 2D scans under
+        // covers/default/*.jpg. Coil decodes by content, so the extension
+        // mismatch on the cached file is fine.
+        if (CoverArtStyle.use3d.value)
+            "https://raw.githubusercontent.com/xlenore/$repo/main/covers/3d/$s.png"
+        else
+            "https://raw.githubusercontent.com/xlenore/$repo/main/covers/default/$s.jpg"
     }
 }
 

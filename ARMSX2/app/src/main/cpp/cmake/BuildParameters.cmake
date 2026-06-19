@@ -150,8 +150,12 @@ elseif("${_PCSX2_TARGET_PROCESSOR}" STREQUAL "arm64" OR "${_PCSX2_TARGET_PROCESS
 	endif()
 
 	if(ANDROID)
-		# Android ARM64 uses 4K pages and 64-byte cache lines
-		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x1000)
+		# Build for 16K pages (0x4000) so the lib also runs on 16K-page devices
+		# (Snapdragon 8 Elite gen 5 / 2025 flagships). 16K-granular mmap/mprotect
+		# are valid on 4K-page kernels too (16K is a multiple of 4K), so a single
+		# build covers both — paired with the relaxed page-size check in
+		# VMManager::PerformEarlyHardwareChecks. 64-byte cache lines on ARM.
+		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x4000)
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=64)
 	endif()
 

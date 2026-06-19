@@ -279,7 +279,13 @@ fun AchievementsPanel(
         }
     }
 
-    Column(modifier) {
+    // Only the scrollable achievement list should consume the full height of
+    // its host box; the status cards ("Not signed in" / "No achievements" /
+    // "Loading") must wrap so the host's bottom alignment keeps them tucked in
+    // the corner instead of floating up into the action grid (looked broken on
+    // wide phone screens).
+    val showsList = snapshot.loggedIn && snapshot.active && snapshot.items.isNotEmpty()
+    Column(modifier.then(if (showsList) Modifier.fillMaxHeight() else Modifier)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,

@@ -71,6 +71,10 @@ void GSgifTransfer1(u8* mem, u32 addr);
 void GSgifTransfer2(u8* mem, u32 size);
 void GSgifTransfer3(u8* mem, u32 size);
 void GSvsync(u32 field, bool registers_written);
+// Manual frameskip (Android low-end devices): present 1 of every (frames+1)
+// VSyncs, skipping presentation of the rest. 0 disables. See GSRenderer::VSync.
+void GSSetManualFrameSkip(u32 frames);
+u32 GSGetManualFrameSkip();
 int GSfreeze(FreezeAction mode, freezeData* data);
 std::string GSGetBaseSnapshotFilename();
 std::string GSGetBaseVideoFilename();

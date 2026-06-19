@@ -19,6 +19,7 @@ private:
 	std::string m_snapshot;
 	u32 m_dump_frames = 0;
 	u32 m_skipped_duplicate_frames = 0;
+	u32 m_manual_frameskip_counter = 0;
 
 private:
 	// Tracking draw counters for idle frame detection.

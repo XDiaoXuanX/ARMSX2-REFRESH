@@ -630,6 +630,27 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		}
 	}
 
+	// Manual frameskip (Android low-end devices): present 1 of every (N+1)
+	// frames, skipping presentation of N. Reuses the duplicate-frame skip path
+	// (skips present + post-processing). Emulation still runs every frame, so
+	// this trades smoothness for GPU/present headroom.
+	if (const u32 manual_skip = GSGetManualFrameSkip(); manual_skip > 0 && !GSCapture::IsCapturingVideo())
+	{
+		if (m_manual_frameskip_counter < manual_skip)
+		{
+			m_manual_frameskip_counter++;
+			skip_frame = true;
+		}
+		else
+		{
+			m_manual_frameskip_counter = 0;
+		}
+	}
+	else
+	{
+		m_manual_frameskip_counter = 0;
+	}
+
 	const bool blank_frame = !Merge(field);
 
 	m_last_draw_n = s_n;
