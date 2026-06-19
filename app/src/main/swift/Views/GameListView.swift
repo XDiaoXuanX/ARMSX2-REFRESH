@@ -1561,6 +1561,10 @@ struct PerGameSettingsPanel: View {
 
     private static let useGlobalSentinel = -1
     private static let trilinearUseGlobalSentinel = Int(Int32.min)
+    private static let eeCycleRateUseGlobalSentinel = Int(Int32.min)
+    private static let fastBootUseGlobalSentinel = -1
+    private static let fastBootOff = 0
+    private static let fastBootOn = 1
 
     private static let deinterlaceOptions = [
         PickerOption(id: 0, title: "None"),
@@ -1626,8 +1630,15 @@ struct PerGameSettingsPanel: View {
     @State private var globalVolumePercent: Int
     @State private var volumeOverride: Bool
     @State private var volumePercent: Int
+    @State private var padLayoutIdentity: PadLayoutGameIdentity?
+    @State private var showPadLayoutEditor = false
     @State private var eeCoreType: Int
     @State private var mtvu: Bool
+    @State private var globalEECycleRate: Int
+    @State private var eeCycleRate: Int
+    @State private var globalFastBoot: Bool
+    @State private var fastBoot: Int
+    @State private var hasGameSettingsIdentity: Bool
     @State private var enableCheats: Bool
     @State private var enablePatches: Bool
     @State private var enableGameFixes: Bool
@@ -1652,6 +1663,11 @@ struct PerGameSettingsPanel: View {
         _globalVolumePercent = State(initialValue: inheritedVolume)
         _volumeOverride = State(initialValue: Self.boolValue(info["hasVolumeOverride"], defaultValue: false))
         _volumePercent = State(initialValue: loadedVolume)
+        _padLayoutIdentity = State(initialValue: PadLayoutGameIdentity(
+            serial: (info["serial"] as? String) ?? game.metadata["serial"],
+            crc: (info["crc"] as? String) ?? game.metadata["crc"]
+        ))
+        _hasGameSettingsIdentity = State(initialValue: !PadLayoutGameIdentity.normalizedCRC((info["crc"] as? String) ?? game.metadata["crc"]).isEmpty)
         _upscaleMultiplier = State(initialValue: Self.floatValue(info["upscaleMultiplier"], defaultValue: 1.0))
         _aspectRatio = State(initialValue: Self.normalizedAspect(info["aspectRatio"] as? String))
         _textureFiltering = State(initialValue: Self.intValue(info["textureFiltering"], defaultValue: 2))
@@ -1686,6 +1702,12 @@ struct PerGameSettingsPanel: View {
         _skipDrawEnd = State(initialValue: initialSkipDrawEnd)
         _eeCoreType = State(initialValue: Self.intValue(info["eeCoreType"], defaultValue: 2))
         _mtvu = State(initialValue: Self.boolValue(info["mtvu"], defaultValue: true))
+        let inheritedEECycleRate = Self.clampedEECycleRate(Self.intValue(info["globalEECycleRate"], defaultValue: 0))
+        _globalEECycleRate = State(initialValue: inheritedEECycleRate)
+        _eeCycleRate = State(initialValue: Self.boolValue(info["hasEECycleRateOverride"], defaultValue: false) ? Self.clampedEECycleRate(Self.intValue(info["eeCycleRate"], defaultValue: inheritedEECycleRate)) : Self.eeCycleRateUseGlobalSentinel)
+        let inheritedFastBoot = Self.boolValue(info["globalFastBoot"], defaultValue: false)
+        _globalFastBoot = State(initialValue: inheritedFastBoot)
+        _fastBoot = State(initialValue: Self.boolValue(info["hasFastBootOverride"], defaultValue: false) ? (Self.boolValue(info["fastBoot"], defaultValue: inheritedFastBoot) ? Self.fastBootOn : Self.fastBootOff) : Self.fastBootUseGlobalSentinel)
         _enableCheats = State(initialValue: Self.boolValue(info["enableCheats"], defaultValue: false))
         _enablePatches = State(initialValue: Self.boolValue(info["enablePatches"], defaultValue: true))
         _enableGameFixes = State(initialValue: Self.boolValue(info["enableGameFixes"], defaultValue: true))
@@ -1766,6 +1788,11 @@ struct PerGameSettingsPanel: View {
                     Text(settings.localized("Overrides are saved for this game only and apply on the next boot/reset of this title."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if !hasGameSettingsIdentity {
+                        Text("Start this game once before saving its settings.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
 
                 Section(settings.localized("Audio")) {
@@ -1832,6 +1859,41 @@ struct PerGameSettingsPanel: View {
                     Toggle("MTVU", isOn: $mtvu)
                         .disabled(!enabled)
                     Text(settings.localized("MTVU can improve performance and may help some visual issues, but can cause compatibility problems. Reset/relaunch after changing it."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Performance / Compatibility") {
+                    Picker("EE Cycle Rate", selection: $eeCycleRate) {
+                        Text("Global Default (\(Self.formatEECycleRate(globalEECycleRate)))").tag(Self.eeCycleRateUseGlobalSentinel)
+                        ForEach(-3...3, id: \.self) { value in
+                            Text(Self.formatEECycleRate(value)).tag(value)
+                        }
+                    }
+                    .disabled(!enabled)
+
+                    Button("Reset EE Cycle Rate to Global") {
+                        eeCycleRate = Self.eeCycleRateUseGlobalSentinel
+                    }
+                    .disabled(!enabled || eeCycleRate == Self.eeCycleRateUseGlobalSentinel)
+
+                    Text("Can improve performance in heavy games, but may cause timing or compatibility issues. Reset or relaunch the game after changing it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("Fast Boot", selection: $fastBoot) {
+                        Text("Global Default (\(globalFastBoot ? "On" : "Off"))").tag(Self.fastBootUseGlobalSentinel)
+                        Text("On").tag(Self.fastBootOn)
+                        Text("Off").tag(Self.fastBootOff)
+                    }
+                    .disabled(!enabled)
+
+                    Button("Reset Fast Boot to Global") {
+                        fastBoot = Self.fastBootUseGlobalSentinel
+                    }
+                    .disabled(!enabled || fastBoot == Self.fastBootUseGlobalSentinel)
+
+                    Text("Some games may need Fast Boot on or off to avoid looping at the disc screen. Reset or relaunch the game after changing it.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -2038,6 +2100,10 @@ struct PerGameSettingsPanel: View {
     }
 
     private func save() {
+        guard hasGameSettingsIdentity else {
+            statusMessage = "Start this game once before saving its settings."
+            return
+        }
         let normalizedSkipDraw = normalizedSkipDrawValues()
         if skipDrawStart != normalizedSkipDraw.start {
             skipDrawStart = normalizedSkipDraw.start
@@ -2076,6 +2142,10 @@ struct PerGameSettingsPanel: View {
                 volumePercent: Int32(volumePercent),
                 eeCoreType: Int32(eeCoreType),
                 mtvu: mtvu,
+                eeCycleRateOverride: enabled && eeCycleRate != Self.eeCycleRateUseGlobalSentinel,
+                eeCycleRate: Int32(Self.clampedEECycleRate(eeCycleRate == Self.eeCycleRateUseGlobalSentinel ? globalEECycleRate : eeCycleRate)),
+                fastBootOverride: enabled && fastBoot != Self.fastBootUseGlobalSentinel,
+                fastBoot: fastBoot == Self.fastBootOn,
                 enableCheats: enableCheats,
                 enablePatches: enablePatches,
                 enableGameFixes: enableGameFixes,
@@ -2112,6 +2182,10 @@ struct PerGameSettingsPanel: View {
                 volumePercent: Int32(volumePercent),
                 eeCoreType: Int32(eeCoreType),
                 mtvu: mtvu,
+                eeCycleRateOverride: enabled && eeCycleRate != Self.eeCycleRateUseGlobalSentinel,
+                eeCycleRate: Int32(Self.clampedEECycleRate(eeCycleRate == Self.eeCycleRateUseGlobalSentinel ? globalEECycleRate : eeCycleRate)),
+                fastBootOverride: enabled && fastBoot != Self.fastBootUseGlobalSentinel,
+                fastBoot: fastBoot == Self.fastBootOn,
                 enableCheats: enableCheats,
                 enablePatches: enablePatches,
                 enableGameFixes: enableGameFixes,
@@ -2190,8 +2264,17 @@ struct PerGameSettingsPanel: View {
         SettingsStore.clampedEmulatorVolumePercent(value)
     }
 
+    private static func clampedEECycleRate(_ value: Int) -> Int {
+        min(max(value, -3), 3)
+    }
+
     private static func formatPercent(_ value: Int) -> String {
         "\(clampedVolume(value))%"
+    }
+
+    private static func formatEECycleRate(_ value: Int) -> String {
+        let clamped = clampedEECycleRate(value)
+        return clamped > 0 ? "+\(clamped)" : "\(clamped)"
     }
 
     private static func normalizedSkipDrawEnd(start: Int, end: Int, startOverride: Bool, endOverride: Bool) -> Int {
