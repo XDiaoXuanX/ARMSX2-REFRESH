@@ -86,6 +86,8 @@ struct GameScreenView: View {
 
     @State private var appState = AppState.shared
     @State private var settings = SettingsStore.shared
+    @State private var layoutPresets = PadLayoutPresetStore.shared
+    @State private var skinLibrary = VPadSkinLibraryStore.shared
     @State private var fileImporter = FileImportHandler.shared
     @State private var userVirtualPadVisible = true
     @State private var externalControllerConnected = false
@@ -103,6 +105,7 @@ struct GameScreenView: View {
     @State private var showResetConfirmation = false
     @State private var runtimePerGameSettingsEntry: ISOEntry?
     @State private var runtimePerGameSettings: [String: Any]?
+    @State private var runtimePadLayoutIdentity: PadLayoutGameIdentity?
     @State private var compatibilityPresetKey = "off"
     @State private var compatibilityIdentity = ""
     @State private var compatibilityAutoPresets = true
@@ -133,7 +136,11 @@ struct GameScreenView: View {
                     ZStack {
                         MetalGameView()
                         if effectiveVirtualPadVisible {
-                            VirtualControllerView(isLandscape: true)
+                            VirtualControllerView(
+                                isLandscape: true,
+                                layoutSnapshot: effectivePadLayoutSnapshot,
+                                skinDescriptor: effectivePadSkinDescriptor
+                            )
                         }
                         menuButtonOverlay(isLandscape: true)
                     }
@@ -151,7 +158,10 @@ struct GameScreenView: View {
                         if effectiveVirtualPadVisible {
                             ZStack {
                                 Color.black
-                                VirtualControllerView()
+                                VirtualControllerView(
+                                    layoutSnapshot: effectivePadLayoutSnapshot,
+                                    skinDescriptor: effectivePadSkinDescriptor
+                                )
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -197,7 +207,7 @@ struct GameScreenView: View {
                 PadLayoutEditView(onDismiss: {
                     showPadLayoutEditor = false
                     updateRuntimeOverlayPause()
-                })
+                }, context: runtimePadLayoutEditorContext)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
@@ -456,12 +466,13 @@ struct GameScreenView: View {
 
     private var controllerSkinMenu: some View {
         Menu {
-            ForEach(VirtualPadSkin.allCases) { skin in
+            ForEach(skinLibrary.allDescriptors) { skin in
                 Button {
-                    settings.virtualPadSkin = skin
-                    presentStatusMessage("\(settings.localized("Controller Skin")): \(settings.localized(skin.label))")
+                    skinLibrary.selectSkin(id: skin.id)
+                    settings.virtualPadSkin = skin.virtualPadSkin
+                    presentStatusMessage("\(settings.localized("Controller Skin")): \(settings.localized(skin.displayName))")
                 } label: {
-                    Label(settings.localized(skin.label), systemImage: settings.virtualPadSkin == skin ? "checkmark" : "circle")
+                    Label(settings.localized(skin.displayName), systemImage: skinLibrary.selectedSkinID == skin.id ? "checkmark" : "circle")
                 }
             }
         } label: {
@@ -737,6 +748,10 @@ struct GameScreenView: View {
         }
         if gameMenuAvailable != gameReady {
             gameMenuAvailable = gameReady
+        }
+        let identity = runtimePadLayoutIdentityForCurrentGame()
+        if runtimePadLayoutIdentity != identity {
+            runtimePadLayoutIdentity = identity
         }
         refreshCompatibilityState()
     }
@@ -1104,6 +1119,36 @@ struct GameScreenView: View {
 
     private var effectiveVirtualPadVisible: Bool {
         userVirtualPadVisible && (!settings.autoHideVirtualPadWhenControllerConnected || !externalControllerConnected) && !showPadLayoutEditor
+    }
+
+    private var effectivePadLayoutSnapshot: PadLayoutSnapshot? {
+        layoutPresets.effectiveSnapshot(for: runtimePadLayoutIdentity)
+    }
+
+    private var effectivePadSkinDescriptor: VPadSkinDescriptor {
+        layoutPresets.effectiveSkinDescriptor(for: runtimePadLayoutIdentity, using: skinLibrary)
+    }
+
+    private var runtimePadLayoutEditorContext: PadLayoutEditorContext {
+        let preset = layoutPresets.effectivePreset(for: runtimePadLayoutIdentity)
+        let editablePresetID = runtimePadLayoutIdentity.flatMap { layoutPresets.presetID(for: $0) }
+            ?? (runtimePadLayoutIdentity == nil ? layoutPresets.globalPresetID : nil)
+        return PadLayoutEditorContext(
+            presetID: editablePresetID,
+            gameIdentity: runtimePadLayoutIdentity,
+            initialSnapshot: preset?.snapshot,
+            skinDescriptor: effectivePadSkinDescriptor
+        )
+    }
+
+    private func runtimePadLayoutIdentityForCurrentGame() -> PadLayoutGameIdentity? {
+        guard let info = ARMSX2Bridge.gameSettingsForCurrentGame() else {
+            return nil
+        }
+        return PadLayoutGameIdentity(
+            serial: info["serial"] as? String,
+            crc: info["crc"] as? String
+        )
     }
 
     private var virtualPadHiddenByController: Bool {
