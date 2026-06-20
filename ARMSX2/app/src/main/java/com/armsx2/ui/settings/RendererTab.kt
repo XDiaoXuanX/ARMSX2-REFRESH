@@ -158,6 +158,14 @@ fun RendererTab(state: MutableState<Settings>) {
         )
         SettingsDivider()
         ToggleRow(
+            "VSync",
+            s.vsyncEnable,
+            description = "Sync presentation to the display refresh — less tearing/smoother, slightly more latency. Restart the game to apply.",
+        ) {
+            apply(s.copy(vsyncEnable = it))
+        }
+        SettingsDivider()
+        ToggleRow(
             "Shadeboost",
             s.shadeBoost,
             description = "Post-process colour controls for brightness, contrast, saturation, and gamma.",

@@ -1207,22 +1207,38 @@ class Main: ComponentActivity() {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val kc = event.keyCode
-        // Menu-button capture (from PadTab). Handled here, not in Compose, so it
+        // System-hotkey capture (from PadTab). Handled here, not in Compose, so it
         // can capture KEYCODE_BACK and back-paddle keys (the back dispatcher
         // swallows those before they'd reach a focusable's onPreviewKeyEvent).
-        if (ControllerMappings.menuCaptureActive.value) {
+        val capturing = ControllerMappings.captureHotkey.value
+        if (capturing != null) {
             if (event.action == KeyEvent.ACTION_DOWN && kc != KeyEvent.KEYCODE_UNKNOWN) {
-                ControllerMappings.bindMenu(kc)
-                ControllerMappings.menuCaptureActive.value = false
-                ControllerMappings.menuBindTick.value++
+                ControllerMappings.bindHotkey(capturing, kc)
+                ControllerMappings.captureHotkey.value = null
+                ControllerMappings.hotkeyBindTick.value++
             }
             return true // swallow down + up while capturing
         }
-        // Runtime: the bound menu button toggles the in-game overlay. Caught here
-        // so a back-button binding works (and isn't eaten by the back handler).
-        if (eState.value == EmuState.RUNNING && ControllerMappings.isMenuKey(kc)) {
-            if (event.action == KeyEvent.ACTION_DOWN) com.armsx2.ui.InGameOverlay.toggle()
-            return true
+        // Runtime: bound system hotkeys (menu / quick save / quick load). Caught
+        // here so back-button bindings work (and aren't eaten by the back handler).
+        if (eState.value == EmuState.RUNNING) {
+            when (ControllerMappings.hotkeyFor(kc)) {
+                ControllerMappings.SysHotkey.MENU -> {
+                    if (event.action == KeyEvent.ACTION_DOWN) com.armsx2.ui.InGameOverlay.toggle()
+                    return true
+                }
+                ControllerMappings.SysHotkey.SAVE_STATE -> {
+                    if (event.action == KeyEvent.ACTION_DOWN)
+                        kotlin.concurrent.thread { runCatching { NativeApp.saveStateToSlot(0) } }
+                    return true
+                }
+                ControllerMappings.SysHotkey.LOAD_STATE -> {
+                    if (event.action == KeyEvent.ACTION_DOWN)
+                        kotlin.concurrent.thread { runCatching { NativeApp.loadStateFromSlot(0) } }
+                    return true
+                }
+                null -> {}
+            }
         }
         return super.dispatchKeyEvent(event)
     }

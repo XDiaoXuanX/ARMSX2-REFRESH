@@ -104,57 +104,57 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             Text("Reset Controller Mappings", color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
 
-        // ---- Menu / Pause access ----
+        // ---- Controller hotkeys (menu / quick save / quick load) ----
         SettingsDivider()
         Text(
-            "Menu / Pause access",
+            "Controller hotkeys",
             color = Color.White,
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
         )
-        HelpText("Bind a physical button to open the in-game menu (handy on devices with a dedicated menu/back button), and control when the on-screen touch controls show — set to Never to hide them (and the cog) on physical-controls devices.")
-        run {
+        HelpText("Bind physical buttons (back paddles work too) to open the menu and quick save/load state — handy with a controller, no on-screen cog needed. Quick save/load use slot 0.")
+        ControllerMappings.SysHotkey.values().forEach { hk ->
             @Suppress("UNUSED_EXPRESSION") refreshToken.value
-            @Suppress("UNUSED_EXPRESSION") ControllerMappings.menuBindTick.value
-            val capturingMenu = ControllerMappings.menuCaptureActive.value
-            val menuKey = ControllerMappings.menuKeyCode()
-            val unset = menuKey == android.view.KeyEvent.KEYCODE_UNKNOWN
+            @Suppress("UNUSED_EXPRESSION") ControllerMappings.hotkeyBindTick.value
+            val capturing = ControllerMappings.captureHotkey.value == hk
+            val code = ControllerMappings.hotkeyCode(hk)
+            val unset = code == android.view.KeyEvent.KEYCODE_UNKNOWN
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(30.dp)
                     .background(rowAura())
-                    .clickable { ControllerMappings.menuCaptureActive.value = true }
+                    .clickable { ControllerMappings.captureHotkey.value = hk }
                     .padding(horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Menu Button", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(hk.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
-                if (!unset && !capturingMenu) {
+                if (!unset && !capturing) {
                     Text(
                         "Clear",
                         color = Color(0xFFFF6B6B),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier
-                            .clickable { ControllerMappings.clearMenu(); ControllerMappings.menuBindTick.value++ }
+                            .clickable { ControllerMappings.clearHotkey(hk); ControllerMappings.hotkeyBindTick.value++ }
                             .padding(end = 10.dp),
                     )
                 }
                 Text(
                     when {
-                        capturingMenu -> "Press any button (incl. back)…"
+                        capturing -> "Press any button (incl. back)…"
                         unset -> "Not set"
-                        else -> ControllerMappings.labelForKey(menuKey)
+                        else -> ControllerMappings.labelForKey(code)
                     },
-                    color = if (capturingMenu) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
+                    color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                 )
             }
+            SettingsDivider()
         }
-        SettingsDivider()
         IntSliderRow(
             label = "On-screen controls",
             value = TouchControls.visibilityMode.value,

@@ -61,6 +61,36 @@ data class GameInfo(
         else
             "https://raw.githubusercontent.com/xlenore/$repo/main/covers/default/$s.jpg"
     }
+
+    /** Human-readable region (USA / Europe / Japan / …) from the serial prefix,
+     *  or null if unrecognized. Shown under the cover so users can tell apart
+     *  multiple regional versions of the same game. */
+    val region: String? get() = serial?.let { regionForSerial(it) }
+
+    /** Region as a flag emoji (🇺🇸 / 🇪🇺 / 🇯🇵 / …) for the cover label, or null.
+     *  Rendered ahead of the title so the region is always visible even when a
+     *  long name wraps/ellipsizes. */
+    val regionFlag: String? get() = region?.let { regionFlagFor(it) }
+}
+
+/** Map a PS1/PS2 serial prefix to a region label. */
+fun regionForSerial(serial: String): String? = when (serial.take(4).uppercase()) {
+    "SLUS", "SCUS", "PBPX", "LSP0" -> "USA"
+    "SLES", "SCES", "SLED", "SCED", "SLPN" -> "Europe"
+    "SLPS", "SLPM", "SCPS", "SCAJ", "ALCH", "PAPX", "ROSE", "TCPS", "KOEI", "PCPX", "CPCS" -> "Japan"
+    "SLKA", "SCKA" -> "Korea"
+    "SLAJ" -> "Asia"
+    else -> null
+}
+
+/** Map a region label to a flag emoji. Asia falls back to a globe. */
+fun regionFlagFor(region: String): String? = when (region) {
+    "USA" -> "🇺🇸"
+    "Europe" -> "🇪🇺"
+    "Japan" -> "🇯🇵"
+    "Korea" -> "🇰🇷"
+    "Asia" -> "🌏"
+    else -> null
 }
 
 /**

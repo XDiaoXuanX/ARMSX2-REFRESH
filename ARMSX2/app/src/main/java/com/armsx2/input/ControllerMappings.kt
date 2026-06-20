@@ -69,36 +69,37 @@ object ControllerMappings {
     fun targetForPhysical(physicalKeyCode: Int): Int? =
         actions.firstOrNull { physicalFor(it) == physicalKeyCode }?.targetKeyCode
 
-    // ---- Menu / pause button --------------------------------------------
-    // A physical button bound to open the in-game menu (like ARMSX2 OG, and
-    // handy for devices with a dedicated menu button, e.g. AYANEO). Stored
-    // separately from the emulator-input actions: it isn't forwarded to the
-    // PS2, it toggles the overlay. KEYCODE_UNKNOWN = unbound (default).
-    private const val KEY_MENU = "pad.menu.keycode"
-
-    fun menuKeyCode(): Int =
-        Main.prefs.getInt(KEY_MENU, KeyEvent.KEYCODE_UNKNOWN)
-
-    fun bindMenu(physicalKeyCode: Int) {
-        Main.prefs.edit().putInt(KEY_MENU, physicalKeyCode).apply()
+    // ---- System hotkeys (menu / quick save / quick load) -----------------
+    // Physical buttons bound to app actions, NOT forwarded to the PS2. Handled in
+    // Main.dispatchKeyEvent (so they can catch KEYCODE_BACK / back-paddle keys the
+    // back dispatcher would otherwise swallow). KEYCODE_UNKNOWN = unbound.
+    enum class SysHotkey(val prefKey: String, val label: String) {
+        MENU("pad.menu.keycode", "Menu / Pause"),
+        SAVE_STATE("pad.savestate.keycode", "Quick Save State"),
+        LOAD_STATE("pad.loadstate.keycode", "Quick Load State"),
     }
 
-    fun clearMenu() {
-        Main.prefs.edit().putInt(KEY_MENU, KeyEvent.KEYCODE_UNKNOWN).apply()
+    fun hotkeyCode(h: SysHotkey): Int =
+        Main.prefs.getInt(h.prefKey, KeyEvent.KEYCODE_UNKNOWN)
+
+    fun bindHotkey(h: SysHotkey, physicalKeyCode: Int) {
+        Main.prefs.edit().putInt(h.prefKey, physicalKeyCode).apply()
     }
 
-    /** True when [physicalKeyCode] is the (set) menu button. */
-    fun isMenuKey(physicalKeyCode: Int): Boolean {
-        val menu = menuKeyCode()
-        return menu != KeyEvent.KEYCODE_UNKNOWN && physicalKeyCode == menu
+    fun clearHotkey(h: SysHotkey) {
+        Main.prefs.edit().putInt(h.prefKey, KeyEvent.KEYCODE_UNKNOWN).apply()
     }
 
-    // Capture bridge: PadTab sets [menuCaptureActive] = true, then the next key
-    // seen by Main.dispatchKeyEvent is bound as the menu button. dispatchKeyEvent
-    // is used (not Compose onPreviewKeyEvent) so it can capture KEYCODE_BACK and
-    // back-paddle keys, which the back dispatcher would otherwise swallow.
-    val menuCaptureActive = mutableStateOf(false)
+    /** Which hotkey (if any) [physicalKeyCode] is bound to. */
+    fun hotkeyFor(physicalKeyCode: Int): SysHotkey? {
+        if (physicalKeyCode == KeyEvent.KEYCODE_UNKNOWN) return null
+        return SysHotkey.values().firstOrNull { hotkeyCode(it) == physicalKeyCode }
+    }
 
-    /** Bumped after a menu (re)bind so observing UI recomposes. */
-    val menuBindTick = mutableStateOf(0)
+    // Capture bridge: PadTab sets [captureHotkey]; the next key seen by
+    // Main.dispatchKeyEvent is bound to it. Observed for UI feedback.
+    val captureHotkey = mutableStateOf<SysHotkey?>(null)
+
+    /** Bumped after a (re)bind so observing UI recomposes. */
+    val hotkeyBindTick = mutableStateOf(0)
 }

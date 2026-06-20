@@ -41,6 +41,24 @@ fun PerformanceTab(state: MutableState<Settings>) {
             .fillMaxWidth()
             .verticalScroll(scroll),
     ) {
+        // Speedhack profile presets. Equality against s.copy(...) means the
+        // segment auto-reflects "Custom" once the user tweaks any speedhack below.
+        run {
+            val safe = s.copy(eeCycleRate = 0, eeCycleSkip = 0, mtvu = true, vu1Instant = true,
+                vuFlagHack = true, intcStat = true, waitLoop = true, fastCDVD = false)
+            val fast = s.copy(eeCycleRate = 0, eeCycleSkip = 2, mtvu = true, vu1Instant = true,
+                vuFlagHack = true, intcStat = true, waitLoop = true, fastCDVD = true)
+            // -1 = neither preset matches (custom): no segment highlighted.
+            val idx = when (s) { safe -> 0; fast -> 1; else -> -1 }
+            SegmentedRow(
+                label = "Speedhack Profile",
+                options = listOf("Optimal", "Fast"),
+                selectedIndex = idx,
+                onChange = { when (it) { 0 -> apply(safe); 1 -> apply(fast) } },
+            )
+        }
+        HelpText("Tap a preset. Optimal = safe for most games. Fast = aggressive (EE cycle skip + fast CDVD) for low-end devices; may glitch some. Tweaking any speedhack below un-highlights both (custom).")
+        SettingsDivider()
         IntSliderRow(
             label = "EE Cycle Rate",
             value = s.eeCycleRate,

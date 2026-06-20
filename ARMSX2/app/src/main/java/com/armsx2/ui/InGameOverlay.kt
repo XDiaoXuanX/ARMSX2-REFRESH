@@ -324,8 +324,35 @@ object InGameOverlay {
         if (previous.audioMuted != updated.audioMuted)
             NativeApp.setAudioMuted(updated.audioMuted)
 
+        // SyncMode / buffer / latency / FF-volume reconfigure the SPU2 stream, so
+        // they need the commit path (ApplySettings → spu2 ApplyConfig). Parks the
+        // VM briefly; only fires when one of them actually changed.
+        if (previous.audioTimeStretch != updated.audioTimeStretch ||
+            previous.audioBufferMs != updated.audioBufferMs ||
+            previous.audioOutputLatencyMs != updated.audioOutputLatencyMs ||
+            previous.audioFastForwardVolume != updated.audioFastForwardVolume) {
+            NativeApp.setSetting("SPU2/Output", "SyncMode", "string",
+                if (updated.audioTimeStretch) "TimeStretch" else "Disabled")
+            NativeApp.setSetting("SPU2/Output", "BufferMS", "int", updated.audioBufferMs.coerceIn(10, 200).toString())
+            NativeApp.setSetting("SPU2/Output", "OutputLatencyMS", "int", updated.audioOutputLatencyMs.coerceIn(5, 200).toString())
+            NativeApp.setSetting("SPU2/Output", "FastForwardVolume", "int", updated.audioFastForwardVolume.coerceIn(0, 200).toString())
+            NativeApp.commitSettings()
+        }
+
         if (previous.vu1Instant != updated.vu1Instant)
             NativeApp.setInstantVU1(updated.vu1Instant)
+
+        // EE Cycle Rate / Skip are baked into compiled blocks (recScaleBlockCycles
+        // runs at compile time), so a change only takes effect once the EE rec is
+        // reset. That needs the full commit path: setSetting + commitSettings →
+        // VMManager::ApplySettings → CheckForConfigChanges → ClearCPUExecutionCaches.
+        // It parks the VM (heavier than the other live deltas), but it's the only
+        // way these actually apply in-game — without it they silently do nothing.
+        if (previous.eeCycleRate != updated.eeCycleRate || previous.eeCycleSkip != updated.eeCycleSkip) {
+            NativeApp.setSetting("EmuCore/Speedhacks", "EECycleRate", "int", updated.eeCycleRate.toString())
+            NativeApp.setSetting("EmuCore/Speedhacks", "EECycleSkip", "int", updated.eeCycleSkip.toString())
+            NativeApp.commitSettings()
+        }
 
         // Manual frameskip — GS-thread global, applies on the next VSync. No
         // VM park, so it's safe to push live.

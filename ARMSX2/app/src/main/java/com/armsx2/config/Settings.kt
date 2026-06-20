@@ -76,6 +76,16 @@ data class Settings(
     val audioVolume: Int = 100,
     /** SPU2/Output/OutputMuted — mute audio output. */
     val audioMuted: Boolean = false,
+    /** SPU2/Output/SyncMode — TimeStretch keeps pitch stable under load; off
+     *  (Disabled) is lower CPU but drifts pitch when frame-time varies. */
+    val audioTimeStretch: Boolean = true,
+    /** SPU2/Output/BufferMS — audio buffer size (ms). Higher = fewer dropouts,
+     *  more latency. 50 = default; raise if audio stutters on low-end devices. */
+    val audioBufferMs: Int = 50,
+    /** SPU2/Output/OutputLatencyMS — target output latency (ms). 20 = default. */
+    val audioOutputLatencyMs: Int = 20,
+    /** SPU2/Output/FastForwardVolume — output volume % while fast-forwarding. */
+    val audioFastForwardVolume: Int = 100,
 
     // ---- EmuCore — patches / cheats ----
     /** EmuCore/EnablePatches — game-compatibility patches (default on). */
@@ -232,6 +242,9 @@ data class Settings(
     // Disabling GPU also stops the GPU timing queries (real perf win).
     /** EmuCore/GS/OsdShowFPS. */
     val osdShowFps: Boolean = true,
+    /** EmuCore/GS/VsyncEnable — sync presentation to the display refresh (less
+     *  tearing/smoother, slightly higher latency). Applies on game restart. */
+    val vsyncEnable: Boolean = false,
     /** EmuCore/GS/OsdShowVPS. */
     val osdShowVps: Boolean = true,
     /** EmuCore/GS/OsdShowSpeed. */
@@ -348,9 +361,14 @@ data class Settings(
         // Manual frameskip (0..5) — present 1 of every (N+1) frames. Held as a
         // GS-thread global, applied live; no persisted EmuCore key needed.
         NativeApp.setFrameSkip(frameSkip.coerceIn(0, 5))
-        // Audio (SPU2). Live + persisted by the native setters.
+        // Audio (SPU2). Volume/mute are live native setters; the rest are written
+        // to the base layer and applied on commit (SPU2 stream reconfigure).
         NativeApp.setAudioVolume(audioVolume.coerceIn(0, 200))
         NativeApp.setAudioMuted(audioMuted)
+        NativeApp.setSetting("SPU2/Output", "SyncMode", "string", if (audioTimeStretch) "TimeStretch" else "Disabled")
+        NativeApp.setSetting("SPU2/Output", "BufferMS", "int", audioBufferMs.coerceIn(10, 200).toString())
+        NativeApp.setSetting("SPU2/Output", "OutputLatencyMS", "int", audioOutputLatencyMs.coerceIn(5, 200).toString())
+        NativeApp.setSetting("SPU2/Output", "FastForwardVolume", "int", audioFastForwardVolume.coerceIn(0, 200).toString())
         // Patches / cheats (EmuCore). Reloaded by ApplySettings →
         // CheckForPatchConfigChanges; widescreen/no-interlacing take effect on
         // the next boot for most games.
@@ -464,6 +482,7 @@ data class Settings(
         NativeApp.setSetting("EmuCore/GS", "DumpReplaceableTextures", "bool", dumpReplaceableTextures.toString())
         NativeApp.setSetting("EmuCore/GS", "OsdShowTextureReplacements", "bool", osdShowTextureReplacements.toString())
         NativeApp.setSetting("EmuCore/GS", "OsdShowFPS", "bool", osdShowFps.toString())
+        NativeApp.setSetting("EmuCore/GS", "VsyncEnable", "bool", vsyncEnable.toString())
         NativeApp.setSetting("EmuCore/GS", "OsdShowVPS", "bool", osdShowVps.toString())
         NativeApp.setSetting("EmuCore/GS", "OsdShowSpeed", "bool", osdShowSpeed.toString())
         NativeApp.setSetting("EmuCore/GS", "OsdShowCPU", "bool", osdShowCpu.toString())
@@ -603,6 +622,10 @@ data class Settings(
         put("frameSkip", frameSkip)
         put("audioVolume", audioVolume)
         put("audioMuted", audioMuted)
+        put("audioTimeStretch", audioTimeStretch)
+        put("audioBufferMs", audioBufferMs)
+        put("audioOutputLatencyMs", audioOutputLatencyMs)
+        put("audioFastForwardVolume", audioFastForwardVolume)
         put("enablePatches", enablePatches)
         put("enableCheats", enableCheats)
         put("enableWideScreenPatches", enableWideScreenPatches)
@@ -663,6 +686,7 @@ data class Settings(
         put("dumpReplaceableTextures", dumpReplaceableTextures)
         put("osdShowTextureReplacements", osdShowTextureReplacements)
         put("osdShowFps", osdShowFps)
+        put("vsyncEnable", vsyncEnable)
         put("osdShowVps", osdShowVps)
         put("osdShowSpeed", osdShowSpeed)
         put("osdShowCpu", osdShowCpu)
@@ -725,6 +749,10 @@ data class Settings(
                 frameSkip = json.optInt("frameSkip", def.frameSkip),
                 audioVolume = json.optInt("audioVolume", def.audioVolume),
                 audioMuted = json.optBoolean("audioMuted", def.audioMuted),
+                audioTimeStretch = json.optBoolean("audioTimeStretch", def.audioTimeStretch),
+                audioBufferMs = json.optInt("audioBufferMs", def.audioBufferMs),
+                audioOutputLatencyMs = json.optInt("audioOutputLatencyMs", def.audioOutputLatencyMs),
+                audioFastForwardVolume = json.optInt("audioFastForwardVolume", def.audioFastForwardVolume),
                 enablePatches = json.optBoolean("enablePatches", def.enablePatches),
                 enableCheats = json.optBoolean("enableCheats", def.enableCheats),
                 enableWideScreenPatches = json.optBoolean("enableWideScreenPatches", def.enableWideScreenPatches),
@@ -789,6 +817,7 @@ data class Settings(
                 dumpReplaceableTextures = json.optBoolean("dumpReplaceableTextures", def.dumpReplaceableTextures),
                 osdShowTextureReplacements = json.optBoolean("osdShowTextureReplacements", def.osdShowTextureReplacements),
                 osdShowFps = json.optBoolean("osdShowFps", def.osdShowFps),
+                vsyncEnable = json.optBoolean("vsyncEnable", def.vsyncEnable),
                 osdShowVps = json.optBoolean("osdShowVps", def.osdShowVps),
                 osdShowSpeed = json.optBoolean("osdShowSpeed", def.osdShowSpeed),
                 osdShowCpu = json.optBoolean("osdShowCpu", def.osdShowCpu),
@@ -857,6 +886,10 @@ data class Settings(
             if (current.frameSkip != base.frameSkip) j.put("frameSkip", current.frameSkip)
             if (current.audioVolume != base.audioVolume) j.put("audioVolume", current.audioVolume)
             if (current.audioMuted != base.audioMuted) j.put("audioMuted", current.audioMuted)
+            if (current.audioTimeStretch != base.audioTimeStretch) j.put("audioTimeStretch", current.audioTimeStretch)
+            if (current.audioBufferMs != base.audioBufferMs) j.put("audioBufferMs", current.audioBufferMs)
+            if (current.audioOutputLatencyMs != base.audioOutputLatencyMs) j.put("audioOutputLatencyMs", current.audioOutputLatencyMs)
+            if (current.audioFastForwardVolume != base.audioFastForwardVolume) j.put("audioFastForwardVolume", current.audioFastForwardVolume)
             if (current.enablePatches != base.enablePatches) j.put("enablePatches", current.enablePatches)
             if (current.enableCheats != base.enableCheats) j.put("enableCheats", current.enableCheats)
             if (current.enableWideScreenPatches != base.enableWideScreenPatches) j.put("enableWideScreenPatches", current.enableWideScreenPatches)
@@ -917,6 +950,7 @@ data class Settings(
             if (current.dumpReplaceableTextures != base.dumpReplaceableTextures) j.put("dumpReplaceableTextures", current.dumpReplaceableTextures)
             if (current.osdShowTextureReplacements != base.osdShowTextureReplacements) j.put("osdShowTextureReplacements", current.osdShowTextureReplacements)
             if (current.osdShowFps != base.osdShowFps) j.put("osdShowFps", current.osdShowFps)
+            if (current.vsyncEnable != base.vsyncEnable) j.put("vsyncEnable", current.vsyncEnable)
             if (current.osdShowVps != base.osdShowVps) j.put("osdShowVps", current.osdShowVps)
             if (current.osdShowSpeed != base.osdShowSpeed) j.put("osdShowSpeed", current.osdShowSpeed)
             if (current.osdShowCpu != base.osdShowCpu) j.put("osdShowCpu", current.osdShowCpu)
@@ -975,6 +1009,10 @@ data class Settings(
             frameSkip = if (overrides.has("frameSkip")) overrides.getInt("frameSkip") else base.frameSkip,
             audioVolume = if (overrides.has("audioVolume")) overrides.getInt("audioVolume") else base.audioVolume,
             audioMuted = if (overrides.has("audioMuted")) overrides.getBoolean("audioMuted") else base.audioMuted,
+            audioTimeStretch = if (overrides.has("audioTimeStretch")) overrides.getBoolean("audioTimeStretch") else base.audioTimeStretch,
+            audioBufferMs = if (overrides.has("audioBufferMs")) overrides.getInt("audioBufferMs") else base.audioBufferMs,
+            audioOutputLatencyMs = if (overrides.has("audioOutputLatencyMs")) overrides.getInt("audioOutputLatencyMs") else base.audioOutputLatencyMs,
+            audioFastForwardVolume = if (overrides.has("audioFastForwardVolume")) overrides.getInt("audioFastForwardVolume") else base.audioFastForwardVolume,
             enablePatches = if (overrides.has("enablePatches")) overrides.getBoolean("enablePatches") else base.enablePatches,
             enableCheats = if (overrides.has("enableCheats")) overrides.getBoolean("enableCheats") else base.enableCheats,
             enableWideScreenPatches = if (overrides.has("enableWideScreenPatches")) overrides.getBoolean("enableWideScreenPatches") else base.enableWideScreenPatches,
@@ -1039,6 +1077,7 @@ data class Settings(
             dumpReplaceableTextures = if (overrides.has("dumpReplaceableTextures")) overrides.getBoolean("dumpReplaceableTextures") else base.dumpReplaceableTextures,
             osdShowTextureReplacements = if (overrides.has("osdShowTextureReplacements")) overrides.getBoolean("osdShowTextureReplacements") else base.osdShowTextureReplacements,
             osdShowFps = if (overrides.has("osdShowFps")) overrides.getBoolean("osdShowFps") else base.osdShowFps,
+            vsyncEnable = if (overrides.has("vsyncEnable")) overrides.getBoolean("vsyncEnable") else base.vsyncEnable,
             osdShowVps = if (overrides.has("osdShowVps")) overrides.getBoolean("osdShowVps") else base.osdShowVps,
             osdShowSpeed = if (overrides.has("osdShowSpeed")) overrides.getBoolean("osdShowSpeed") else base.osdShowSpeed,
             osdShowCpu = if (overrides.has("osdShowCpu")) overrides.getBoolean("osdShowCpu") else base.osdShowCpu,

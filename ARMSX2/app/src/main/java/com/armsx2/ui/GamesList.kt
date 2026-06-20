@@ -344,7 +344,7 @@ object GamesList {
                         coverWidth = if (landscape) 92.dp else 98.dp,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(if (landscape) 204.dp else 178.dp),
+                            .height(if (landscape) 220.dp else 194.dp),
                     )
                 }
             } else {
@@ -372,7 +372,7 @@ object GamesList {
                         coverWidth = if (landscape) 86.dp else 98.dp,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(if (landscape) 188.dp else 214.dp),
+                            .height(if (landscape) 204.dp else 230.dp),
                     )
                 }
             }
@@ -758,6 +758,20 @@ object GamesList {
                         ),
                 )
             }
+            // Cover art already carries the title, so the only label is the
+            // region flag — lets users tell regional versions apart without the
+            // redundant (and cramped) text title under every card.
+            game.regionFlag?.let { flag ->
+                Text(
+                    flag,
+                    fontSize = 15.sp,
+                    maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                )
+            }
         }
     }
 
@@ -1022,7 +1036,7 @@ object GamesList {
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    game.serial ?: "Unknown serial",
+                    game.serial?.let { s -> game.region?.let { "$s · $it" } ?: s } ?: "Unknown serial",
                     color = if (game.serial != null) Color(0xFFAACCFF) else Color(0xFF6F6F6F),
                     fontSize = 10.sp,
                     maxLines = 1,
