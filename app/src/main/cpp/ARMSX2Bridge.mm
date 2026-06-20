@@ -1208,6 +1208,60 @@ static BOOL ARMSX2IsControllerSkinImageName(NSString* name)
            [ext isEqualToString:@"jpeg"] || [ext isEqualToString:@"webp"];
 }
 
+static NSString* ARMSX2ControllerSkinJSONImportKey(NSString* name)
+{
+    NSString* last = name.lastPathComponent.lowercaseString;
+    if (last.length == 0 || ![last.pathExtension.lowercaseString isEqualToString:@"json"])
+        return nil;
+
+    return last;
+}
+
+static BOOL ARMSX2IsControllerSkinImportName(NSString* name, NSSet<NSString*>* allowedJSONNames)
+{
+    if (ARMSX2IsControllerSkinImageName(name))
+        return YES;
+
+    NSString* key = ARMSX2ControllerSkinJSONImportKey(name);
+    return key.length > 0 && [allowedJSONNames containsObject:key];
+}
+
+static NSMutableSet<NSString*>* ARMSX2AllowedControllerSkinJSONNames(zip_t* zf, zip_int64_t count)
+{
+    NSMutableSet<NSString*>* allowedJSONNames = [NSMutableSet setWithObject:@"manifest.json"];
+    for (zip_uint64_t i = 0; i < static_cast<zip_uint64_t>(std::max<zip_int64_t>(count, 0)); i++) {
+        zip_stat_t stat = {};
+        if (zip_stat_index(zf, i, ZIP_FL_ENC_GUESS, &stat) != 0 || !stat.name)
+            continue;
+
+        NSString* entryName = [NSString stringWithUTF8String:stat.name];
+        if (![ARMSX2ControllerSkinJSONImportKey(entryName) isEqualToString:@"manifest.json"])
+            continue;
+
+        auto file = zip_fopen_index_managed(zf, i, ZIP_FL_ENC_GUESS);
+        if (!file)
+            continue;
+
+        std::optional<std::vector<u8>> data = ReadBinaryFileInZip(file.get());
+        if (!data.has_value() || data->empty())
+            continue;
+
+        NSData* manifestData = [NSData dataWithBytes:data->data() length:data->size()];
+        id manifestObject = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil];
+        if (![manifestObject isKindOfClass:NSDictionary.class])
+            continue;
+
+        id layoutValue = [(NSDictionary*)manifestObject objectForKey:@"layout"];
+        if (![layoutValue isKindOfClass:NSString.class])
+            continue;
+
+        NSString* layoutKey = ARMSX2ControllerSkinJSONImportKey((NSString*)layoutValue);
+        if (layoutKey.length > 0)
+            [allowedJSONNames addObject:layoutKey];
+    }
+    return allowedJSONNames;
+}
+
 static NSString* ARMSX2SanitizedSkinFileName(NSString* name)
 {
     NSString* last = name.lastPathComponent;
@@ -1429,6 +1483,14 @@ static NSMutableDictionary<NSString*, id>* ARMSX2BuildGlobalGameSettingsResult()
     const bool globalEnableGameDBHardwareFixes = g_p44_settings_interface ? !g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks", false) : true;
     const int globalEECoreType = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2) : 2;
     const bool globalMTVU = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", true) : true;
+    const int globalEECycleRate = ARMSX2ClampInt(
+        g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/Speedhacks", "EECycleRate", 0) : 0,
+        -3,
+        3);
+    const bool globalFastBoot = g_p44_settings_interface ?
+        g_p44_settings_interface->GetBoolValue(
+            "EmuCore", "EnableFastBoot",
+            g_p44_settings_interface->GetBoolValue("GameISO", "FastBoot", false)) : false;
     const int globalVolumePercent = ARMSX2ClampInt(
         g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("SPU2/Output", "StandardVolume", ARMSX2DefaultAudioVolumePercent) : ARMSX2DefaultAudioVolumePercent,
         0,
@@ -1470,6 +1532,12 @@ static NSMutableDictionary<NSString*, id>* ARMSX2BuildGlobalGameSettingsResult()
         @"enableGameDBHardwareFixes": @(globalEnableGameDBHardwareFixes),
         @"eeCoreType": @(globalEECoreType),
         @"mtvu": @(globalMTVU),
+        @"globalEECycleRate": @(globalEECycleRate),
+        @"eeCycleRate": @(globalEECycleRate),
+        @"hasEECycleRateOverride": @NO,
+        @"globalFastBoot": @(globalFastBoot),
+        @"fastBoot": @(globalFastBoot),
+        @"hasFastBootOverride": @NO,
         @"globalVolumePercent": @(globalVolumePercent),
         @"volumePercent": @(globalVolumePercent),
         @"hasVolumeOverride": @NO,
@@ -1529,6 +1597,8 @@ static void ARMSX2ApplyPerGameSettingsOverrides(NSMutableDictionary<NSString*, i
         si.ContainsValue("EmuCore/CPU", "CoreType") ||
         si.ContainsValue("EmuCore/CPU", "UseArm64Dynarec") ||
         si.ContainsValue("EmuCore/Speedhacks", "vuThread") ||
+        si.ContainsValue("EmuCore/Speedhacks", "EECycleRate") ||
+        si.ContainsValue("EmuCore", "EnableFastBoot") ||
         si.ContainsValue("SPU2/Output", "StandardVolume") ||
         si.ContainsValue("SPU2/Output", "FastForwardVolume");
 
@@ -1575,6 +1645,10 @@ static void ARMSX2ApplyPerGameSettingsOverrides(NSMutableDictionary<NSString*, i
     result[@"enableGameDBHardwareFixes"] = @(!si.GetBoolValue("EmuCore/GS", "UserHacks", ![result[@"enableGameDBHardwareFixes"] boolValue]));
     result[@"eeCoreType"] = @(si.GetIntValue("EmuCore/CPU", "CoreType", [result[@"eeCoreType"] intValue]));
     result[@"mtvu"] = @(si.GetBoolValue("EmuCore/Speedhacks", "vuThread", [result[@"mtvu"] boolValue]));
+    result[@"hasEECycleRateOverride"] = @(si.ContainsValue("EmuCore/Speedhacks", "EECycleRate"));
+    result[@"eeCycleRate"] = @(ARMSX2ClampInt(si.GetIntValue("EmuCore/Speedhacks", "EECycleRate", [result[@"eeCycleRate"] intValue]), -3, 3));
+    result[@"hasFastBootOverride"] = @(si.ContainsValue("EmuCore", "EnableFastBoot"));
+    result[@"fastBoot"] = @(si.GetBoolValue("EmuCore", "EnableFastBoot", [result[@"fastBoot"] boolValue]));
 }
 
 static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
@@ -1607,6 +1681,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                                 int volumePercent,
                                                 int eeCoreType,
                                                 BOOL mtvu,
+                                                BOOL eeCycleRateOverride,
+                                                int eeCycleRate,
+                                                BOOL fastBootOverride,
+                                                BOOL fastBoot,
                                                 BOOL enableCheats,
                                                 BOOL enablePatches,
                                                 BOOL enableGameFixes,
@@ -1706,6 +1784,22 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
             si.SetIntValue("ARMSX2iOS/PerGame", "ManualMTVUVersion", 3);
             si.SetBoolValue("EmuCore/Speedhacks", "vuThread", mtvu);
         }
+
+        if (eeCycleRateOverride) {
+            int clampedEECycleRate = ARMSX2ClampInt(eeCycleRate, -3, 3);
+            if (ARMSX2RetroAchievementsHardcoreActive() && clampedEECycleRate < 0) {
+                ARMSX2LogRetroAchievementsHardcoreBlock("per_game_ee_underclock");
+                clampedEECycleRate = 0;
+            }
+            si.SetIntValue("EmuCore/Speedhacks", "EECycleRate", clampedEECycleRate);
+        } else {
+            si.DeleteValue("EmuCore/Speedhacks", "EECycleRate");
+        }
+
+        if (fastBootOverride)
+            si.SetBoolValue("EmuCore", "EnableFastBoot", fastBoot);
+        else
+            si.DeleteValue("EmuCore", "EnableFastBoot");
     } else {
         si.DeleteValue("ARMSX2iOS/PerGame", "Enabled");
         si.DeleteValue("EmuCore/GS", "upscale_multiplier");
@@ -1733,6 +1827,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         si.DeleteValue("ARMSX2iOS/PerGame", "ManualMTVU");
         si.DeleteValue("ARMSX2iOS/PerGame", "ManualMTVUVersion");
         si.DeleteValue("EmuCore/Speedhacks", "vuThread");
+        si.DeleteValue("EmuCore/Speedhacks", "EECycleRate");
+        si.DeleteValue("EmuCore", "EnableFastBoot");
         si.DeleteValue("SPU2/Output", "StandardVolume");
         si.DeleteValue("SPU2/Output", "FastForwardVolume");
         si.RemoveEmptySections();
@@ -1925,6 +2021,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 
 + (nonnull NSArray<NSURL *> *)extractControllerSkinArchiveAtURL:(nonnull NSURL *)archiveURL
                                                     toDirectory:(nonnull NSURL *)destinationDirectory {
+    static const zip_uint64_t kMaxSkinArchiveEntryBytes = 16 * 1024 * 1024;
+    static const NSUInteger kMaxSkinArchiveEntries = 64;
+    static const zip_int64_t kMaxSkinArchiveTotalEntries = 512;
+
     NSMutableArray<NSURL *> *extracted = [NSMutableArray array];
     if (!archiveURL.isFileURL || !destinationDirectory.isFileURL)
         return extracted;
@@ -1948,13 +2048,24 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     }
 
     const zip_int64_t count = zip_get_num_entries(zf.get(), 0);
+    if (count > kMaxSkinArchiveTotalEntries) {
+        NSLog(@"[ARMSX2 iOS Skins] Skin archive has too many entries (%lld); skipping %@.",
+              static_cast<long long>(count), archiveURL.lastPathComponent);
+        return extracted;
+    }
+    NSSet<NSString*>* allowedJSONNames = ARMSX2AllowedControllerSkinJSONNames(zf.get(), count);
     for (zip_uint64_t i = 0; i < static_cast<zip_uint64_t>(std::max<zip_int64_t>(count, 0)); i++) {
+        if (extracted.count >= kMaxSkinArchiveEntries)
+            break;
+
         zip_stat_t stat = {};
         if (zip_stat_index(zf.get(), i, ZIP_FL_ENC_GUESS, &stat) != 0 || !stat.name)
             continue;
+        if ((stat.valid & ZIP_STAT_SIZE) && stat.size > kMaxSkinArchiveEntryBytes)
+            continue;
 
         NSString *entryName = [NSString stringWithUTF8String:stat.name];
-        if (entryName.length == 0 || [entryName hasSuffix:@"/"] || !ARMSX2IsControllerSkinImageName(entryName))
+        if (entryName.length == 0 || [entryName hasSuffix:@"/"] || !ARMSX2IsControllerSkinImportName(entryName, allowedJSONNames))
             continue;
 
         auto file = zip_fopen_index_managed(zf.get(), i, ZIP_FL_ENC_GUESS);
@@ -1975,7 +2086,7 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
             [extracted addObject:destinationURL];
     }
 
-    NSLog(@"[ARMSX2 iOS Skins] Extracted %lu image(s) from %@",
+    NSLog(@"[ARMSX2 iOS Skins] Extracted %lu skin file(s) from %@",
           static_cast<unsigned long>(extracted.count), archiveURL.lastPathComponent);
     return extracted;
 }
@@ -2268,6 +2379,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
            volumePercent:(int)volumePercent
                     eeCoreType:(int)eeCoreType
                           mtvu:(BOOL)mtvu
+           eeCycleRateOverride:(BOOL)eeCycleRateOverride
+                   eeCycleRate:(int)eeCycleRate
+               fastBootOverride:(BOOL)fastBootOverride
+                       fastBoot:(BOOL)fastBoot
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
               enableGameFixes:(BOOL)enableGameFixes
@@ -2287,6 +2402,7 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                         textureOffsetYOverride, textureOffsetY, skipDrawStartOverride,
                                         skipDrawStart, skipDrawEndOverride, skipDrawEnd,
                                         volumeOverride, volumePercent, eeCoreType, mtvu,
+                                        eeCycleRateOverride, eeCycleRate, fastBootOverride, fastBoot,
                                         enableCheats, enablePatches, enableGameFixes, enableGameDBHardwareFixes);
 }
 
@@ -2318,6 +2434,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                      volumePercent:(int)volumePercent
                                       eeCoreType:(int)eeCoreType
                                             mtvu:(BOOL)mtvu
+                             eeCycleRateOverride:(BOOL)eeCycleRateOverride
+                                     eeCycleRate:(int)eeCycleRate
+                                 fastBootOverride:(BOOL)fastBootOverride
+                                         fastBoot:(BOOL)fastBoot
                                     enableCheats:(BOOL)enableCheats
                                    enablePatches:(BOOL)enablePatches
                                  enableGameFixes:(BOOL)enableGameFixes
@@ -2343,6 +2463,7 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                         textureOffsetYOverride, textureOffsetY, skipDrawStartOverride,
                                         skipDrawStart, skipDrawEndOverride, skipDrawEnd,
                                         volumeOverride, volumePercent, eeCoreType, mtvu,
+                                        eeCycleRateOverride, eeCycleRate, fastBootOverride, fastBoot,
                                         enableCheats, enablePatches, enableGameFixes, enableGameDBHardwareFixes);
 
     if (VMManager::HasValidVM()) {

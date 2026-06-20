@@ -159,17 +159,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		${CMAKE_SOURCE_DIR}/../swift/Views/Settings/VirtualPadSettingsView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Views/Settings/PadLayoutEditView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/PadLayoutStore.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/PadLayoutPresetStore.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/PadLayoutImportExport.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/EmulatorBridge.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/SwiftUIHost.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/AppState.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/AppLanguage.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/VirtualPadSkin.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/VPadSkinLibraryStore.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/SettingsStore.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/FileImportHandler.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/ImportFileCopier.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/ExternalGameLibrary.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/ARMSX2DeepLinkHandler.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/ImportDocumentPicker.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/ShareSheet.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/CoverStore.swift
 	)
 
