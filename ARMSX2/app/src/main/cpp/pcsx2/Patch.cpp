@@ -364,6 +364,15 @@ bool Patch::ContainsPatchName(const std::vector<PatchInfo>& patches, const std::
 template <typename F>
 void Patch::EnumeratePnachFiles(const std::string_view serial, u32 crc, bool cheats, bool for_ui, const F& f)
 {
+	// RetroAchievements hardcore: game patches — widescreen / user .pnach from
+	// the in-app patch manager, whether on disk OR in the bundled patches zip —
+	// confer an advantage and must not apply. Skip loading them entirely while
+	// hardcore is active. UI browsing (for_ui) stays allowed so the picker keeps
+	// working; cheats are gated separately via the emptied enabled-cheats list;
+	// GameDB compatibility patches use a different path and are unaffected.
+	if (!cheats && !for_ui && Achievements::IsHardcoreModeActive())
+		return;
+
 	// Prefer files on disk over the zip.
 	std::vector<std::string> disk_patch_files;
 	if (for_ui || !Achievements::IsHardcoreModeActive())
@@ -590,7 +599,13 @@ void Patch::ReloadEnabledLists()
 	else
 		s_enabled_cheats = {};
 
-	const std::vector<std::string> prev_enabled_patches = std::exchange(s_enabled_patches, Host::GetStringListSetting(PATCHES_CONFIG_SECTION, PATCH_ENABLE_CONFIG_KEY));
+	// Hardcore: clear the enabled-patches list too (mirrors the cheats handling
+	// above). Defensive — EnumeratePnachFiles already refuses to load patch
+	// content in hardcore, so there are no groups to match anyway.
+	std::vector<std::string> next_enabled_patches;
+	if (!Achievements::IsHardcoreModeActive())
+		next_enabled_patches = Host::GetStringListSetting(PATCHES_CONFIG_SECTION, PATCH_ENABLE_CONFIG_KEY);
+	const std::vector<std::string> prev_enabled_patches = std::exchange(s_enabled_patches, std::move(next_enabled_patches));
 	const std::vector<std::string> disabled_patches = Host::GetStringListSetting(PATCHES_CONFIG_SECTION, PATCH_DISABLE_CONFIG_KEY);
 
 	// Name based matching for widescreen/NI settings.

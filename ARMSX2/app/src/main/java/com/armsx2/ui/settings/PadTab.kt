@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
@@ -45,8 +46,16 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
     val focusRequester = remember { FocusRequester() }
 
     LaunchedEffect(capture.value) {
+        // Tell Main.dispatchKeyEvent to stop intercepting controller buttons for
+        // overlay nav while we're capturing, so B/A/Y/etc. reach onPreviewKeyEvent
+        // and bind instead of (e.g.) exiting the menu.
+        ControllerMappings.padCapturing.value = capture.value != null
         if (capture.value != null)
             focusRequester.requestFocus()
+    }
+    // Safety: clear the bypass flag if the tab leaves composition mid-capture.
+    DisposableEffect(Unit) {
+        onDispose { ControllerMappings.padCapturing.value = false }
     }
 
     Column(

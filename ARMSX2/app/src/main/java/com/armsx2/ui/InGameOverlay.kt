@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -61,6 +62,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -201,6 +203,11 @@ object InGameOverlay {
     // so it's scrolled rather than item-nav'd). Each ±1 = one step up/down; the
     // AchievementsPanel observes the delta and scrolls its LazyColumn.
     val achievementsScroll = mutableStateOf(0)
+    // True when the signed-in achievement list is scrolled to the very top.
+    // The Softcore/Hardcore toggle sits above the list, so it can only be
+    // focused (by pressing Up) once the list is already at the top — otherwise
+    // Up just scrolls the list up. AchievementsPanel keeps this in sync.
+    val achievementsAtTop = mutableStateOf(true)
 
     // Locally tracked frame-limit toggle. 0 = Nominal (60fps cap),
     // 3 = Unlimited. Matches LimiterModeType / SpeedhackButton wiring.
@@ -460,6 +467,7 @@ object InGameOverlay {
     fun openAchievements() {
         if (!WindowImpl.overlayVisible.value) open()
         SettingsControllerNav.clearSelection()
+        achievementsAtTop.value = true
         state.value = State.Achievements
     }
 
@@ -509,9 +517,37 @@ object InGameOverlay {
             is State.Achievements -> {
                 val delta = if (dy != 0) dy else dx
                 if (delta == 0) return true
-                // Not signed in → the sign-in card is a nav item. Signed in →
-                // no nav items, so scroll the (lazy) achievement list instead.
-                if (SettingsControllerNav.hasItems()) return SettingsControllerNav.move(delta)
+                // A stack of focusable controls (account/logout, hardcore toggle,
+                // and the RA option toggles) sits ABOVE the scrollable achievement
+                // list. Nav model: while a control is focused, Up/Down step through
+                // the stack; Down off the LAST (bottom-most, nearest the list)
+                // control releases focus back to the list so it can scroll. With
+                // nothing focused, Up at the top of the list re-enters the stack at
+                // its bottom; Down always scrolls. This keeps the list scrollable
+                // instead of the focus getting trapped on a single header control.
+                if (SettingsControllerNav.hasItems()) {
+                    val sel = SettingsControllerNav.selectedIndex.value
+                    if (sel >= 0) {
+                        if (delta > 0) {
+                            // Down: next control, or release to the list past the last.
+                            if (sel >= SettingsControllerNav.count() - 1)
+                                SettingsControllerNav.clearSelection()
+                            else
+                                SettingsControllerNav.move(1)
+                        } else {
+                            // Up: previous control (stops at the top of the stack).
+                            SettingsControllerNav.move(-1)
+                        }
+                        return true
+                    }
+                    // Nothing focused (scrolling the list). Up enters the stack at
+                    // its bottom ONLY when the list is already at the top; otherwise
+                    // Up scrolls the list up. Down always scrolls.
+                    if (delta < 0 && achievementsAtTop.value) {
+                        SettingsControllerNav.move(-1)
+                        return true
+                    }
+                }
                 achievementsScroll.value += delta
                 return true
             }
@@ -731,9 +767,17 @@ object InGameOverlay {
     }
 
     private fun enableHardcoreMode() {
+        // Persist ChallengeMode=true, then RESET the VM. Upstream defers a
+        // hardcore-enable on a running game until a clean boot
+        // (Achievements::UpdateSettings shows a "will enable on reset" message
+        // and leaves s_hardcore_mode false); the reset path re-runs
+        // ResetHardcoreMode() which actually flips it on. Without the reset the
+        // flag was set but never engaged, and the poll flipped the button back
+        // to SOFTCORE. Main.restart() reboots the game (same as the Reset menu
+        // item) so hardcore comes up clean.
         NativeApp.setHardcoreMode(true)
         hardcoreOn.value = true
-        enterState(State.Root)
+        resetSystem()
     }
 
     /** Open the overlay. Pauses the VM. Safe to call when already open. */
@@ -920,7 +964,10 @@ object InGameOverlay {
             // Settings tabs use (nearly) the full width so long rows / the tab
             // strip aren't cut off. The Play tab stays compact — its 4-column
             // action grid is laid out for the narrow column (full width spread it
-            // out and broke the layout).
+            // out and broke the layout). On screens narrower than that column it
+            // must shrink to fit instead of overflowing, so the compact width is
+            // a cap (widthIn) over fillMaxWidth, not a hard width — wide screens
+            // (RP6) still get the exact same 520/560dp, small screens scale down.
             val wideContent = state.value is State.Root &&
                 (settingsOnly.value || currentTab.value != Tab.PlayingNow)
             // Headless poll keeps hardcore / renderer / rich-presence state in
@@ -930,7 +977,7 @@ object InGameOverlay {
                 Modifier
                     .align(Alignment.TopStart)
                     .fillMaxHeight()
-                    .then(if (wideContent) Modifier.fillMaxWidth(0.94f) else Modifier.width(560.dp))
+                    .then(if (wideContent) Modifier.fillMaxWidth(0.94f) else Modifier.widthIn(max = 560.dp).fillMaxWidth())
                     .background(
                         Brush.horizontalGradient(
                             listOf(
@@ -967,7 +1014,7 @@ object InGameOverlay {
                     .align(Alignment.TopStart)
                     .fillMaxHeight()
                     .padding(20.dp)
-                    .then(if (wideContent) Modifier.fillMaxWidth(0.90f) else Modifier.width(520.dp)),
+                    .then(if (wideContent) Modifier.fillMaxWidth(0.90f) else Modifier.widthIn(max = 520.dp).fillMaxWidth()),
             ) {
                 GameInfoHeader()
                 if (state.value is State.Root) {
@@ -1003,6 +1050,32 @@ object InGameOverlay {
                                     .padding(end = 4.dp, bottom = 4.dp),
                             )
                         }
+                    }
+                }
+                else if (state.value is State.Achievements) {
+                    // Render the achievements view INSIDE this top-left content
+                    // column (below the GameInfoHeader) instead of the
+                    // bottom-anchored modal box, which overlapped the header —
+                    // the account row's username/points collided with the game
+                    // cover and rich-presence line. weight(1f) hands the list the
+                    // remaining height so it scrolls.
+                    Spacer(Modifier.height(12.dp))
+                    Box(modifier = Modifier.weight(1f)) {
+                        AchievementsPanel(
+                            modifier = Modifier.fillMaxWidth(),
+                            onSignInClick = {
+                                SettingsControllerNav.clearSelection()
+                                state.value = State.AchievementsLogin
+                            },
+                            onHardcoreToggle = {
+                                if (hardcoreOn.value) {
+                                    NativeApp.setHardcoreMode(false)
+                                    hardcoreOn.value = false
+                                } else {
+                                    state.value = State.HardcoreEnableConfirm
+                                }
+                            },
+                        )
                     }
                 }
             }
@@ -1062,7 +1135,9 @@ object InGameOverlay {
             // strip; this panel just hosts modal-ish flows that should
             // sit at the bottom of the screen (Exit / Reset confirms,
             // save-state slot grid).
-            if (state.value !is State.Root) {
+            // State.Achievements renders in the top-left column (above) so it sits
+            // below the header; everything else modal-ish uses this bottom box.
+            if (state.value !is State.Root && state.value !is State.Achievements) {
                 // The login form needs more vertical room than the other
                 // bottom-left states (it has 2 text fields + disclaimer +
                 // buttons), and on landscape phones with the keyboard up
@@ -1071,7 +1146,6 @@ object InGameOverlay {
                 // a taller box.
                 val maxFrac = when {
                     state.value is State.AchievementsLogin -> 0.92f
-                    state.value is State.Achievements -> 0.88f
                     else -> 0.75f
                 }
                 // Slot pickers (Save/Load) span the full screen width so
@@ -1106,23 +1180,9 @@ object InGameOverlay {
                                 state.value = State.Root
                             },
                         )
-                        is State.Achievements -> AchievementsPanel(
-                            modifier = Modifier.fillMaxWidth(),
-                            onSignInClick = {
-                                SettingsControllerNav.clearSelection()
-                                state.value = State.AchievementsLogin
-                            },
-                            onHardcoreToggle = {
-                                if (hardcoreOn.value) {
-                                    NativeApp.setHardcoreMode(false)
-                                    hardcoreOn.value = false
-                                } else {
-                                    state.value = State.HardcoreEnableConfirm
-                                }
-                            },
-                        )
                         is State.HardcoreSaveStateBlocked -> HardcoreBlockedBubble()
                         is State.HardcoreEnableConfirm -> Unit // rendered fullscreen below
+                        is State.Achievements -> Unit // rendered in the top-left column
                         is State.Root -> Unit
                     }
                 }
@@ -1615,12 +1675,22 @@ object InGameOverlay {
      *  current value on a second line. */
     @Composable
     private fun PlayingNowTab() {
+      BoxWithConstraints(Modifier.fillMaxSize()) {
+        // Every cell gets the SAME explicit height (rows are uniform). Earlier the
+        // cells used aspectRatio, which yields to content — so cells with a state
+        // line (Renderer/Frame Limit/OSD) grew taller than plain cells and the
+        // rows looked ragged / overran the bottom. Derive one height that fits all
+        // 3 rows in the available space, clamped so cells aren't tiny or huge.
+        val gap = 8.dp
+        val cellH = ((maxHeight - gap * 2) / 3).coerceIn(64.dp, 112.dp)
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(gap),
         ) {
             // Row 1: primary + save/load + swap disc.
-	            BubbleRow {
+	            BubbleRow(cellH) {
 	                BubbleButton(
 	                    "Resume",
 	                    LineAwesomeIcons.PlaySolid,
@@ -1650,7 +1720,7 @@ object InGameOverlay {
 	                ) { activatePlaySelection(3) }
 	            }
             // Row 2: boot disc + library + renderer + frame limit.
-            BubbleRow {
+            BubbleRow(cellH) {
 	                BubbleButton(
 	                    "Boot Disc",
 	                    LineAwesomeIcons.CompactDiscSolid,
@@ -1686,7 +1756,7 @@ object InGameOverlay {
 	                ) { activatePlaySelection(7) }
 	            }
             // Row 3: touch layout, OSD master toggle, reset, close.
-            BubbleRow {
+            BubbleRow(cellH) {
 	                BubbleButton(
 	                    "Touch Layout",
 	                    LineAwesomeIcons.ThLargeSolid,
@@ -1718,13 +1788,15 @@ object InGameOverlay {
 	                ) { activatePlaySelection(11) }
 	            }
         }
+      }
     }
 
-    /** Even-spaced four-cell row, used by [PlayingNowTab] for grid rows. */
+    /** Even-spaced four-cell row at a fixed [height], used by [PlayingNowTab].
+     *  The fixed height makes every cell uniform regardless of its content. */
     @Composable
-    private fun BubbleRow(content: @Composable RowScope.() -> Unit) {
+    private fun BubbleRow(height: Dp, content: @Composable RowScope.() -> Unit) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().height(height),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             content = content,
         )
@@ -1789,7 +1861,7 @@ object InGameOverlay {
 	        val glowBlue = Color(0xFF3DA5FF)
 	        Column(
 	            modifier = modifier
-	                .aspectRatio(1.35f)
+	                .fillMaxHeight()
 	                .onFocusChanged { focused = it.isFocused }
                 // Controller selection highlight: blue glow + outline when this
 	                // bubble has D-pad focus.

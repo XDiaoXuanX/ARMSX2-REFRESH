@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,6 +74,18 @@ data class AchievementSnapshot(
     val loggedIn: Boolean,
     val hardcore: Boolean,
     val userName: String,
+    /** Hardcore total points; -1 when unknown (no game loaded, so the
+     *  persistent rc_client that holds the score isn't available). */
+    val score: Long = -1,
+    /** Softcore total points; -1 when unknown. */
+    val softcoreScore: Long = -1,
+    // Global RA presentation options, mirrored from [Achievements] settings so
+    // the panel can show + toggle them. Default on, matching native defaults.
+    val notifications: Boolean = true,
+    val leaderboardNotifications: Boolean = true,
+    val overlays: Boolean = true,
+    val lbOverlays: Boolean = true,
+    val soundEffects: Boolean = true,
 )
 
 data class Achievement(
@@ -224,6 +237,13 @@ private fun parseSnapshot(json: String): AchievementSnapshot {
             loggedIn = root.optBoolean("loggedIn", false),
             hardcore = root.optBoolean("hardcore", false),
             userName = root.optString("userName", ""),
+            score = root.optLong("score", -1),
+            softcoreScore = root.optLong("softcoreScore", -1),
+            notifications = root.optBoolean("notifications", true),
+            leaderboardNotifications = root.optBoolean("leaderboardNotifications", true),
+            overlays = root.optBoolean("overlays", true),
+            lbOverlays = root.optBoolean("lbOverlays", true),
+            soundEffects = root.optBoolean("soundEffects", true),
         )
     } catch (_: Exception) {
         AchievementSnapshot(emptyList(), active = false, loggedIn = false,
@@ -324,44 +344,30 @@ fun AchievementsPanel(
     // wide phone screens).
     val showsList = snapshot.loggedIn && snapshot.active && snapshot.items.isNotEmpty()
     Column(modifier.then(if (showsList) Modifier.fillMaxHeight() else Modifier)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Achievements",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f),
-            )
-            // Hardcore toggle button. Greyed when off, red when on. Tap
-            // routes to the host (overlay) which shows a fullscreen
-            // confirmation before flipping the flag — enabling hardcore
-            // resets the running VM, so we want a deliberate action.
-            @Suppress("KotlinConstantConditions")
-            if (false && onHardcoreToggle != null) {
-                val active = snapshot.hardcore
-                val bg = if (active) Color(0xFFB22222) else Color(0xFF333333)
-                val fg = if (active) Color.White else Color(0xFF888888)
-                val border = if (active) Color(0xFFFF6B6B) else Color(0xFF555555)
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(bg)
-                        .border(1.dp, border, RoundedCornerShape(6.dp))
-                        .clickable(onClick = onHardcoreToggle!!)
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "HARDCORE",
-                        color = fg,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
+        // Compact account header (username + points + hardcore + logout), shown
+        // whenever signed in. No "Achievements" heading — it overlapped the
+        // status line drawn behind the panel and added nothing (the overlay's
+        // RetroAchievements chip already labels this view).
+        if (snapshot.loggedIn) {
+            AchievementsAccountRow(
+                snapshot = snapshot,
+                onHardcoreToggle = onHardcoreToggle,
+                onLoggedOut = {
+                    runCatching { NativeApp.logoutAchievements() }
+                    // Snapshot refreshes on the next poll (≤ 4s); render
+                    // immediate feedback now.
+                    snapshot = AchievementSnapshot(
+                        emptyList(), active = false, loggedIn = false,
+                        hardcore = false, userName = "",
                     )
-                }
-            }
+                },
+            )
+            // Options live behind a collapsed "Options" row so they never bury
+            // the achievement list (the user opens them only when needed).
+            AchievementsOptions(
+                snapshot = snapshot,
+                onOptimistic = { snapshot = it },
+            )
         }
 
         when {
@@ -380,45 +386,6 @@ fun AchievementsPanel(
                 body = "Fetching achievement list.",
             )
             else -> {
-                // Username + logout button on the same row when signed in.
-                // Logout calls Achievements::Logout via JNI which clears the
-                // SECRETS-layer Token; the next AchievementsPanel poll picks
-                // up loggedIn=false and the panel reverts to the "Not signed
-                // in" StatusCard automatically — no local state to reset.
-                if (snapshot.userName.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = snapshot.userName,
-                            color = Color(0xFFAACCFF),
-                            fontSize = 12.sp,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(
-                            text = "Logout",
-                            color = Color(0xFFFF8888),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable {
-                                    runCatching { NativeApp.logoutAchievements() }
-                                    // Snapshot will refresh on the next poll
-                                    // (≤ 4s); render immediate feedback now.
-                                    snapshot = AchievementSnapshot(
-                                        emptyList(), active = false,
-                                        loggedIn = false, hardcore = false,
-                                        userName = ""
-                                    )
-                                }
-                                .padding(horizontal = 6.dp, vertical = 2.dp),
-                        )
-                    }
-                }
                 val unlocked = snapshot.items.count { it.unlocked }
                 // Stack the "X / Y unlocked" header on top of the list so
                 // rows that scroll up dissolve under it via the fadingEdges
@@ -439,6 +406,16 @@ fun AchievementsPanel(
                         listState.animateScrollBy(diff * with(density) { 96.dp.toPx() })
                     }
                 }
+                // Tell the overlay nav when the list is at the very top, so Up only
+                // jumps to the Softcore/Hardcore toggle once there's nothing left to
+                // scroll (otherwise Up scrolls the list up).
+                val atTop by remember {
+                    derivedStateOf {
+                        listState.firstVisibleItemIndex == 0 &&
+                            listState.firstVisibleItemScrollOffset == 0
+                    }
+                }
+                LaunchedEffect(atTop) { InGameOverlay.achievementsAtTop.value = atTop }
                 Box(modifier = Modifier.fillMaxWidth()) {
                     LazyColumn(
                         state = listState,
@@ -460,6 +437,199 @@ fun AchievementsPanel(
                     )
                 }
             }
+        }
+    }
+}
+
+/** One-line account header: username + total points on the left, the
+ *  Softcore/Hardcore toggle and Logout on the right. Shown whenever signed in.
+ *  Points come from the persistent rc_client (only available once a game with
+ *  achievements is loaded); when unknown (score < 0) just the name shows. Both
+ *  buttons are controller-focusable so they join the panel's nav stack. */
+@Composable
+private fun AchievementsAccountRow(
+    snapshot: AchievementSnapshot,
+    onHardcoreToggle: (() -> Unit)?,
+    onLoggedOut: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = snapshot.userName.ifEmpty { "Signed in" },
+                color = Color(0xFFAACCFF),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            val pts = buildString {
+                if (snapshot.score >= 0) append("${formatPoints(snapshot.score)} pts")
+                if (snapshot.softcoreScore > 0) {
+                    if (isNotEmpty()) append(" · ")
+                    append("${formatPoints(snapshot.softcoreScore)} SC")
+                }
+            }
+            if (pts.isNotEmpty()) {
+                Text(pts, color = Color(0xFFFFCC66), fontSize = 11.sp)
+            }
+        }
+        // Hardcore toggle (red HARDCORE when on, grey SOFTCORE when off). Tap/A
+        // routes to the host overlay's confirm → reset, so enabling is deliberate.
+        if (onHardcoreToggle != null) {
+            val active = snapshot.hardcore
+            val bg = if (active) Color(0xFFB22222) else Color(0xFF333333)
+            val fg = if (active) Color.White else Color(0xFF888888)
+            val border = if (active) Color(0xFFFF6B6B) else Color(0xFF555555)
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(bg)
+                    .border(1.dp, border, RoundedCornerShape(6.dp))
+                    .controllerFocusable(controllerId = "ach:hardcore", onConfirm = onHardcoreToggle)
+                    .clickable(onClick = onHardcoreToggle)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (active) "HARDCORE" else "SOFTCORE",
+                    color = fg,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(
+            text = "Logout",
+            color = Color(0xFFFF8888),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .controllerFocusable(controllerId = "ach:logout", onConfirm = onLoggedOut)
+                .clickable(onClick = onLoggedOut)
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+        )
+    }
+}
+
+private fun formatPoints(p: Long): String =
+    java.text.NumberFormat.getIntegerInstance(java.util.Locale.US).format(p)
+
+/** Global RetroAchievements presentation toggles, behind a collapsed "Options"
+ *  disclosure so they don't bury the achievement list (the default state shows
+ *  just the one-line header). Each row is tap- and controller-toggleable and
+ *  writes through [NativeApp.setAchievementsOption]; the optimistic snapshot
+ *  copy keeps the UI responsive ahead of the 4s poll. */
+@Composable
+private fun AchievementsOptions(
+    snapshot: AchievementSnapshot,
+    onOptimistic: (AchievementSnapshot) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        // Disclosure header — A / tap toggles the section open. Kept always
+        // focusable so controller users can reach the options without a touch.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .controllerFocusable(controllerId = "ach:options", onConfirm = { expanded = !expanded })
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Options",
+                color = Color(0xFFCCCCCC),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = if (expanded) "▾" else "▸",
+                color = Color(0xFFCCCCCC),
+                fontSize = 12.sp,
+            )
+        }
+        if (!expanded) return@Column
+
+        OptionToggleRow("Unlock Notifications", snapshot.notifications, "ach:opt:notifications") {
+            val nv = !snapshot.notifications
+            runCatching { NativeApp.setAchievementsOption("notifications", nv) }
+            onOptimistic(snapshot.copy(notifications = nv))
+        }
+        OptionToggleRow("Leaderboard Notifications", snapshot.leaderboardNotifications, "ach:opt:lbnotif") {
+            val nv = !snapshot.leaderboardNotifications
+            runCatching { NativeApp.setAchievementsOption("leaderboardNotifications", nv) }
+            onOptimistic(snapshot.copy(leaderboardNotifications = nv))
+        }
+        OptionToggleRow("In-Game Indicators", snapshot.overlays, "ach:opt:overlays") {
+            val nv = !snapshot.overlays
+            runCatching { NativeApp.setAchievementsOption("overlays", nv) }
+            onOptimistic(snapshot.copy(overlays = nv))
+        }
+        OptionToggleRow("Leaderboard Trackers", snapshot.lbOverlays, "ach:opt:lboverlays") {
+            val nv = !snapshot.lbOverlays
+            runCatching { NativeApp.setAchievementsOption("lbOverlays", nv) }
+            onOptimistic(snapshot.copy(lbOverlays = nv))
+        }
+        OptionToggleRow("Sound Effects", snapshot.soundEffects, "ach:opt:sound") {
+            val nv = !snapshot.soundEffects
+            runCatching { NativeApp.setAchievementsOption("soundEffects", nv) }
+            onOptimistic(snapshot.copy(soundEffects = nv))
+        }
+    }
+}
+
+@Composable
+private fun OptionToggleRow(
+    label: String,
+    enabled: Boolean,
+    controllerId: String,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color(0xFF1F2123))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
+            .controllerFocusable(controllerId = controllerId, onConfirm = onToggle)
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        val pillBg = if (enabled) Colors.pasx2_blue else Color(0xFF444444)
+        val pillFg = if (enabled) Color.White else Color(0xFFAAAAAA)
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(pillBg)
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+        ) {
+            Text(
+                text = if (enabled) "ON" else "OFF",
+                color = pillFg,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+            )
         }
     }
 }

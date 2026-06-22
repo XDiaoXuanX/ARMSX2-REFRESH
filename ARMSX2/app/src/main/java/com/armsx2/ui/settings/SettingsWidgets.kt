@@ -30,6 +30,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -168,6 +169,11 @@ internal object SettingsControllerNav {
     fun resetAdjustmentGate() {}
 
     fun hasItems(): Boolean = registry.isNotEmpty()
+
+    /** Number of registered focusable items in the current scope. Used by the
+     *  achievements panel nav to know when Down off the last control above the
+     *  list should release focus back to the scrollable list. */
+    fun count(): Int = registry.size
 
     fun move(delta: Int): Boolean {
         val ids = orderedIds()
@@ -531,6 +537,12 @@ private fun DiscreteSlider(
 ) {
     val steps = (max - min).coerceAtLeast(1)
     val frac = ((value - min).toFloat() / steps.toFloat()).coerceIn(0f, 1f)
+    // pointerInput is keyed only on (min, max), so its gesture coroutine captures
+    // the onChange lambda from first composition and never restarts. That stale
+    // lambda also captures a stale Settings snapshot, so editing one slider after
+    // another reverted the first (the EE Cycle Rate/Skip bug). Route every gesture
+    // through the always-current lambda instead.
+    val latestOnChange by rememberUpdatedState(onChange)
     val activeColor = Colors.pasx2_blue
     val inactiveTrackColor = Color.White.copy(alpha = 0.12f)
     val inactiveTickColor = Color.White.copy(alpha = 0.35f)
@@ -544,7 +556,7 @@ private fun DiscreteSlider(
                 fun update(x: Float) {
                     val usable = (size.width - edgePx * 2).coerceAtLeast(1f)
                     val f = ((x - edgePx) / usable).coerceIn(0f, 1f)
-                    onChange(min + (f * steps).roundToInt())
+                    latestOnChange(min + (f * steps).roundToInt())
                 }
                 detectTapGestures { update(it.x) }
             }
@@ -553,7 +565,7 @@ private fun DiscreteSlider(
                 detectHorizontalDragGestures { change, _ ->
                     val usable = (size.width - edgePx * 2).coerceAtLeast(1f)
                     val f = ((change.position.x - edgePx) / usable).coerceIn(0f, 1f)
-                    onChange(min + (f * steps).roundToInt())
+                    latestOnChange(min + (f * steps).roundToInt())
                 }
             },
     ) {

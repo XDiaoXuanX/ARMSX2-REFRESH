@@ -157,7 +157,11 @@ void Host::ReportFormattedErrorAsync(const std::string_view title, const char* f
 
 std::string Host::GetHTTPUserAgent()
 {
-	return fmt::format("PCSX2 {} ({})", BuildVersion::GitRev, GetOSVersionString());
+	// RetroAchievements identifies the client by the leading Name/Version token
+	// of this User-Agent, so report ARMSX2 with a stable dotted version (no
+	// -SNAPSHOT suffix) that matches what the RA server has registered/pinned.
+	return fmt::format("ARMSX2/{}.{}.{}.{} ({})", BuildVersion::GitTagHi, BuildVersion::GitTagMid,
+		BuildVersion::GitTagLo, BuildVersion::ARMSX2Build, GetOSVersionString());
 }
 
 std::unique_lock<std::mutex> Host::GetSettingsLock()

@@ -178,6 +178,13 @@ public class NativeApp {
 	 *  achievements panel polls this for the badge / button colour. */
 	public static native boolean isHardcoreMode();
 
+	/** Toggle a RetroAchievements presentation option. {@code key} is one of
+	 *  "notifications", "leaderboardNotifications", "overlays", "lbOverlays",
+	 *  "soundEffects" (mapped native-side to the [Achievements] INI key).
+	 *  Persists + applies live; current values are reported in
+	 *  {@link #getAchievementsJSON}. */
+	public static native void setAchievementsOption(String key, boolean enabled);
+
 	/** Repoint the RetroAchievements client at a loopback proxy. Persists
 	 *  the [Achievements] Host setting (read by CreateClient), forces
 	 *  hardcore off while active — saving the prior choice — and rebuilds

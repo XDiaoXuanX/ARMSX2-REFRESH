@@ -454,18 +454,24 @@ Java_kr_co_iefriends_pcsx2_NativeApp_logoutAchievements(JNIEnv *env, jclass claz
     }
 }
 
-// Enable / disable RetroAchievements hardcore mode. Writes the BASE
-// EmuConfig.Achievements.HardcoreMode flag and applies it via
-// VMManager::ApplySettings — the settings-diff path in
-// Achievements::UpdateSettings() then either calls ResetHardcoreMode()
-// (turn-on requires a fresh boot per upstream's design) or
-// DisableHardcoreMode() (turn-off applies live). The Kotlin side is
-// expected to gate "Enable HC?" on a "this will reset the running game"
-// confirm before calling this with `true`.
+// Enable / disable RetroAchievements hardcore mode. Persists the hardcore
+// flag and applies it via VMManager::ApplySettings — the settings-diff path
+// in Achievements::UpdateSettings() applies a turn-OFF live (DisableHardcoreMode),
+// but a turn-ON on a running game is DEFERRED until the next system reset
+// (upstream design: hardcore can only engage from a clean boot). The Kotlin
+// side therefore resets the VM after calling this with `true`.
+//
+// CRITICAL: the INI key for hardcore is "ChallengeMode", NOT "HardcoreMode" —
+// Pcsx2Config maps the field via SettingsWrapBitBoolEx(HardcoreMode,
+// "ChallengeMode") and upstream FullscreenUI reads/writes "ChallengeMode".
+// Writing the wrong key meant ApplySettings never saw the change (the toggle
+// silently did nothing). We also Save() so the choice survives a process kill.
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_setHardcoreMode(JNIEnv *env, jclass clazz, jboolean enabled) {
-    Host::SetBaseBoolSettingValue("Achievements", "HardcoreMode", enabled == JNI_TRUE);
+    Host::SetBaseBoolSettingValue("Achievements", "ChallengeMode", enabled == JNI_TRUE);
+    if (s_settings_interface && s_settings_interface->IsDirty())
+        s_settings_interface->Save();
     if (VMManager::HasValidVM())
         VMManager::ApplySettings();
 }
@@ -477,6 +483,33 @@ extern "C"
 JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_isHardcoreMode(JNIEnv *env, jclass clazz) {
     return Achievements::IsHardcoreModeActive() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Toggle one of the RetroAchievements presentation options (notifications,
+// leaderboard notifications, in-game overlays/indicators, leaderboard
+// trackers, sound effects). `key` is a stable lowercase id from the Kotlin
+// panel; it maps to the [Achievements] INI key. Persists + ApplySettings so
+// Achievements::UpdateSettings picks the change up live (these don't require
+// a reset). The current values are surfaced back in getAchievementsJSON.
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setAchievementsOption(JNIEnv *env, jclass clazz,
+                                                           jstring p_key, jboolean enabled) {
+    const std::string key = GetJavaString(env, p_key);
+    const char* ini_key = nullptr;
+    if (key == "notifications") ini_key = "Notifications";
+    else if (key == "leaderboardNotifications") ini_key = "LeaderboardNotifications";
+    else if (key == "overlays") ini_key = "Overlays";
+    else if (key == "lbOverlays") ini_key = "LBOverlays";
+    else if (key == "soundEffects") ini_key = "SoundEffects";
+    if (!ini_key)
+        return;
+
+    Host::SetBaseBoolSettingValue("Achievements", ini_key, enabled == JNI_TRUE);
+    if (s_settings_interface && s_settings_interface->IsDirty())
+        s_settings_interface->Save();
+    if (VMManager::HasValidVM())
+        VMManager::ApplySettings();
 }
 
 // Rebuild the rc_client so CreateClient re-reads the [Achievements] Host
@@ -500,10 +533,9 @@ static void PersistAndApplyAchievementsSettings() {
 
 // Point the RetroAchievements client at a loopback proxy. Drives the same
 // [Achievements] Host setting CreateClient reads, so the override survives a
-// cold start. A loopback proxy is not the canonical RA server, so hardcore
-// is forced off while an override is active and the prior choice is saved
-// under HostOverrideSavedHardcore for clearAchievementsHostOverride to
-// restore. An empty host is ignored (use the clear path instead).
+// cold start. Hardcore mode is left untouched here so it can be exercised
+// against the dev proxy; it stays under the user's own control. An empty
+// host is ignored (use the clear path instead).
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_setAchievementsHostOverride(JNIEnv *env, jclass clazz, jstring p_host) {
@@ -511,13 +543,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setAchievementsHostOverride(JNIEnv *env, jc
     if (host.empty())
         return;
 
-    const bool had_override = !Host::GetBaseStringSettingValue("Achievements", "Host", "").empty();
-    if (!had_override)
-        Host::SetBaseBoolSettingValue("Achievements", "HostOverrideSavedHardcore",
-                                      Host::GetBaseBoolSettingValue("Achievements", "HardcoreMode", false));
-
     Host::SetBaseStringSettingValue("Achievements", "Host", host.c_str());
-    Host::SetBaseBoolSettingValue("Achievements", "HardcoreMode", false);
+
+    // Older builds saved/forced hardcore off while an override was active;
+    // we no longer touch hardcore, so drop any leftover saved-state key.
+    Host::RemoveBaseSettingValue("Achievements", "HostOverrideSavedHardcore");
 
     PersistAndApplyAchievementsSettings();
     RestartAchievementsForHostChange();
@@ -527,12 +557,7 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_clearAchievementsHostOverride(JNIEnv *env, jclass clazz) {
     Host::RemoveBaseSettingValue("Achievements", "Host");
-
-    if (Host::ContainsBaseSettingValue("Achievements", "HostOverrideSavedHardcore")) {
-        const bool restore = Host::GetBaseBoolSettingValue("Achievements", "HostOverrideSavedHardcore", false);
-        Host::RemoveBaseSettingValue("Achievements", "HostOverrideSavedHardcore");
-        Host::SetBaseBoolSettingValue("Achievements", "HardcoreMode", restore);
-    }
+    Host::RemoveBaseSettingValue("Achievements", "HostOverrideSavedHardcore");
 
     PersistAndApplyAchievementsSettings();
     RestartAchievementsForHostChange();
@@ -679,6 +704,12 @@ Java_kr_co_iefriends_pcsx2_NativeApp_speedhackLimitermode(JNIEnv *env, jclass cl
         case 3: mode = LimiterModeType::Unlimited; break;
         default: return;
     }
+    // RetroAchievements hardcore forbids slow motion. This JNI bypasses
+    // VMManager::ApplySettings (so EnforceAchievementsChallengeModeSettings
+    // never runs), so guard Slomo here. Turbo/Unlimited (fast-forward) stay
+    // allowed — RA only bans slowdown.
+    if (mode == LimiterModeType::Slomo && Achievements::IsHardcoreModeActive())
+        mode = LimiterModeType::Nominal;
     VMManager::SetLimiterMode(mode);
 }
 
@@ -730,7 +761,13 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setNominalSpeed(JNIEnv *env, jclass clazz,
     // into EmuConfig and re-pace here. Without this, dragging the Speed Limit
     // slider in-game did nothing (the string round-trip through ApplySettings
     // didn't re-pace reliably). Clamp matches EmulationSpeedOptions::SanityCheck.
-    const float scalar = std::clamp(static_cast<float>(p_percent) / 100.0f, 0.05f, 10.0f);
+    float scalar = std::clamp(static_cast<float>(p_percent) / 100.0f, 0.05f, 10.0f);
+    // RetroAchievements hardcore forbids slowdown. This direct-apply path skips
+    // VMManager::ApplySettings (so EnforceAchievementsChallengeModeSettings,
+    // which clamps NominalScalar to >=1.0, never runs) — enforce it here.
+    // Fast-forward (>1.0) stays allowed.
+    if (Achievements::IsHardcoreModeActive() && scalar < 1.0f)
+        scalar = 1.0f;
     Host::SetBaseFloatSettingValue("Framerate", "NominalScalar", scalar);
     EmuConfig.EmulationSpeed.NominalScalar = scalar;
     if (VMManager::HasValidVM())

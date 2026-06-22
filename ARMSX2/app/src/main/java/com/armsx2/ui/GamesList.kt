@@ -11,6 +11,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
@@ -22,6 +24,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -99,6 +103,11 @@ private val GAME_EXTENSIONS = setOf(
     "iso", "chd", "cso", "zso", "gz", "bin", "mdf", "img", "nrg", "dump"
 )
 
+/** Max subdirectory depth the ROM scan descends. Deep enough for any sane
+ *  "one game per folder" / "by-letter" organisation, capped so a pathological
+ *  tree (or a SAF mount that loops) can't make the scan run away. */
+private const val MAX_SCAN_DEPTH = 12
+
 object GamesList {
     private const val KEY_LIBRARY_BACKGROUND = "library.background.path"
     /**
@@ -143,6 +152,11 @@ object GamesList {
     private enum class Zone { TOOLBAR, GRID, RAIL }
     private val controllerZone = mutableStateOf(Zone.GRID)
     private val controllerToolbarIndex = mutableStateOf(0)
+    // The left rail holds an info button (top) and the gear (bottom). On small
+    // screens the old help text was tall enough to push the gear off-screen, so
+    // it now lives behind this button as its own screen. 0 = info, 1 = gear.
+    private val railSelection = mutableStateOf(1)
+    private val infoDialogOpen = mutableStateOf(false)
     // Toolbar actions, published from HeaderRow composition so they capture the
     // live ActivityResult launchers / context. Label + click action, in order.
     private var controllerToolbarActions: List<Pair<String, () -> Unit>> = emptyList()
@@ -171,7 +185,9 @@ object GamesList {
                 return true
             }
             Zone.RAIL -> {
-                // Gear sits on the left rail — right returns to the grid.
+                // Info button (top) + gear (bottom) live on the rail. Up/down
+                // switch between them; right returns to the grid.
+                if (dy != 0) railSelection.value = (railSelection.value + if (dy < 0) -1 else 1).coerceIn(0, 1)
                 if (dx > 0) controllerZone.value = Zone.GRID
                 return true
             }
@@ -183,7 +199,7 @@ object GamesList {
             // No games yet — up reaches the toolbar, left reaches the gear, so
             // the controller can scan / open setup on a fresh install.
             if (dy < 0) controllerZone.value = Zone.TOOLBAR
-            else if (dx < 0) controllerZone.value = Zone.RAIL
+            else if (dx < 0) { railSelection.value = 1; controllerZone.value = Zone.RAIL }
             return true
         }
 
@@ -199,6 +215,7 @@ object GamesList {
         } else if (dx != 0) {
             if (dx < 0 && current.columnIndex == 0) {
                 // Left off the first cover of any shelf → the gear on the rail.
+                railSelection.value = 1
                 controllerZone.value = Zone.RAIL
                 return true
             }
@@ -214,7 +231,9 @@ object GamesList {
         when (controllerZone.value) {
             Zone.TOOLBAR ->
                 controllerToolbarActions.getOrNull(controllerToolbarIndex.value)?.second?.invoke()
-            Zone.RAIL -> InGameOverlay.openGlobalSettings()
+            Zone.RAIL ->
+                if (railSelection.value == 0) infoDialogOpen.value = true
+                else InGameOverlay.openGlobalSettings()
             Zone.GRID -> {
                 val rows = controllerRows.filter { it.games.isNotEmpty() }
                 if (rows.isNotEmpty()) launchGame(controllerSelectedPosition(rows).game)
@@ -236,6 +255,11 @@ object GamesList {
 
     fun handleControllerBack(): Boolean {
         if (!controllerActive()) return false
+        // The info screen captures back/B first so it can be dismissed.
+        if (infoDialogOpen.value) {
+            infoDialogOpen.value = false
+            return true
+        }
         // From the toolbar/gear, back returns to the game grid first.
         if (controllerZone.value != Zone.GRID) {
             controllerZone.value = Zone.GRID
@@ -379,6 +403,9 @@ object GamesList {
                         modifier = Modifier.align(Alignment.BottomCenter),
                     )
                 }
+            }
+            if (infoDialogOpen.value) {
+                InfoScreen(onDismiss = { infoDialogOpen.value = false })
             }
         }
     }
@@ -732,20 +759,15 @@ object GamesList {
                 verticalArrangement = Arrangement.SpaceBetween,
             ) {
                 NavButton(NavKind.Library, "LIBRARY", active = true) {}
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.offset(y = 10.dp),
-                ) {
-                    ShelfScrollHint()
-                    ControllerHint()
-                }
+                InfoButton(
+                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 0,
+                ) { infoDialogOpen.value = true }
                 Box(Modifier.offset(y = 12.dp)) {
                     NavButton(
                         NavKind.Settings,
                         null,
                         active = false,
-                        highlighted = controllerZone.value == Zone.RAIL,
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 1,
                     ) { InGameOverlay.openGlobalSettings() }
                 }
             }
@@ -764,12 +786,14 @@ object GamesList {
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 NavButton(NavKind.Library, "LIBRARY", active = true) {}
-                ShelfScrollHint()
+                InfoButton(
+                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 0,
+                ) { infoDialogOpen.value = true }
                 NavButton(
                     NavKind.Settings,
                     null,
                     active = false,
-                    highlighted = controllerZone.value == Zone.RAIL,
+                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 1,
                 ) { InGameOverlay.openGlobalSettings() }
             }
         }
@@ -829,54 +853,108 @@ object GamesList {
 
     private enum class NavKind { Library, Settings }
 
+    /** Compact ⓘ button on the rail. Opens [InfoScreen] with all the library
+     *  help text — kept off the rail itself so it can't push the gear
+     *  off-screen on short displays. */
     @Composable
-    private fun ShelfScrollHint() {
-        Text(
-            "Scroll up and down to navigate shelves, scroll left and right to reveal more games per shelf",
-            color = Color.White.copy(alpha = 0.58f),
-            fontSize = 9.sp,
-            lineHeight = 10.sp,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.width(80.dp),
-        )
+    private fun InfoButton(highlighted: Boolean, onClick: () -> Unit) {
+        val glow = Color(0xFF3DA5FF)
+        Box(
+            Modifier
+                .size(42.dp)
+                .then(
+                    if (highlighted)
+                        Modifier.shadow(10.dp, CircleShape, ambientColor = glow, spotColor = glow)
+                    else Modifier
+                )
+                .clip(CircleShape)
+                .background(
+                    if (highlighted) glow.copy(alpha = 0.30f) else Color.White.copy(alpha = 0.10f)
+                )
+                .then(if (highlighted) Modifier.border(1.dp, glow, CircleShape) else Modifier)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "i",
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
+            )
+        }
     }
 
-    /** Controller + touch help shown on the library rail. */
+    /** Help text shown when the rail's info button is tapped. Full-screen scrim
+     *  + a scrollable card so it fits the smallest displays. Tap anywhere (or
+     *  press B / back on a controller) to dismiss. */
     @Composable
-    private fun ControllerHint() {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    private fun InfoScreen(onDismiss: () -> Unit) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color(0xE6000A14))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                Modifier
+                    .widthIn(max = 460.dp)
+                    .heightIn(max = 360.dp)
+                    .padding(horizontal = 24.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    "Library Help",
+                    color = Colors.pasx2_blue,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(16.dp))
+                InfoParagraph(
+                    "Navigating",
+                    "Scroll up and down to move between shelves. Scroll left and right " +
+                        "to reveal more games on a shelf.",
+                )
+                InfoParagraph(
+                    "Per-game settings",
+                    "On a controller, press the X button on a highlighted cover. " +
+                        "On touch, long-press a game cover.",
+                )
+                InfoParagraph(
+                    "In-game menu",
+                    "While in a game, tap the top-right of the screen to pop up the gear " +
+                        "icon — tap it to open the pause overlay. On a controller, you can " +
+                        "bind hotkeys for the menu and many other toggles in Settings.",
+                )
+                Spacer(Modifier.height(18.dp))
+                Text(
+                    "Tap anywhere or press B to close",
+                    color = Color.White.copy(alpha = 0.5f),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+    }
+
+    @Composable
+    private fun InfoParagraph(title: String, body: String) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 14.dp)) {
             Text(
-                "On controller, press the X button to open per-game settings",
-                color = Color.White.copy(alpha = 0.52f),
-                fontSize = 8.sp,
-                lineHeight = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.width(80.dp),
+                title,
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             Text(
-                "On mobile, long press a game cover to open per-game settings",
-                color = Color.White.copy(alpha = 0.52f),
-                fontSize = 8.sp,
-                lineHeight = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.width(80.dp),
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "When in game, you can click the top right of the screen to make " +
-                    "the gear icon pop up, clicking it will open the in-game pause " +
-                    "overlay. On controller, you can set hotkeys for the menu and " +
-                    "many other toggles.",
-                color = Color.White.copy(alpha = 0.52f),
-                fontSize = 8.sp,
-                lineHeight = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.width(80.dp),
+                body,
+                color = Color.White.copy(alpha = 0.72f),
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
             )
         }
     }
@@ -1796,47 +1874,7 @@ object GamesList {
                 for (dirUri in romsUriStrings) {
                     val uri = try { Uri.parse(dirUri) } catch (_: Exception) { null } ?: continue
                     val tree = DocumentFile.fromTreeUri(context, uri) ?: continue
-                    val files = tree.listFiles()
-                    for (f in files) {
-                        if (!f.isFile) continue
-                        val name = f.name ?: continue
-                        val ext = name.substringAfterLast('.', "").lowercase()
-                        if (ext !in GAME_EXTENSIONS) continue
-
-                        // ISO9660 probe (PS2 BOOT2 + PS1 BOOT). Native
-                        // returns "<platform>:<serial>" tag — e.g.
-                        // "ps1:SLUS-00713" — when SYSTEM.CNF is parseable.
-                        // Compressed formats (cso/zso/gz) fall through to
-                        // filename. Raw-sector formats (.img/.mdf/.nrg/
-                        // .dump) are handled by the same plain-ISO path in
-                        // native — they fall through to the 2352/16 and
-                        // 2352/24 fallbacks if 2048/0 fails.
-                        val rawProbe = when (ext) {
-                            "iso", "bin", "chd", "img", "mdf", "nrg", "dump" ->
-                                probeDiscSerial(context, f.uri)
-                            else -> null
-                        }
-                        val (probeSerial, probePlatform) = parseProbeResult(rawProbe)
-                        val (titleFromName, serialFromName) = FilenameParser.parse(name)
-                        val finalSerial = probeSerial ?: serialFromName
-                        val finalPlatform = probePlatform ?: GamePlatform.PS2
-                        // PCSX2 gamedb returns 0..6 (Unknown / Nothing /
-                        // Intro / Menu / InGame / Playable / Perfect).
-                        // Map 0,1 → 0 stars; 2..6 → 1..5 stars. PS1 will
-                        // typically miss the PS2-only gamedb and stay 0.
-                        val compatRaw = if (finalSerial != null)
-                            NativeApp.getCompatibilityForSerial(finalSerial) else 0
-                        val compatStars = (compatRaw - 1).coerceIn(0, 5)
-                        val info = GameInfo(
-                            uri = f.uri,
-                            title = titleFromName,
-                            serial = finalSerial,
-                            compatibility = compatStars,
-                            extension = ext.uppercase(),
-                            platform = finalPlatform,
-                        )
-                        collected.putIfAbsent(f.uri.toString(), info)
-                    }
+                    scanTreeInto(context, tree, collected, 0)
                 }
                 val sorted = collected.values.sortedBy { it.title.lowercase() }
                 games.clear()
@@ -1847,6 +1885,72 @@ object GamesList {
             } finally {
                 scanning.value = false
             }
+        }
+    }
+
+    /**
+     * Recursively walk a DocumentFile tree, adding every game-image file to
+     * [collected] (keyed by URI string, first-seen wins).
+     *
+     * Two robustness fixes vs the old flat top-level-only walk, which silently
+     * hid games a tester saw in AetherSX2:
+     *  - **Recursion.** Many users keep one game per subfolder; Aether scans
+     *    subdirectories, we didn't, so those titles never appeared. Depth-capped
+     *    ([MAX_SCAN_DEPTH]) to bound SAF query cost / guard against odd nesting.
+     *  - **No `isFile()` gate.** `DocumentFile.isFile()` returns false whenever
+     *    the SAF provider reports an empty MIME type, which some providers do
+     *    inconsistently for unregistered extensions like `.chd` — dropping
+     *    individual files in the *same* folder with no visible pattern. We now
+     *    recurse on directories and otherwise accept anything whose extension is
+     *    a known game container, regardless of the reported MIME.
+     */
+    private fun scanTreeInto(
+        context: Context,
+        dir: DocumentFile,
+        collected: MutableMap<String, GameInfo>,
+        depth: Int,
+    ) {
+        if (depth > MAX_SCAN_DEPTH) return
+        val entries = try { dir.listFiles() } catch (_: Exception) { return }
+        for (f in entries) {
+            if (f.isDirectory) {
+                scanTreeInto(context, f, collected, depth + 1)
+                continue
+            }
+            val name = f.name ?: continue
+            val ext = name.substringAfterLast('.', "").lowercase()
+            if (ext !in GAME_EXTENSIONS) continue
+
+            // ISO9660 probe (PS2 BOOT2 + PS1 BOOT). Native returns a
+            // "<platform>:<serial>" tag — e.g. "ps1:SLUS-00713" — when
+            // SYSTEM.CNF is parseable. Compressed formats (cso/zso/gz) fall
+            // through to filename. Raw-sector formats (.img/.mdf/.nrg/.dump)
+            // use the same plain-ISO path in native (2352/16 and 2352/24
+            // fallbacks if 2048/0 fails).
+            val rawProbe = when (ext) {
+                "iso", "bin", "chd", "img", "mdf", "nrg", "dump" ->
+                    probeDiscSerial(context, f.uri)
+                else -> null
+            }
+            val (probeSerial, probePlatform) = parseProbeResult(rawProbe)
+            val (titleFromName, serialFromName) = FilenameParser.parse(name)
+            val finalSerial = probeSerial ?: serialFromName
+            val finalPlatform = probePlatform ?: GamePlatform.PS2
+            // PCSX2 gamedb returns 0..6 (Unknown / Nothing / Intro / Menu /
+            // InGame / Playable / Perfect). Map 0,1 → 0 stars; 2..6 → 1..5
+            // stars. PS1 typically misses the PS2-only gamedb and stays 0.
+            val compatRaw = if (finalSerial != null)
+                NativeApp.getCompatibilityForSerial(finalSerial) else 0
+            val compatStars = (compatRaw - 1).coerceIn(0, 5)
+            val info = GameInfo(
+                uri = f.uri,
+                title = titleFromName,
+                serial = finalSerial,
+                compatibility = compatStars,
+                extension = ext.uppercase(),
+                platform = finalPlatform,
+            )
+            collected.putIfAbsent(f.uri.toString(), info)
         }
     }
 

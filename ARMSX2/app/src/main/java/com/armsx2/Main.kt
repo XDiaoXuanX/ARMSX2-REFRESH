@@ -1283,19 +1283,50 @@ class Main: ComponentActivity() {
         }
     }
 
+    // Physical buttons currently held down. Drives two-button hotkey combos
+    // (e.g. Select + R1) — kept current at the top of dispatchKeyEvent so a
+    // combo's modifier can be checked the instant its main key is pressed.
+    private val heldKeys = HashSet<Int>()
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val kc = event.keyCode
-        // System-hotkey capture (from PadTab). Handled here, not in Compose, so it
-        // can capture KEYCODE_BACK and back-paddle keys (the back dispatcher
-        // swallows those before they'd reach a focusable's onPreviewKeyEvent).
+        if (kc != KeyEvent.KEYCODE_UNKNOWN) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> heldKeys.add(kc)
+                KeyEvent.ACTION_UP -> heldKeys.remove(kc)
+            }
+        }
+        // System-hotkey capture (from the Hotkeys tab). Handled here, not in
+        // Compose, so it can capture KEYCODE_BACK and back-paddle keys (the back
+        // dispatcher swallows those before they'd reach onPreviewKeyEvent).
+        // Press one button to bind it; press a second while holding the first to
+        // bind a combo (first = modifier, second = main key).
         val capturing = ControllerMappings.captureHotkey.value
         if (capturing != null) {
-            if (event.action == KeyEvent.ACTION_DOWN && kc != KeyEvent.KEYCODE_UNKNOWN) {
-                ControllerMappings.bindHotkey(capturing, kc)
-                ControllerMappings.captureHotkey.value = null
-                ControllerMappings.hotkeyBindTick.value++
+            if (kc != KeyEvent.KEYCODE_UNKNOWN) {
+                val buf = ControllerMappings.captureKeys
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                    if (!buf.contains(kc)) buf.add(kc)
+                    if (buf.size >= 2) {
+                        ControllerMappings.bindHotkeyCombo(capturing, buf[0], buf[1])
+                        ControllerMappings.endHotkeyCapture()
+                    }
+                } else if (event.action == KeyEvent.ACTION_UP) {
+                    // Released before a second button arrived → single-button bind.
+                    if (buf.size == 1 && buf.contains(kc)) {
+                        ControllerMappings.bindHotkey(capturing, buf[0])
+                        ControllerMappings.endHotkeyCapture()
+                    }
+                }
             }
             return true // swallow down + up while capturing
+        }
+        // Pad-button capture (Pad tab): let every key fall through to Compose's
+        // onPreviewKeyEvent so ANY button binds — without this the overlay nav
+        // below eats B (exit), A (confirm), Y, D-pad and L1/R1 before they reach
+        // the binder. Normal nav resumes the moment capture ends.
+        if (ControllerMappings.padCapturing.value) {
+            return super.dispatchKeyEvent(event)
         }
         // Memory-card dialog (opened from the library). Touch mode blocks Compose
         // D-pad focus, so it's driven by the manual nav model (same as the
@@ -1507,7 +1538,11 @@ class Main: ComponentActivity() {
         // (and aren't eaten by the back handler).
         if (eState.value == EmuState.RUNNING && !controllerDrivesFrontend()) {
             val down = event.action == KeyEvent.ACTION_DOWN
-            when (ControllerMappings.hotkeyFor(kc)) {
+            // Combo-aware: on key-up the main key is already out of heldKeys, so
+            // re-add it for the match (FAST_FORWARD needs to recognise its own
+            // release). heldKeys still carries the modifier either way.
+            val matchKeys = if (down) heldKeys else heldKeys + kc
+            when (ControllerMappings.matchHotkey(kc, matchKeys)) {
                 ControllerMappings.SysHotkey.MENU -> {
                     if (down) com.armsx2.ui.InGameOverlay.toggle()
                     return true

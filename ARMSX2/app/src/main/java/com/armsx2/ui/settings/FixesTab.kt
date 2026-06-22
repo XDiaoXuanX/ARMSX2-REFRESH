@@ -95,6 +95,30 @@ fun FixesTab(state: MutableState<Settings>) {
         )
         SettingsDivider()
         ToggleRow(
+            "HW Accurate Alpha Test",
+            s.hwAccurateAlphaTest,
+            description = "More accurate hardware alpha testing. Fixes some transparency artifacts; small speed cost.",
+        ) { apply(s.copy(hwAccurateAlphaTest = it)) }
+        SettingsDivider()
+        ToggleRow(
+            "Disable Vertex Shader Expand",
+            s.disableVertexShaderExpand,
+            description = "Forces CPU vertex expansion instead of the vertex shader. Renderer-init — restart the game to apply.",
+        ) { apply(s.copy(disableVertexShaderExpand = it)) }
+        SettingsDivider()
+        ToggleRow(
+            "Use Blit Swap Chain",
+            s.useBlitSwapChain,
+            description = "Uses a blit present model instead of flip. Renderer-init — restart the game to apply.",
+        ) { apply(s.copy(useBlitSwapChain = it)) }
+        SettingsDivider()
+        ToggleRow(
+            "Disable Shader Cache",
+            s.disableShaderCache,
+            description = "Don't cache compiled shaders to disk (recompiles each launch). Renderer-init — restart the game to apply.",
+        ) { apply(s.copy(disableShaderCache = it)) }
+        SettingsDivider()
+        ToggleRow(
             "Integer Scaling",
             s.integerScaling,
             description = "Scales the image by whole-number factors for crisp, even pixels.",
@@ -299,6 +323,12 @@ fun FixesTab(state: MutableState<Settings>) {
         ) { apply(s.copy(estimateTextureRegion = it)) }
         SettingsDivider()
         ToggleRow(
+            "Draw Buffering",
+            s.drawBuffering,
+            description = "Buffers draws before submitting. Can help a few games; diagnostic.",
+        ) { apply(s.copy(drawBuffering = it)) }
+        SettingsDivider()
+        ToggleRow(
             "Disable Depth Emulation",
             s.disableDepthEmulation,
             description = "Disables depth emulation. Faster but breaks many games — last resort.",
@@ -377,6 +407,15 @@ fun FixesTab(state: MutableState<Settings>) {
             max = 10,
             description = "Extra worker threads for the software renderer. 0 = single-threaded.",
             onChange = { apply(s.copy(swThreads = it)) },
+        )
+        SettingsDivider()
+        IntSliderRow(
+            label = "SW Thread Tile Height",
+            value = s.swThreadsHeight.coerceIn(0, 8),
+            min = 0,
+            max = 8,
+            description = "Software-renderer tile height per thread. Default 4. Restart the game to apply.",
+            onChange = { apply(s.copy(swThreadsHeight = it)) },
         )
         Spacer(Modifier.height(8.dp))
     }

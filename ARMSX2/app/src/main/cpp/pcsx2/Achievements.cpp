@@ -480,6 +480,29 @@ std::string Achievements::GetAchievementsAsJSON()
 	out += ",\"userName\":";
 	append_json_string(out, display_name.c_str());
 
+	// Player score. Only available from the persistent client (a game with
+	// achievements is loaded); the post-login temporary client is destroyed,
+	// so report -1 ("unknown") when we can't read it. The panel hides the
+	// points chip on -1 rather than showing a misleading 0.
+	out += ",\"score\":";
+	out += std::to_string(user ? static_cast<long long>(user->score) : -1LL);
+	out += ",\"softcoreScore\":";
+	out += std::to_string(user ? static_cast<long long>(user->score_softcore) : -1LL);
+
+	// RA presentation options (global [Achievements] settings) so the panel
+	// can show + toggle them without a second JNI poll. Defaults mirror
+	// Pcsx2Config::AchievementsOptions() (all on).
+	out += ",\"notifications\":";
+	out += Host::GetBaseBoolSettingValue("Achievements", "Notifications", true) ? "true" : "false";
+	out += ",\"leaderboardNotifications\":";
+	out += Host::GetBaseBoolSettingValue("Achievements", "LeaderboardNotifications", true) ? "true" : "false";
+	out += ",\"overlays\":";
+	out += Host::GetBaseBoolSettingValue("Achievements", "Overlays", true) ? "true" : "false";
+	out += ",\"lbOverlays\":";
+	out += Host::GetBaseBoolSettingValue("Achievements", "LBOverlays", true) ? "true" : "false";
+	out += ",\"soundEffects\":";
+	out += Host::GetBaseBoolSettingValue("Achievements", "SoundEffects", true) ? "true" : "false";
+
 	out += ",\"items\":[";
 
 	if (active && s_client)

@@ -12,6 +12,7 @@ namespace BuildVersion
 	extern int GitTagHi;
 	extern int GitTagMid;
 	extern int GitTagLo;
+	extern int ARMSX2Build;
 	extern const char* GitRev;
 	extern const char* GitHash;
 	extern const char* GitDate;

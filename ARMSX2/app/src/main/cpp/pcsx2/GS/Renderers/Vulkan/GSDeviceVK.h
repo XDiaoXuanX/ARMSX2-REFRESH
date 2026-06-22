@@ -107,6 +107,14 @@ public:
 	/// Frees a descriptor set allocated from the global pool.
 	void FreePersistentDescriptorSet(VkDescriptorSet set);
 
+	/// True when the device uses VK_KHR_push_descriptor for texture binding (everything except Mali,
+	/// whose driver crashes inside vkCmdPushDescriptorSetKHR). When false, textures are bound via
+	/// per-frame allocated descriptor sets (vkUpdateDescriptorSets + vkCmdBindDescriptorSets).
+	__fi bool UsePushDescriptors() const { return m_use_push_descriptors; }
+
+	/// Allocates a descriptor set from the current frame's reset-per-frame pool (non-push path only).
+	VkDescriptorSet AllocateFrameDescriptorSet(VkDescriptorSetLayout set_layout);
+
 	// Gets the fence that will be signaled when the currently executing command buffer is
 	// queued and executed. Do not wait for this fence before the buffer is executed.
 	__fi VkFence GetCurrentCommandBufferFence() const { return m_frame_resources[m_current_frame].fence; }
@@ -214,6 +222,9 @@ private:
 		// [0] - Init (upload) command buffer, [1] - draw command buffer
 		VkCommandPool command_pool = VK_NULL_HANDLE;
 		std::array<VkCommandBuffer, 2> command_buffers{VK_NULL_HANDLE, VK_NULL_HANDLE};
+		// Per-frame texture descriptor pool, reset wholesale each time the frame is reused.
+		// Only created/used on the non-push-descriptor path (Mali workaround).
+		VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
 		VkFence fence = VK_NULL_HANDLE;
 		u64 fence_counter = 0;
 		s32 spin_id = -1;
@@ -243,6 +254,10 @@ private:
 	VkCommandBuffer m_current_command_buffer = VK_NULL_HANDLE;
 
 	VkDescriptorPool m_global_descriptor_pool = VK_NULL_HANDLE;
+
+	// Set false for Mali (vendorID 0x13B5) in CreateDevice: its driver crashes inside
+	// vkCmdPushDescriptorSetKHR, so texture binding falls back to per-frame descriptor sets.
+	bool m_use_push_descriptors = true;
 
 	VkQueue m_graphics_queue = VK_NULL_HANDLE;
 	VkQueue m_present_queue = VK_NULL_HANDLE;

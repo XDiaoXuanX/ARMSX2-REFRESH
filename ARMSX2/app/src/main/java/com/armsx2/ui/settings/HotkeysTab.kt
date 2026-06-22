@@ -51,23 +51,24 @@ fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         )
         HelpText(
             "Bind physical buttons (back paddles work too) to in-game actions — " +
-                "no on-screen cog needed. Quick Save/Load use the active slot " +
-                "(change it with Cycle Save Slot).",
+                "no on-screen cog needed. Press one button for a single bind, or " +
+                "two together for a combo (e.g. Select + R1). Quick Save/Load use " +
+                "the active slot (change it with Cycle Save Slot).",
         )
         ControllerMappings.SysHotkey.values().forEach { hk ->
             @Suppress("UNUSED_EXPRESSION") ControllerMappings.hotkeyBindTick.value
             val capturing = ControllerMappings.captureHotkey.value == hk
-            val code = ControllerMappings.hotkeyCode(hk)
-            val unset = code == android.view.KeyEvent.KEYCODE_UNKNOWN
+            val binding = ControllerMappings.hotkeyLabel(hk)
+            val unset = binding.isEmpty()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(30.dp)
                     .background(rowAura())
-                    .clickable { ControllerMappings.captureHotkey.value = hk }
+                    .clickable { ControllerMappings.beginHotkeyCapture(hk) }
                     .controllerFocusable(
                         controllerId = "hotkey:${hk.name}",
-                        onConfirm = { ControllerMappings.captureHotkey.value = hk },
+                        onConfirm = { ControllerMappings.beginHotkeyCapture(hk) },
                     )
                     .padding(horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -90,9 +91,9 @@ fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 }
                 Text(
                     when {
-                        capturing -> "Press any button (incl. back)…"
+                        capturing -> "Press 1 button, or 2 together…"
                         unset -> "Not set"
-                        else -> ControllerMappings.labelForKey(code)
+                        else -> binding
                     },
                     color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
                     fontSize = 12.sp,

@@ -136,6 +136,10 @@ data class Settings(
     val gamefixVuOverflow: Boolean = false,
     /** EmuCore/Gamefixes/XgKickHack — extra XGKICK delay (Erementar Gerad). */
     val gamefixXgkick: Boolean = false,
+    /** EmuCore/Gamefixes/GoemonTlbHack — preload TLB for Goemon games. Restart to apply. */
+    val gamefixGoemonTlb: Boolean = false,
+    /** EmuCore/Gamefixes/VUSyncHack — run microVU behind the EE (M-bit games). Restart to apply. */
+    val gamefixVuSync: Boolean = false,
     /** EmuCore/GS/SkipDuplicateFrames — skip presenting unchanged frames. PCSX2 default on. */
     val skipDuplicateFrames: Boolean = true,
     /** EmuCore/CPU/FPU.Roundmode — EE FPU rounding: 0 Nearest / 1 Negative / 2 Positive
@@ -161,6 +165,14 @@ data class Settings(
     val disableFramebufferFetch: Boolean = false,
     /** EmuCore/GS/OverrideTextureBarriers — -1 Auto / 0 Off / 1 On. */
     val overrideTextureBarriers: Int = -1,
+    /** EmuCore/GS/DisableVertexShaderExpand — force CPU vertex expansion. Renderer-init; restart to apply. */
+    val disableVertexShaderExpand: Boolean = false,
+    /** EmuCore/GS/UseBlitSwapChain — blit present model instead of flip. Renderer-init; restart to apply. */
+    val useBlitSwapChain: Boolean = false,
+    /** EmuCore/GS/DisableShaderCache — don't cache compiled shaders to disk. Renderer-init; restart to apply. */
+    val disableShaderCache: Boolean = false,
+    /** EmuCore/GS/HWAccurateAlphaTest — accurate hardware alpha test. PCSX2 default off. */
+    val hwAccurateAlphaTest: Boolean = false,
 
     // ---- EmuCore/GS — hardware / software renderer fixes ----
     /** EmuCore/GS/UserHacks_SkipDraw_Start — first draw to skip. 0 = off. */
@@ -183,6 +195,8 @@ data class Settings(
     val mipmapSw: Boolean = true,
     /** EmuCore/GS/extrathreads — extra software-renderer threads (0-10). PCSX2 default 4. */
     val swThreads: Int = 4,
+    /** EmuCore/GS/extrathreads_height — SW-renderer tile height per thread (0-8). PCSX2 default 4. Restart to apply. */
+    val swThreadsHeight: Int = 4,
 
     /** EmuCore/GS/AspectRatio:
      *  0 Stretch · 1 Auto 4:3/3:2 · 2 4:3 · 3 16:9 · 4 10:7. */
@@ -389,6 +403,8 @@ data class Settings(
     val preloadFrameData: Boolean = false,
     /** EmuCore/GS/UserHacks_EstimateTextureRegion — Estimate Texture Region. */
     val estimateTextureRegion: Boolean = false,
+    /** EmuCore/GS/UserHacks_DrawBuffering — buffer draws (UserHack). */
+    val drawBuffering: Boolean = false,
     /** EmuCore/GS/UserHacks_CPUCLUTRender — CPU CLUT Render: 0 Off · 1 Normal · 2 Aggressive. */
     val cpuClutRender: Int = 0,
     /** EmuCore/GS/TriFilter — TriFiltering: -1 Auto · 0 Off · 1 PS2 · 2 Forced. */
@@ -477,6 +493,8 @@ data class Settings(
         NativeApp.setSetting("EmuCore/Gamefixes", "VuAddSubHack", "bool", gamefixVuAddSub.toString())
         NativeApp.setSetting("EmuCore/Gamefixes", "VUOverflowHack", "bool", gamefixVuOverflow.toString())
         NativeApp.setSetting("EmuCore/Gamefixes", "XgKickHack", "bool", gamefixXgkick.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "GoemonTlbHack", "bool", gamefixGoemonTlb.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "VUSyncHack", "bool", gamefixVuSync.toString())
         NativeApp.setSetting("EmuCore/GS", "SkipDuplicateFrames", "bool", skipDuplicateFrames.toString())
         NativeApp.setSetting("EmuCore/CPU", "FPU.Roundmode", "int", eeFpuRoundMode.coerceIn(0, 3).toString())
         NativeApp.setSetting("EmuCore/CPU", "VU0.Roundmode", "int", vu0RoundMode.coerceIn(0, 3).toString())
@@ -596,6 +614,11 @@ data class Settings(
         NativeApp.setSetting("EmuCore/GS", "SyncToHostRefreshRate", "bool", syncToHostRefresh.toString())
         NativeApp.setSetting("EmuCore/GS", "DisableFramebufferFetch", "bool", disableFramebufferFetch.toString())
         NativeApp.setSetting("EmuCore/GS", "OverrideTextureBarriers", "int", overrideTextureBarriers.coerceIn(-1, 1).toString())
+        NativeApp.setSetting("EmuCore/GS", "DisableVertexShaderExpand", "bool", disableVertexShaderExpand.toString())
+        NativeApp.setSetting("EmuCore/GS", "UseBlitSwapChain", "bool", useBlitSwapChain.toString())
+        NativeApp.setSetting("EmuCore/GS", "DisableShaderCache", "bool", disableShaderCache.toString())
+        NativeApp.setSetting("EmuCore/GS", "HWAccurateAlphaTest", "bool", hwAccurateAlphaTest.toString())
+        NativeApp.setSetting("EmuCore/GS", "UserHacks_DrawBuffering", "bool", drawBuffering.toString())
         NativeApp.setSetting("EmuCore/GS", "HWSpinGPUForReadbacks", "bool", spinGpuReadbacks.toString())
         NativeApp.setSetting("EmuCore/GS", "HWSpinCPUForReadbacks", "bool", spinCpuReadbacks.toString())
         NativeApp.setSetting("EmuCore/GS", "IntegerScaling", "bool", integerScaling.toString())
@@ -604,6 +627,7 @@ data class Settings(
         NativeApp.setSetting("EmuCore/GS", "autoflush_sw", "bool", autoFlushSw.toString())
         NativeApp.setSetting("EmuCore/GS", "mipmap", "bool", mipmapSw.toString())
         NativeApp.setSetting("EmuCore/GS", "extrathreads", "int", swThreads.coerceIn(0, 10).toString())
+        NativeApp.setSetting("EmuCore/GS", "extrathreads_height", "int", swThreadsHeight.coerceIn(0, 8).toString())
         // Skip-draw is a UserHack (gated by the master toggle below).
         NativeApp.setSetting("EmuCore/GS", "UserHacks_SkipDraw_Start", "int", skipDrawStart.coerceAtLeast(0).toString())
         NativeApp.setSetting("EmuCore/GS", "UserHacks_SkipDraw_End", "int", skipDrawEnd.coerceAtLeast(0).toString())
@@ -662,7 +686,7 @@ data class Settings(
             alignSprite || mergeSprite || forceEvenSpritePosition || unscaledPaletteDraw ||
             gpuPaletteConversion || cpuFramebufferConversion || readTargetsWhenClosing ||
             disableDepthEmulation || disablePartialInvalidation || disableSafeFeatures ||
-            disableRenderFixes || preloadFrameData || estimateTextureRegion ||
+            disableRenderFixes || preloadFrameData || estimateTextureRegion || drawBuffering ||
             skipDrawStart != 0 || skipDrawEnd != 0
 
     /** Live GS-only apply for a running VM: persist all EmuCore/GS keys, then
@@ -720,7 +744,9 @@ data class Settings(
             disableSafeFeatures != other.disableSafeFeatures ||
             disableRenderFixes != other.disableRenderFixes ||
             preloadFrameData != other.preloadFrameData ||
-            estimateTextureRegion != other.estimateTextureRegion
+            estimateTextureRegion != other.estimateTextureRegion ||
+            hwAccurateAlphaTest != other.hwAccurateAlphaTest ||
+            drawBuffering != other.drawBuffering
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("eeCycleRate", eeCycleRate)
@@ -767,6 +793,8 @@ data class Settings(
         put("gamefixVuAddSub", gamefixVuAddSub)
         put("gamefixVuOverflow", gamefixVuOverflow)
         put("gamefixXgkick", gamefixXgkick)
+        put("gamefixGoemonTlb", gamefixGoemonTlb)
+        put("gamefixVuSync", gamefixVuSync)
         put("skipDuplicateFrames", skipDuplicateFrames)
         put("eeFpuRoundMode", eeFpuRoundMode)
         put("vu0RoundMode", vu0RoundMode)
@@ -778,6 +806,10 @@ data class Settings(
         put("syncToHostRefresh", syncToHostRefresh)
         put("disableFramebufferFetch", disableFramebufferFetch)
         put("overrideTextureBarriers", overrideTextureBarriers)
+        put("disableVertexShaderExpand", disableVertexShaderExpand)
+        put("useBlitSwapChain", useBlitSwapChain)
+        put("disableShaderCache", disableShaderCache)
+        put("hwAccurateAlphaTest", hwAccurateAlphaTest)
         put("skipDrawStart", skipDrawStart)
         put("skipDrawEnd", skipDrawEnd)
         put("spinGpuReadbacks", spinGpuReadbacks)
@@ -788,6 +820,7 @@ data class Settings(
         put("autoFlushSw", autoFlushSw)
         put("mipmapSw", mipmapSw)
         put("swThreads", swThreads)
+        put("swThreadsHeight", swThreadsHeight)
         put("aspectRatio", aspectRatio)
         put("deinterlaceMode", deinterlaceMode)
         put("dev9EthEnable", dev9EthEnable)
@@ -871,6 +904,7 @@ data class Settings(
         put("disableRenderFixes", disableRenderFixes)
         put("preloadFrameData", preloadFrameData)
         put("estimateTextureRegion", estimateTextureRegion)
+        put("drawBuffering", drawBuffering)
         put("cpuClutRender", cpuClutRender)
         put("triFilter", triFilter)
         put("maxAnisotropy", maxAnisotropy)
@@ -927,6 +961,8 @@ data class Settings(
                 gamefixVuAddSub = json.optBoolean("gamefixVuAddSub", def.gamefixVuAddSub),
                 gamefixVuOverflow = json.optBoolean("gamefixVuOverflow", def.gamefixVuOverflow),
                 gamefixXgkick = json.optBoolean("gamefixXgkick", def.gamefixXgkick),
+                gamefixGoemonTlb = json.optBoolean("gamefixGoemonTlb", def.gamefixGoemonTlb),
+                gamefixVuSync = json.optBoolean("gamefixVuSync", def.gamefixVuSync),
                 skipDuplicateFrames = json.optBoolean("skipDuplicateFrames", def.skipDuplicateFrames),
                 eeFpuRoundMode = json.optInt("eeFpuRoundMode", def.eeFpuRoundMode),
                 vu0RoundMode = json.optInt("vu0RoundMode", def.vu0RoundMode),
@@ -938,6 +974,10 @@ data class Settings(
                 syncToHostRefresh = json.optBoolean("syncToHostRefresh", def.syncToHostRefresh),
                 disableFramebufferFetch = json.optBoolean("disableFramebufferFetch", def.disableFramebufferFetch),
                 overrideTextureBarriers = json.optInt("overrideTextureBarriers", def.overrideTextureBarriers),
+                disableVertexShaderExpand = json.optBoolean("disableVertexShaderExpand", def.disableVertexShaderExpand),
+                useBlitSwapChain = json.optBoolean("useBlitSwapChain", def.useBlitSwapChain),
+                disableShaderCache = json.optBoolean("disableShaderCache", def.disableShaderCache),
+                hwAccurateAlphaTest = json.optBoolean("hwAccurateAlphaTest", def.hwAccurateAlphaTest),
                 skipDrawStart = json.optInt("skipDrawStart", def.skipDrawStart),
                 skipDrawEnd = json.optInt("skipDrawEnd", def.skipDrawEnd),
                 spinGpuReadbacks = json.optBoolean("spinGpuReadbacks", def.spinGpuReadbacks),
@@ -948,6 +988,7 @@ data class Settings(
                 autoFlushSw = json.optBoolean("autoFlushSw", def.autoFlushSw),
                 mipmapSw = json.optBoolean("mipmapSw", def.mipmapSw),
                 swThreads = json.optInt("swThreads", def.swThreads),
+                swThreadsHeight = json.optInt("swThreadsHeight", def.swThreadsHeight),
                 aspectRatio = json.optInt("aspectRatio", def.aspectRatio),
                 deinterlaceMode = json.optInt("deinterlaceMode", def.deinterlaceMode),
                 dev9EthEnable = json.optBoolean("dev9EthEnable", def.dev9EthEnable),
@@ -1035,6 +1076,7 @@ data class Settings(
                 disableRenderFixes = json.optBoolean("disableRenderFixes", def.disableRenderFixes),
                 preloadFrameData = json.optBoolean("preloadFrameData", def.preloadFrameData),
                 estimateTextureRegion = json.optBoolean("estimateTextureRegion", def.estimateTextureRegion),
+                drawBuffering = json.optBoolean("drawBuffering", def.drawBuffering),
                 cpuClutRender = json.optInt("cpuClutRender", def.cpuClutRender),
                 triFilter = json.optInt("triFilter", def.triFilter),
                 maxAnisotropy = json.optInt("maxAnisotropy", def.maxAnisotropy),
@@ -1097,6 +1139,8 @@ data class Settings(
             if (current.gamefixVuAddSub      != base.gamefixVuAddSub)      j.put("gamefixVuAddSub", current.gamefixVuAddSub)
             if (current.gamefixVuOverflow    != base.gamefixVuOverflow)    j.put("gamefixVuOverflow", current.gamefixVuOverflow)
             if (current.gamefixXgkick        != base.gamefixXgkick)        j.put("gamefixXgkick", current.gamefixXgkick)
+            if (current.gamefixGoemonTlb     != base.gamefixGoemonTlb)     j.put("gamefixGoemonTlb", current.gamefixGoemonTlb)
+            if (current.gamefixVuSync        != base.gamefixVuSync)        j.put("gamefixVuSync", current.gamefixVuSync)
             if (current.skipDuplicateFrames  != base.skipDuplicateFrames)  j.put("skipDuplicateFrames", current.skipDuplicateFrames)
             if (current.eeFpuRoundMode       != base.eeFpuRoundMode)       j.put("eeFpuRoundMode", current.eeFpuRoundMode)
             if (current.vu0RoundMode         != base.vu0RoundMode)         j.put("vu0RoundMode", current.vu0RoundMode)
@@ -1108,6 +1152,10 @@ data class Settings(
             if (current.syncToHostRefresh    != base.syncToHostRefresh)    j.put("syncToHostRefresh", current.syncToHostRefresh)
             if (current.disableFramebufferFetch != base.disableFramebufferFetch) j.put("disableFramebufferFetch", current.disableFramebufferFetch)
             if (current.overrideTextureBarriers != base.overrideTextureBarriers) j.put("overrideTextureBarriers", current.overrideTextureBarriers)
+            if (current.disableVertexShaderExpand != base.disableVertexShaderExpand) j.put("disableVertexShaderExpand", current.disableVertexShaderExpand)
+            if (current.useBlitSwapChain     != base.useBlitSwapChain)     j.put("useBlitSwapChain", current.useBlitSwapChain)
+            if (current.disableShaderCache   != base.disableShaderCache)   j.put("disableShaderCache", current.disableShaderCache)
+            if (current.hwAccurateAlphaTest  != base.hwAccurateAlphaTest)  j.put("hwAccurateAlphaTest", current.hwAccurateAlphaTest)
             if (current.skipDrawStart        != base.skipDrawStart)        j.put("skipDrawStart", current.skipDrawStart)
             if (current.skipDrawEnd          != base.skipDrawEnd)          j.put("skipDrawEnd", current.skipDrawEnd)
             if (current.spinGpuReadbacks     != base.spinGpuReadbacks)     j.put("spinGpuReadbacks", current.spinGpuReadbacks)
@@ -1118,6 +1166,7 @@ data class Settings(
             if (current.autoFlushSw          != base.autoFlushSw)          j.put("autoFlushSw", current.autoFlushSw)
             if (current.mipmapSw             != base.mipmapSw)             j.put("mipmapSw", current.mipmapSw)
             if (current.swThreads            != base.swThreads)            j.put("swThreads", current.swThreads)
+            if (current.swThreadsHeight      != base.swThreadsHeight)      j.put("swThreadsHeight", current.swThreadsHeight)
             if (current.aspectRatio         != base.aspectRatio)         j.put("aspectRatio", current.aspectRatio)
             if (current.deinterlaceMode     != base.deinterlaceMode)     j.put("deinterlaceMode", current.deinterlaceMode)
             if (current.dev9EthEnable       != base.dev9EthEnable)       j.put("dev9EthEnable", current.dev9EthEnable)
@@ -1201,6 +1250,7 @@ data class Settings(
             if (current.disableRenderFixes  != base.disableRenderFixes)  j.put("disableRenderFixes", current.disableRenderFixes)
             if (current.preloadFrameData    != base.preloadFrameData)    j.put("preloadFrameData", current.preloadFrameData)
             if (current.estimateTextureRegion != base.estimateTextureRegion) j.put("estimateTextureRegion", current.estimateTextureRegion)
+            if (current.drawBuffering        != base.drawBuffering)        j.put("drawBuffering", current.drawBuffering)
             if (current.cpuClutRender       != base.cpuClutRender)       j.put("cpuClutRender", current.cpuClutRender)
             if (current.triFilter           != base.triFilter)           j.put("triFilter", current.triFilter)
             if (current.maxAnisotropy       != base.maxAnisotropy)       j.put("maxAnisotropy", current.maxAnisotropy)
@@ -1253,6 +1303,8 @@ data class Settings(
             gamefixVuAddSub = if (overrides.has("gamefixVuAddSub")) overrides.getBoolean("gamefixVuAddSub") else base.gamefixVuAddSub,
             gamefixVuOverflow = if (overrides.has("gamefixVuOverflow")) overrides.getBoolean("gamefixVuOverflow") else base.gamefixVuOverflow,
             gamefixXgkick = if (overrides.has("gamefixXgkick")) overrides.getBoolean("gamefixXgkick") else base.gamefixXgkick,
+            gamefixGoemonTlb = if (overrides.has("gamefixGoemonTlb")) overrides.getBoolean("gamefixGoemonTlb") else base.gamefixGoemonTlb,
+            gamefixVuSync = if (overrides.has("gamefixVuSync")) overrides.getBoolean("gamefixVuSync") else base.gamefixVuSync,
             skipDuplicateFrames = if (overrides.has("skipDuplicateFrames")) overrides.getBoolean("skipDuplicateFrames") else base.skipDuplicateFrames,
             eeFpuRoundMode = if (overrides.has("eeFpuRoundMode")) overrides.getInt("eeFpuRoundMode") else base.eeFpuRoundMode,
             vu0RoundMode = if (overrides.has("vu0RoundMode")) overrides.getInt("vu0RoundMode") else base.vu0RoundMode,
@@ -1264,6 +1316,10 @@ data class Settings(
             syncToHostRefresh = if (overrides.has("syncToHostRefresh")) overrides.getBoolean("syncToHostRefresh") else base.syncToHostRefresh,
             disableFramebufferFetch = if (overrides.has("disableFramebufferFetch")) overrides.getBoolean("disableFramebufferFetch") else base.disableFramebufferFetch,
             overrideTextureBarriers = if (overrides.has("overrideTextureBarriers")) overrides.getInt("overrideTextureBarriers") else base.overrideTextureBarriers,
+            disableVertexShaderExpand = if (overrides.has("disableVertexShaderExpand")) overrides.getBoolean("disableVertexShaderExpand") else base.disableVertexShaderExpand,
+            useBlitSwapChain = if (overrides.has("useBlitSwapChain")) overrides.getBoolean("useBlitSwapChain") else base.useBlitSwapChain,
+            disableShaderCache = if (overrides.has("disableShaderCache")) overrides.getBoolean("disableShaderCache") else base.disableShaderCache,
+            hwAccurateAlphaTest = if (overrides.has("hwAccurateAlphaTest")) overrides.getBoolean("hwAccurateAlphaTest") else base.hwAccurateAlphaTest,
             skipDrawStart = if (overrides.has("skipDrawStart")) overrides.getInt("skipDrawStart") else base.skipDrawStart,
             skipDrawEnd = if (overrides.has("skipDrawEnd")) overrides.getInt("skipDrawEnd") else base.skipDrawEnd,
             spinGpuReadbacks = if (overrides.has("spinGpuReadbacks")) overrides.getBoolean("spinGpuReadbacks") else base.spinGpuReadbacks,
@@ -1274,6 +1330,7 @@ data class Settings(
             autoFlushSw = if (overrides.has("autoFlushSw")) overrides.getBoolean("autoFlushSw") else base.autoFlushSw,
             mipmapSw = if (overrides.has("mipmapSw")) overrides.getBoolean("mipmapSw") else base.mipmapSw,
             swThreads = if (overrides.has("swThreads")) overrides.getInt("swThreads") else base.swThreads,
+            swThreadsHeight = if (overrides.has("swThreadsHeight")) overrides.getInt("swThreadsHeight") else base.swThreadsHeight,
             aspectRatio = if (overrides.has("aspectRatio")) overrides.getInt("aspectRatio") else base.aspectRatio,
             deinterlaceMode = if (overrides.has("deinterlaceMode")) overrides.getInt("deinterlaceMode") else base.deinterlaceMode,
             dev9EthEnable = if (overrides.has("dev9EthEnable")) overrides.getBoolean("dev9EthEnable") else base.dev9EthEnable,
@@ -1361,6 +1418,7 @@ data class Settings(
             disableRenderFixes = if (overrides.has("disableRenderFixes")) overrides.getBoolean("disableRenderFixes") else base.disableRenderFixes,
             preloadFrameData = if (overrides.has("preloadFrameData")) overrides.getBoolean("preloadFrameData") else base.preloadFrameData,
             estimateTextureRegion = if (overrides.has("estimateTextureRegion")) overrides.getBoolean("estimateTextureRegion") else base.estimateTextureRegion,
+            drawBuffering = if (overrides.has("drawBuffering")) overrides.getBoolean("drawBuffering") else base.drawBuffering,
             cpuClutRender = if (overrides.has("cpuClutRender")) overrides.getInt("cpuClutRender") else base.cpuClutRender,
             triFilter = if (overrides.has("triFilter")) overrides.getInt("triFilter") else base.triFilter,
             maxAnisotropy = if (overrides.has("maxAnisotropy")) overrides.getInt("maxAnisotropy") else base.maxAnisotropy,

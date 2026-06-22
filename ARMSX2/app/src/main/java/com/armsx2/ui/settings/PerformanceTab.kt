@@ -222,8 +222,12 @@ fun PerformanceTab(state: MutableState<Settings>) {
                 ToggleBubble("Extra XGKICK", s.gamefixXgkick, modifier = Modifier.weight(1f)) {
                     apply(s.copy(enableGameFixes = true, gamefixXgkick = it))
                 }
-                Spacer(Modifier.weight(1f))
-                Spacer(Modifier.weight(1f))
+                ToggleBubble("Goemon TLB", s.gamefixGoemonTlb, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixGoemonTlb = it))
+                }
+                ToggleBubble("VU Sync", s.gamefixVuSync, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixVuSync = it))
+                }
                 Spacer(Modifier.weight(1f))
             }
         }
