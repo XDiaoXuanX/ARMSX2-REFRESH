@@ -857,6 +857,100 @@ struct VirtualControllerView: View {
             .position(x: p.x * areaW, y: p.y * areaH)
     }
 
+    // Composite 8-way D-pad used when D-pad diagonals are enabled. Derives the
+    // capture circle and center deadzone from the four cardinal button positions
+    // so it follows custom layouts, per-orientation sizing, and hit scaling.
+    private func placedCompositeDPad(landscape: Bool, areaW: CGFloat, areaH: CGFloat) -> some View {
+        let entries: [(id: String, button: ARMSX2PadButton, label: String)] = [
+            ("up", .up, "▲"), ("down", .down, "▼"), ("left", .left, "◀"), ("right", .right, "▶")
+        ]
+        let dpadW = VirtualPadButtonOffset.dpadButtonWidth(isLandscape: landscape)
+
+        var faces: [CompositeDPadFaceInfo] = []
+        var centers: [CGPoint] = []
+        for entry in entries {
+            let p = perButtonPos(entry.id, landscape: landscape, w: areaW, h: areaH)
+            let center = CGPoint(x: p.x * areaW, y: p.y * areaH)
+            centers.append(center)
+            faces.append(CompositeDPadFaceInfo(
+                button: entry.button,
+                label: entry.label,
+                center: center,
+                baseSize: dpadW,
+                visibleScaleX: p.scaleX,
+                visibleScaleY: p.scaleY,
+                hitScaleX: p.hitScaleX,
+                hitScaleY: p.hitScaleY
+            ))
+        }
+
+        let centroid = CGPoint(
+            x: centers.reduce(0, { $0 + $1.x }) / CGFloat(centers.count),
+            y: centers.reduce(0, { $0 + $1.y }) / CGFloat(centers.count)
+        )
+        let distances = centers.map { hypot($0.x - centroid.x, $0.y - centroid.y) }
+        let maxTouchHalf = faces.map { PadLayoutMetrics.touchLength(baseLength: dpadW, hitScale: $0.hitScaleX) / 2 }.max() ?? 0
+        let captureRadius = (distances.max() ?? 0) + maxTouchHalf
+        let nearestDistance = distances.min() ?? captureRadius
+        let deadzone = nearestDistance * 0.20
+
+        return CompositeDPadView(
+            faces: faces,
+            centroid: centroid,
+            captureDiameter: captureRadius * 2,
+            deadzone: deadzone
+        )
+    }
+
+    // Composite face-button cluster used when face-button combo zones are enabled.
+    // Derives its centroid and capture circle from the four action-button positions
+    // so it follows custom layouts, per-axis sizing, and hit scaling.
+    private func placedCompositeFaceButtons(landscape: Bool, areaW: CGFloat, areaH: CGFloat) -> some View {
+        let entries: [(id: String, button: ARMSX2PadButton, sym: String, clr: Color)] = [
+            ("triangle", .triangle, "△", .green),
+            ("cross", .cross, "✕", .blue),
+            ("square", .square, "□", .pink),
+            ("circle", .circle, "○", .red)
+        ]
+        let actionSz = VirtualPadButtonOffset.actionButtonSize
+
+        var faces: [CompositeFaceButtonInfo] = []
+        var centers: [CGPoint] = []
+        for entry in entries {
+            let p = perButtonPos(entry.id, landscape: landscape, w: areaW, h: areaH)
+            let center = CGPoint(x: p.x * areaW, y: p.y * areaH)
+            centers.append(center)
+            faces.append(CompositeFaceButtonInfo(
+                button: entry.button,
+                symbol: entry.sym,
+                color: entry.clr,
+                center: center,
+                baseSize: actionSz,
+                visibleScaleX: p.scaleX,
+                visibleScaleY: p.scaleY,
+                hitScaleX: p.hitScaleX,
+                hitScaleY: p.hitScaleY
+            ))
+        }
+
+        let centroid = CGPoint(
+            x: centers.reduce(0, { $0 + $1.x }) / CGFloat(centers.count),
+            y: centers.reduce(0, { $0 + $1.y }) / CGFloat(centers.count)
+        )
+        let captureRadius = faces.map { face in
+            let centerDistance = hypot(face.center.x - centroid.x, face.center.y - centroid.y)
+            let halfW = PadLayoutMetrics.touchLength(baseLength: face.baseSize, hitScale: face.hitScaleX) / 2
+            let halfH = PadLayoutMetrics.touchLength(baseLength: face.baseSize, hitScale: face.hitScaleY) / 2
+            return centerDistance + hypot(halfW, halfH)
+        }.max() ?? 0
+
+        return CompositeFaceView(
+            faces: faces,
+            centroid: centroid,
+            captureDiameter: captureRadius * 2
+        )
+    }
+
     @ViewBuilder
     private func placedPSButton(
         id: String,
@@ -902,28 +996,38 @@ struct VirtualControllerView: View {
                     .allowsHitTesting(false)
             }
 
-            // D-pad buttons (individual placement)
+            // D-pad buttons
             if isVisible("dpad") {
-                let dpadW = VirtualPadButtonOffset.dpadButtonWidth(isLandscape: true)
-                placedPadButton(id: "up", label: "▲", w: dpadW, h: dpadW, btn: .up, landscape: true, areaW: w, areaH: h, perButton: true)
-                placedPadButton(id: "down", label: "▼", w: dpadW, h: dpadW, btn: .down, landscape: true, areaW: w, areaH: h, perButton: true)
-                placedPadButton(id: "left", label: "◀", w: dpadW, h: dpadW, btn: .left, landscape: true, areaW: w, areaH: h, perButton: true)
-                placedPadButton(id: "right", label: "▶", w: dpadW, h: dpadW, btn: .right, landscape: true, areaW: w, areaH: h, perButton: true)
+                if settings.dpadDiagonalsEnabled {
+                    placedCompositeDPad(landscape: true, areaW: w, areaH: h)
+                } else {
+                    let dpadW = VirtualPadButtonOffset.dpadButtonWidth(isLandscape: true)
+                    placedPadButton(id: "up", label: "▲", w: dpadW, h: dpadW, btn: .up, landscape: true, areaW: w, areaH: h, perButton: true)
+                    placedPadButton(id: "down", label: "▼", w: dpadW, h: dpadW, btn: .down, landscape: true, areaW: w, areaH: h, perButton: true)
+                    placedPadButton(id: "left", label: "◀", w: dpadW, h: dpadW, btn: .left, landscape: true, areaW: w, areaH: h, perButton: true)
+                    placedPadButton(id: "right", label: "▶", w: dpadW, h: dpadW, btn: .right, landscape: true, areaW: w, areaH: h, perButton: true)
+                }
             }
 
-            // Action buttons (individual placement)
-            let actionSz = VirtualPadButtonOffset.actionButtonSize
-            if isVisible("triangle") {
-                placedPSButton(id: "triangle", sym: "△", clr: .green, sz: actionSz, btn: .triangle, landscape: true, areaW: w, areaH: h)
-            }
-            if isVisible("cross") {
-                placedPSButton(id: "cross", sym: "✕", clr: .blue, sz: actionSz, btn: .cross, landscape: true, areaW: w, areaH: h)
-            }
-            if isVisible("square") {
-                placedPSButton(id: "square", sym: "□", clr: .pink, sz: actionSz, btn: .square, landscape: true, areaW: w, areaH: h)
-            }
-            if isVisible("circle") {
-                placedPSButton(id: "circle", sym: "○", clr: .red, sz: actionSz, btn: .circle, landscape: true, areaW: w, areaH: h)
+            // Action buttons: composite combo surface when enabled (and all four face
+            // buttons are visible); otherwise individual buttons with per-button visibility.
+            if settings.faceComboZonesEnabled,
+               isVisible("triangle") && isVisible("cross") && isVisible("square") && isVisible("circle") {
+                placedCompositeFaceButtons(landscape: true, areaW: w, areaH: h)
+            } else {
+                let actionSz = VirtualPadButtonOffset.actionButtonSize
+                if isVisible("triangle") {
+                    placedPSButton(id: "triangle", sym: "△", clr: .green, sz: actionSz, btn: .triangle, landscape: true, areaW: w, areaH: h)
+                }
+                if isVisible("cross") {
+                    placedPSButton(id: "cross", sym: "✕", clr: .blue, sz: actionSz, btn: .cross, landscape: true, areaW: w, areaH: h)
+                }
+                if isVisible("square") {
+                    placedPSButton(id: "square", sym: "□", clr: .pink, sz: actionSz, btn: .square, landscape: true, areaW: w, areaH: h)
+                }
+                if isVisible("circle") {
+                    placedPSButton(id: "circle", sym: "○", clr: .red, sz: actionSz, btn: .circle, landscape: true, areaW: w, areaH: h)
+                }
             }
 
             if isVisible("l2") {
@@ -992,28 +1096,38 @@ struct VirtualControllerView: View {
                     placedPadButton(id: "start", label: "START", w: 48, h: 22, btn: .start, landscape: false, areaW: cW, areaH: cH)
                 }
 
-                // D-pad buttons (individual placement)
+                // D-pad buttons
                 if isVisible("dpad") {
-                    let dpadW = VirtualPadButtonOffset.dpadButtonWidth(isLandscape: false)
-                    placedPadButton(id: "up", label: "▲", w: dpadW, h: dpadW, btn: .up, landscape: false, areaW: cW, areaH: cH, perButton: true)
-                    placedPadButton(id: "down", label: "▼", w: dpadW, h: dpadW, btn: .down, landscape: false, areaW: cW, areaH: cH, perButton: true)
-                    placedPadButton(id: "left", label: "◀", w: dpadW, h: dpadW, btn: .left, landscape: false, areaW: cW, areaH: cH, perButton: true)
-                    placedPadButton(id: "right", label: "▶", w: dpadW, h: dpadW, btn: .right, landscape: false, areaW: cW, areaH: cH, perButton: true)
+                    if settings.dpadDiagonalsEnabled {
+                        placedCompositeDPad(landscape: false, areaW: cW, areaH: cH)
+                    } else {
+                        let dpadW = VirtualPadButtonOffset.dpadButtonWidth(isLandscape: false)
+                        placedPadButton(id: "up", label: "▲", w: dpadW, h: dpadW, btn: .up, landscape: false, areaW: cW, areaH: cH, perButton: true)
+                        placedPadButton(id: "down", label: "▼", w: dpadW, h: dpadW, btn: .down, landscape: false, areaW: cW, areaH: cH, perButton: true)
+                        placedPadButton(id: "left", label: "◀", w: dpadW, h: dpadW, btn: .left, landscape: false, areaW: cW, areaH: cH, perButton: true)
+                        placedPadButton(id: "right", label: "▶", w: dpadW, h: dpadW, btn: .right, landscape: false, areaW: cW, areaH: cH, perButton: true)
+                    }
                 }
 
-                // Action buttons (individual placement)
-                let actionSz = VirtualPadButtonOffset.actionButtonSize
-                if isVisible("triangle") {
-                    placedPSButton(id: "triangle", sym: "△", clr: .green, sz: actionSz, btn: .triangle, landscape: false, areaW: cW, areaH: cH)
-                }
-                if isVisible("cross") {
-                    placedPSButton(id: "cross", sym: "✕", clr: .blue, sz: actionSz, btn: .cross, landscape: false, areaW: cW, areaH: cH)
-                }
-                if isVisible("square") {
-                    placedPSButton(id: "square", sym: "□", clr: .pink, sz: actionSz, btn: .square, landscape: false, areaW: cW, areaH: cH)
-                }
-                if isVisible("circle") {
-                    placedPSButton(id: "circle", sym: "○", clr: .red, sz: actionSz, btn: .circle, landscape: false, areaW: cW, areaH: cH)
+                // Action buttons: composite combo surface when enabled (and all four face
+                // buttons are visible); otherwise individual buttons with per-button visibility.
+                if settings.faceComboZonesEnabled,
+                   isVisible("triangle") && isVisible("cross") && isVisible("square") && isVisible("circle") {
+                    placedCompositeFaceButtons(landscape: false, areaW: cW, areaH: cH)
+                } else {
+                    let actionSz = VirtualPadButtonOffset.actionButtonSize
+                    if isVisible("triangle") {
+                        placedPSButton(id: "triangle", sym: "△", clr: .green, sz: actionSz, btn: .triangle, landscape: false, areaW: cW, areaH: cH)
+                    }
+                    if isVisible("cross") {
+                        placedPSButton(id: "cross", sym: "✕", clr: .blue, sz: actionSz, btn: .cross, landscape: false, areaW: cW, areaH: cH)
+                    }
+                    if isVisible("square") {
+                        placedPSButton(id: "square", sym: "□", clr: .pink, sz: actionSz, btn: .square, landscape: false, areaW: cW, areaH: cH)
+                    }
+                    if isVisible("circle") {
+                        placedPSButton(id: "circle", sym: "○", clr: .red, sz: actionSz, btn: .circle, landscape: false, areaW: cW, areaH: cH)
+                    }
                 }
 
                 if isVisible("lstick") {
@@ -1292,25 +1406,30 @@ struct PSBtn: View {
     }
 
     var body: some View {
-        if ARMSX2UsesUIKitPadPressSurface() {
-            ZStack {
-                UIKitPadPressSurface(onPress: updatePressed) {
-                    centeredButtonFace
+        Group {
+            if ARMSX2UsesUIKitPadPressSurface() {
+                ZStack {
+                    UIKitPadPressSurface(onPress: updatePressed) {
+                        centeredButtonFace
+                    }
+                    .frame(width: touchW, height: touchH)
                 }
                 .frame(width: touchW, height: touchH)
+                .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+                .animation(.easeOut(duration: 0.06), value: on)
+            } else {
+                centeredButtonFace
+                .frame(width: touchW, height: touchH)
+                .contentShape(Rectangle())
+                .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+                .animation(.easeOut(duration: 0.06), value: on)
+                .simultaneousGesture(DragGesture(minimumDistance: 0)
+                    .onChanged { _ in updatePressed(true) }
+                    .onEnded { _ in updatePressed(false) })
             }
-            .frame(width: touchW, height: touchH)
-            .opacity(padUsesFullSkin ? 1.0 : padOpacity)
-            .animation(.easeOut(duration: 0.06), value: on)
-        } else {
-            centeredButtonFace
-            .frame(width: touchW, height: touchH)
-            .contentShape(Rectangle())
-            .opacity(padUsesFullSkin ? 1.0 : padOpacity)
-            .animation(.easeOut(duration: 0.06), value: on)
-            .simultaneousGesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in updatePressed(true) }
-                .onEnded { _ in updatePressed(false) })
+        }
+        .onDisappear {
+            updatePressed(false)
         }
     }
 
@@ -1367,55 +1486,41 @@ struct PSBtn: View {
     }
 }
 
-struct PadBtn: View {
-    let label: String; let w: CGFloat; let h: CGFloat; let btn: ARMSX2PadButton
+// Reusable render-only visual for a pad button. PadBtn drives its own press
+// state; the composite D-pad drives this view directly for diagonal highlighting.
+private struct PadButtonFace: View {
+    let button: ARMSX2PadButton
+    let label: String
+    let baseW: CGFloat
+    let baseH: CGFloat
     var visibleScaleX: CGFloat = 1.0
     var visibleScaleY: CGFloat = 1.0
     var hitScaleX: CGFloat = 1.0
     var hitScaleY: CGFloat = 1.0
-    @State private var on = false
+    let isPressed: Bool
     @Environment(\.padOpacity) private var padOpacity
     @Environment(\.padSkin) private var padSkin
     @Environment(\.padSkinDescriptor) private var padSkinDescriptor
     @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
     private var visibleW: CGFloat {
-        PadLayoutMetrics.visibleLength(baseLength: w, visibleScale: visibleScaleX)
+        PadLayoutMetrics.visibleLength(baseLength: baseW, visibleScale: visibleScaleX)
     }
 
     private var visibleH: CGFloat {
-        PadLayoutMetrics.visibleLength(baseLength: h, visibleScale: visibleScaleY)
+        PadLayoutMetrics.visibleLength(baseLength: baseH, visibleScale: visibleScaleY)
     }
 
     private var touchW: CGFloat {
-        PadLayoutMetrics.touchLength(baseLength: w, hitScale: hitScaleX)
+        PadLayoutMetrics.touchLength(baseLength: baseW, hitScale: hitScaleX)
     }
 
     private var touchH: CGFloat {
-        PadLayoutMetrics.touchLength(baseLength: h, hitScale: hitScaleY)
+        PadLayoutMetrics.touchLength(baseLength: baseH, hitScale: hitScaleY)
     }
 
     var body: some View {
-        if ARMSX2UsesUIKitPadPressSurface() {
-            ZStack {
-                UIKitPadPressSurface(onPress: updatePressed) {
-                    centeredButtonFace
-                }
-                .frame(width: touchW, height: touchH)
-            }
-            .frame(width: touchW, height: touchH)
-            .opacity(padUsesFullSkin ? 1.0 : padOpacity)
-            .animation(.easeOut(duration: 0.06), value: on)
-        } else {
-            centeredButtonFace
-            .frame(width: touchW, height: touchH)
-            .contentShape(Rectangle())
-            .opacity(padUsesFullSkin ? 1.0 : padOpacity)
-            .animation(.easeOut(duration: 0.06), value: on)
-            .simultaneousGesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in updatePressed(true) }
-                .onEnded { _ in updatePressed(false) })
-        }
+        centeredButtonFace
     }
 
     private var centeredButtonFace: some View {
@@ -1436,23 +1541,74 @@ struct PadBtn: View {
             shape
                 .fill(.clear)
 
-            if !padUsesFullSkin || on {
-                ARMSX2SkinMaskPressEffect(button: btn, skin: padSkin, descriptor: padSkinDescriptor, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+            if !padUsesFullSkin || isPressed {
+                ARMSX2SkinMaskPressEffect(button: button, skin: padSkin, descriptor: padSkinDescriptor, color: .white, isPressed: isPressed, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
             }
 
             if !padUsesFullSkin {
                 ControllerAssetImage(
-                    fileName: ControllerAsset.fileName(for: btn),
+                    fileName: ControllerAsset.fileName(for: button),
                     fallback: label,
-                    fallbackColor: on ? .black : .white,
+                    fallbackColor: isPressed ? .black : .white,
                     fallbackFontSize: min(visibleW, visibleH) * 0.38,
                     skin: padSkin,
                     descriptor: padSkinDescriptor
                 )
                     .padding(padSkin == .crispVector ? 0 : max(1, min(visibleW, visibleH) * 0.03))
-                    .brightness(on ? 0.18 : 0)
-                    .scaleEffect(on ? 0.91 : 1.0)
+                    .brightness(isPressed ? 0.18 : 0)
+                    .scaleEffect(isPressed ? 0.91 : 1.0)
             }
+        }
+    }
+}
+
+struct PadBtn: View {
+    let label: String; let w: CGFloat; let h: CGFloat; let btn: ARMSX2PadButton
+    var visibleScaleX: CGFloat = 1.0
+    var visibleScaleY: CGFloat = 1.0
+    var hitScaleX: CGFloat = 1.0
+    var hitScaleY: CGFloat = 1.0
+    @State private var on = false
+    @Environment(\.padOpacity) private var padOpacity
+    @Environment(\.padUsesFullSkin) private var padUsesFullSkin
+
+    private var touchW: CGFloat {
+        PadLayoutMetrics.touchLength(baseLength: w, hitScale: hitScaleX)
+    }
+
+    private var touchH: CGFloat {
+        PadLayoutMetrics.touchLength(baseLength: h, hitScale: hitScaleY)
+    }
+
+    private var face: some View {
+        PadButtonFace(button: btn, label: label, baseW: w, baseH: h, visibleScaleX: visibleScaleX, visibleScaleY: visibleScaleY, hitScaleX: hitScaleX, hitScaleY: hitScaleY, isPressed: on)
+    }
+
+    var body: some View {
+        Group {
+            if ARMSX2UsesUIKitPadPressSurface() {
+                ZStack {
+                    UIKitPadPressSurface(onPress: updatePressed) {
+                        face
+                    }
+                    .frame(width: touchW, height: touchH)
+                }
+                .frame(width: touchW, height: touchH)
+                .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+                .animation(.easeOut(duration: 0.06), value: on)
+            } else {
+                face
+                .frame(width: touchW, height: touchH)
+                .contentShape(Rectangle())
+                .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+                .animation(.easeOut(duration: 0.06), value: on)
+                .simultaneousGesture(DragGesture(minimumDistance: 0)
+                    .onChanged { _ in updatePressed(true) }
+                    .onEnded { _ in updatePressed(false) })
+            }
+        }
+        .onDisappear {
+            updatePressed(false)
         }
     }
 
@@ -1466,6 +1622,587 @@ struct PadBtn: View {
         if pressed && SettingsStore.shared.hapticFeedback {
             HapticManager.medium.impactOccurred()
         }
+    }
+}
+
+// MARK: - Composite D-pad (8-way diagonals)
+private struct CompositeDPadFaceInfo {
+    let button: ARMSX2PadButton
+    let label: String
+    let center: CGPoint
+    let baseSize: CGFloat
+    let visibleScaleX: CGFloat
+    let visibleScaleY: CGFloat
+    let hitScaleX: CGFloat
+    let hitScaleY: CGFloat
+}
+
+// Maps a touch offset (relative to a diamond cluster's center) to a set of 0, 1, or 2
+// of its four cardinal members. A center deadzone keeps resting touches neutral;
+// cardinal sectors resolve to a single member; diagonal sectors resolve to the two
+// adjacent neighbours so slides roll smoothly through the shared edges. Shared by the
+// composite D-pad (up/down/left/right) and the composite face cluster
+// (triangle/cross/square/circle).
+private func compositeDiamondResolve(
+    offset: CGPoint,
+    deadzone: CGFloat,
+    up: ARMSX2PadButton,
+    down: ARMSX2PadButton,
+    left: ARMSX2PadButton,
+    right: ARMSX2PadButton
+) -> Set<ARMSX2PadButton> {
+    let distance = hypot(offset.x, offset.y)
+    if distance < deadzone {
+        return []
+    }
+
+    let diagonalHalfAngle: CGFloat = 22.0 * .pi / 180.0
+    var angle = atan2(offset.y, offset.x)
+    if angle < 0 {
+        angle += 2 * .pi
+    }
+
+    // +y points down on screen, so each diagonal axis pairs two adjacent cardinals.
+    let diagonalAxes: [(axis: CGFloat, first: ARMSX2PadButton, second: ARMSX2PadButton)] = [
+        (.pi / 4, down, right),
+        (3 * .pi / 4, down, left),
+        (5 * .pi / 4, up, left),
+        (7 * .pi / 4, up, right)
+    ]
+    for candidate in diagonalAxes {
+        if compositeDiamondAngularDistance(angle, candidate.axis) <= diagonalHalfAngle {
+            return [candidate.first, candidate.second]
+        }
+    }
+
+    let cardinalAxes: [(axis: CGFloat, button: ARMSX2PadButton)] = [
+        (0, right),
+        (.pi / 2, down),
+        (.pi, left),
+        (3 * .pi / 2, up)
+    ]
+    var nearest = cardinalAxes[0]
+    var nearestDelta = compositeDiamondAngularDistance(angle, cardinalAxes[0].axis)
+    for candidate in cardinalAxes.dropFirst() {
+        let delta = compositeDiamondAngularDistance(angle, candidate.axis)
+        if delta < nearestDelta {
+            nearestDelta = delta
+            nearest = candidate
+        }
+    }
+    return [nearest.button]
+}
+
+private func compositeDiamondAngularDistance(_ a: CGFloat, _ b: CGFloat) -> CGFloat {
+    var delta = abs(a - b)
+    if delta > .pi {
+        delta = 2 * .pi - delta
+    }
+    return delta
+}
+
+// Resolves a face-button touch against each button's actual resolved hit region —
+// the same center and hitbox normal face buttons hit-test — instead of a fixed
+// angle→button mapping. A touch in a single hitbox resolves to that button; a touch
+// in the overlap of two resolves to both (an intentional combo between neighbours);
+// the central gap (no hitbox) resolves to nothing. This follows custom skins,
+// layouts, per-axis scale, and hit scale, so pressing a button always resolves to
+// that button regardless of how the skin arranged the cluster.
+private func compositeFaceResolve(
+    offset: CGPoint,
+    centroid: CGPoint,
+    faces: [CompositeFaceButtonInfo]
+) -> Set<ARMSX2PadButton> {
+    let point = CGPoint(x: centroid.x + offset.x, y: centroid.y + offset.y)
+
+    var hits: [(face: CompositeFaceButtonInfo, distance: CGFloat)] = []
+    for face in faces {
+        let halfW = PadLayoutMetrics.touchLength(baseLength: face.baseSize, hitScale: face.hitScaleX) / 2
+        let halfH = PadLayoutMetrics.touchLength(baseLength: face.baseSize, hitScale: face.hitScaleY) / 2
+        let dx = abs(point.x - face.center.x)
+        let dy = abs(point.y - face.center.y)
+        if dx <= halfW && dy <= halfH {
+            hits.append((face, hypot(dx, dy)))
+        }
+    }
+
+    if hits.isEmpty { return [] }
+    if hits.count == 1 { return [hits[0].face.button] }
+
+    // Two or more hitboxes overlap here: press the two nearest neighbours, never a
+    // broad chord.
+    hits.sort { $0.distance < $1.distance }
+    return Set(hits.prefix(2).map(\.face.button))
+}
+
+@MainActor
+private protocol CompositeDPadTouchHandling: AnyObject {
+    func touchBegan(at offset: CGPoint)
+    func touchMoved(at offset: CGPoint)
+    func touchEnded()
+}
+
+@MainActor
+private final class CompositeDPadTouchView: UIView {
+    weak var handler: CompositeDPadTouchHandling?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        configure()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configure()
+    }
+
+    private func configure() {
+        backgroundColor = .clear
+        isExclusiveTouch = false
+        isMultipleTouchEnabled = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let offset = offset(from: touches) else { return }
+        handler?.touchBegan(at: offset)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let offset = offset(from: touches) else { return }
+        handler?.touchMoved(at: offset)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        handler?.touchEnded()
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        handler?.touchEnded()
+    }
+
+    // Confine capture to the inscribed circle so the square frame's corners
+    // never steal touches meant for neighbouring controls.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        let radius = min(bounds.width, bounds.height) / 2
+        let dx = point.x - bounds.midX
+        let dy = point.y - bounds.midY
+        return (dx * dx) + (dy * dy) <= (radius * radius)
+    }
+
+    private func offset(from touches: Set<UITouch>) -> CGPoint? {
+        guard let touch = touches.first else {
+            return nil
+        }
+        let location = touch.location(in: self)
+        return CGPoint(x: location.x - bounds.midX, y: location.y - bounds.midY)
+    }
+}
+
+@MainActor
+private struct CompositeDPadTouchSurface: UIViewRepresentable {
+    let onBegan: () -> Void
+    let onLocation: (CGPoint) -> Void
+    let onEnded: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onBegan: onBegan, onLocation: onLocation, onEnded: onEnded)
+    }
+
+    func makeUIView(context: Context) -> CompositeDPadTouchView {
+        let view = CompositeDPadTouchView(frame: .zero)
+        view.handler = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: CompositeDPadTouchView, context: Context) {
+        context.coordinator.onBegan = onBegan
+        context.coordinator.onLocation = onLocation
+        context.coordinator.onEnded = onEnded
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, CompositeDPadTouchHandling {
+        var onBegan: () -> Void
+        var onLocation: (CGPoint) -> Void
+        var onEnded: () -> Void
+
+        init(onBegan: @escaping () -> Void, onLocation: @escaping (CGPoint) -> Void, onEnded: @escaping () -> Void) {
+            self.onBegan = onBegan
+            self.onLocation = onLocation
+            self.onEnded = onEnded
+        }
+
+        func touchBegan(at offset: CGPoint) {
+            onBegan()
+            onLocation(offset)
+        }
+
+        func touchMoved(at offset: CGPoint) {
+            onLocation(offset)
+        }
+
+        func touchEnded() {
+            onEnded()
+        }
+    }
+}
+
+private struct CompositeDPadView: View {
+    let faces: [CompositeDPadFaceInfo]
+    let centroid: CGPoint
+    let captureDiameter: CGFloat
+    let deadzone: CGFloat
+
+    @State private var pressed: Set<ARMSX2PadButton> = []
+    @Environment(\.padOpacity) private var padOpacity
+    @Environment(\.padUsesFullSkin) private var padUsesFullSkin
+
+    var body: some View {
+        ZStack {
+            CompositeDPadTouchSurface(
+                onBegan: {
+                    if SettingsStore.shared.hapticFeedback {
+                        HapticManager.medium.impactOccurred()
+                    }
+                },
+                onLocation: { offset in
+                    apply(compositeDiamondResolve(offset: offset, deadzone: deadzone, up: .up, down: .down, left: .left, right: .right))
+                },
+                onEnded: {
+                    releaseAll()
+                }
+            )
+            .frame(width: captureDiameter, height: captureDiameter)
+            .position(x: centroid.x, y: centroid.y)
+
+            ForEach(faces, id: \.button) { face in
+                PadButtonFace(
+                    button: face.button,
+                    label: face.label,
+                    baseW: face.baseSize,
+                    baseH: face.baseSize,
+                    visibleScaleX: face.visibleScaleX,
+                    visibleScaleY: face.visibleScaleY,
+                    hitScaleX: face.hitScaleX,
+                    hitScaleY: face.hitScaleY,
+                    isPressed: pressed.contains(face.button)
+                )
+                .allowsHitTesting(false)
+                .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+                .position(x: face.center.x, y: face.center.y)
+            }
+        }
+        .onDisappear {
+            releaseAll()
+        }
+    }
+
+    // Press only directions that newly entered the set and release only those
+    // that left it, so quarter-circle slides never leave a stale direction held.
+    private func apply(_ next: Set<ARMSX2PadButton>) {
+        for button in pressed.subtracting(next) {
+            EmulatorBridge.shared.setPadButton(button, pressed: false)
+        }
+        for button in next.subtracting(pressed) {
+            EmulatorBridge.shared.setPadButton(button, pressed: true)
+        }
+        pressed = next
+    }
+
+    private func releaseAll() {
+        let held = pressed
+        guard !held.isEmpty else { return }
+        for button in held {
+            EmulatorBridge.shared.setPadButton(button, pressed: false)
+        }
+        pressed = []
+    }
+}
+
+// MARK: - Composite face buttons (combo zones)
+private struct CompositeFaceButtonInfo {
+    let button: ARMSX2PadButton
+    let symbol: String
+    let color: Color
+    let center: CGPoint
+    let baseSize: CGFloat
+    let visibleScaleX: CGFloat
+    let visibleScaleY: CGFloat
+    let hitScaleX: CGFloat
+    let hitScaleY: CGFloat
+}
+
+// Render-only visual for an action (face) button. The composite face cluster drives
+// this view directly with an isPressed flag; it owns no input state of its own, so
+// the cluster is the single owner of every press/release it shows.
+private struct PSButtonFace: View {
+    let button: ARMSX2PadButton
+    let symbol: String
+    let color: Color
+    let baseSize: CGFloat
+    var visibleScaleX: CGFloat = 1.0
+    var visibleScaleY: CGFloat = 1.0
+    var hitScaleX: CGFloat = 1.0
+    var hitScaleY: CGFloat = 1.0
+    let isPressed: Bool
+    @Environment(\.padOpacity) private var padOpacity
+    @Environment(\.padSkin) private var padSkin
+    @Environment(\.padSkinDescriptor) private var padSkinDescriptor
+    @Environment(\.padUsesFullSkin) private var padUsesFullSkin
+
+    private var visibleW: CGFloat {
+        PadLayoutMetrics.visibleLength(baseLength: baseSize, visibleScale: visibleScaleX)
+    }
+
+    private var visibleH: CGFloat {
+        PadLayoutMetrics.visibleLength(baseLength: baseSize, visibleScale: visibleScaleY)
+    }
+
+    private var touchW: CGFloat {
+        PadLayoutMetrics.touchLength(baseLength: baseSize, hitScale: hitScaleX)
+    }
+
+    private var touchH: CGFloat {
+        PadLayoutMetrics.touchLength(baseLength: baseSize, hitScale: hitScaleY)
+    }
+
+    var body: some View {
+        centeredButtonFace
+    }
+
+    private var centeredButtonFace: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .frame(width: touchW, height: touchH)
+
+            buttonFace
+                .frame(width: visibleW, height: visibleH)
+                .position(x: touchW / 2, y: touchH / 2)
+        }
+        .frame(width: touchW, height: touchH)
+    }
+
+    private var buttonFace: some View {
+        ZStack {
+            // Ellipse (not Circle) so the press-mask shape matches a non-uniform
+            // visible frame; degenerates to a circle when the axes are equal.
+            Ellipse()
+                .fill(.clear)
+
+            if !padUsesFullSkin || isPressed {
+                ARMSX2SkinMaskPressEffect(button: button, skin: padSkin, descriptor: padSkinDescriptor, color: color, isPressed: isPressed, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+            }
+
+            if !padUsesFullSkin {
+                ControllerAssetImage(
+                    fileName: ControllerAsset.fileName(for: button),
+                    fallback: symbol,
+                    fallbackColor: isPressed ? .white : color,
+                    fallbackFontSize: min(visibleW, visibleH) * 0.42,
+                    skin: padSkin,
+                    descriptor: padSkinDescriptor
+                )
+                    .padding(padSkin == .crispVector ? 0 : max(1, min(visibleW, visibleH) * 0.03))
+                    .brightness(isPressed ? 0.18 : 0)
+                    .saturation(isPressed ? 1.16 : 1.0)
+                    .scaleEffect(isPressed ? 0.90 : 1.0)
+            }
+        }
+    }
+}
+
+@MainActor
+private protocol CompositeFaceTouchHandling: AnyObject {
+    func faceTouchesChanged(_ offsets: [CGPoint])
+}
+
+// Multi-touch raw-touch surface for the face-button cluster. Each active touch is
+// tracked independently by identity; on any change the handler receives the full set
+// of current touch offsets so the cluster can resolve each one and union the pressed
+// buttons. This keeps independent two-finger presses working while still allowing one
+// finger to slide into a two-button combo.
+@MainActor
+private final class CompositeFaceTouchView: UIView {
+    weak var handler: CompositeFaceTouchHandling?
+    private var tracked: [ObjectIdentifier: CGPoint] = [:]
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        configure()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configure()
+    }
+
+    private func configure() {
+        backgroundColor = .clear
+        isExclusiveTouch = false
+        isMultipleTouchEnabled = true
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches {
+            tracked[ObjectIdentifier(touch)] = offset(of: touch)
+        }
+        handler?.faceTouchesChanged(Array(tracked.values))
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches {
+            tracked[ObjectIdentifier(touch)] = offset(of: touch)
+        }
+        handler?.faceTouchesChanged(Array(tracked.values))
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches {
+            tracked[ObjectIdentifier(touch)] = nil
+        }
+        handler?.faceTouchesChanged(Array(tracked.values))
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches {
+            tracked[ObjectIdentifier(touch)] = nil
+        }
+        handler?.faceTouchesChanged(Array(tracked.values))
+    }
+
+    // Confine new touches to the inscribed circle so the square frame's corners
+    // never steal touches meant for neighbouring controls.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        let radius = min(bounds.width, bounds.height) / 2
+        let dx = point.x - bounds.midX
+        let dy = point.y - bounds.midY
+        return (dx * dx) + (dy * dy) <= (radius * radius)
+    }
+
+    private func offset(of touch: UITouch) -> CGPoint {
+        let location = touch.location(in: self)
+        return CGPoint(x: location.x - bounds.midX, y: location.y - bounds.midY)
+    }
+
+    // Release every button if the surface is torn down while touches are in flight
+    // (e.g. orientation change or navigation). The SwiftUI view also calls releaseAll
+    // on disappear; this is a belt-and-suspenders guard at the UIKit layer.
+    override func removeFromSuperview() {
+        handler?.faceTouchesChanged([])
+        super.removeFromSuperview()
+    }
+}
+
+@MainActor
+private struct CompositeFaceTouchSurface: UIViewRepresentable {
+    let onOffsets: ([CGPoint]) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onOffsets: onOffsets)
+    }
+
+    func makeUIView(context: Context) -> CompositeFaceTouchView {
+        let view = CompositeFaceTouchView(frame: .zero)
+        view.handler = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: CompositeFaceTouchView, context: Context) {
+        context.coordinator.onOffsets = onOffsets
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, CompositeFaceTouchHandling {
+        var onOffsets: ([CGPoint]) -> Void
+
+        init(onOffsets: @escaping ([CGPoint]) -> Void) {
+            self.onOffsets = onOffsets
+        }
+
+        func faceTouchesChanged(_ offsets: [CGPoint]) {
+            onOffsets(offsets)
+        }
+    }
+}
+
+// Composite face-button cluster: one multi-touch surface over the four action
+// buttons. Each touch resolves to the button whose hitbox contains it, or the two
+// nearest buttons where hitboxes overlap; the union of all
+// active touches is pressed, so independent two-finger presses keep working while a
+// single finger can still roll through a two-button combo. Buttons that leave the
+// union are released immediately so no press ever goes stale.
+private struct CompositeFaceView: View {
+    let faces: [CompositeFaceButtonInfo]
+    let centroid: CGPoint
+    let captureDiameter: CGFloat
+
+    @State private var pressed: Set<ARMSX2PadButton> = []
+    @Environment(\.padOpacity) private var padOpacity
+    @Environment(\.padUsesFullSkin) private var padUsesFullSkin
+
+    var body: some View {
+        ZStack {
+            CompositeFaceTouchSurface { offsets in
+                var next: Set<ARMSX2PadButton> = []
+                for offset in offsets {
+                    next.formUnion(compositeFaceResolve(
+                        offset: offset,
+                        centroid: centroid,
+                        faces: faces
+                    ))
+                }
+                apply(next)
+            }
+            .frame(width: captureDiameter, height: captureDiameter)
+            .position(x: centroid.x, y: centroid.y)
+
+            ForEach(faces, id: \.button) { face in
+                PSButtonFace(
+                    button: face.button,
+                    symbol: face.symbol,
+                    color: face.color,
+                    baseSize: face.baseSize,
+                    visibleScaleX: face.visibleScaleX,
+                    visibleScaleY: face.visibleScaleY,
+                    hitScaleX: face.hitScaleX,
+                    hitScaleY: face.hitScaleY,
+                    isPressed: pressed.contains(face.button)
+                )
+                .allowsHitTesting(false)
+                .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+                .position(x: face.center.x, y: face.center.y)
+            }
+        }
+        .onDisappear {
+            releaseAll()
+        }
+    }
+
+    // Press only buttons that newly entered the union and release only those that
+    // left it, so slides and multi-touch never leave a stale button held. Haptic
+    // fires once per change that newly presses at least one button.
+    private func apply(_ next: Set<ARMSX2PadButton>) {
+        let released = pressed.subtracting(next)
+        let newlyPressed = next.subtracting(pressed)
+        for button in released {
+            EmulatorBridge.shared.setPadButton(button, pressed: false)
+        }
+        for button in newlyPressed {
+            EmulatorBridge.shared.setPadButton(button, pressed: true)
+        }
+        if !newlyPressed.isEmpty, SettingsStore.shared.hapticFeedback {
+            HapticManager.medium.impactOccurred()
+        }
+        pressed = next
+    }
+
+    private func releaseAll() {
+        let held = pressed
+        guard !held.isEmpty else { return }
+        for button in held {
+            EmulatorBridge.shared.setPadButton(button, pressed: false)
+        }
+        pressed = []
     }
 }
 
