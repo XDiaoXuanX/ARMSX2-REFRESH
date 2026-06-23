@@ -79,9 +79,13 @@ static constexpr VkClearValue s_present_clear_color = {{{0.0f, 0.0f, 0.0f, 1.0f}
 static std::mutex s_instance_mutex;
 
 // Device extensions that are required for PCSX2.
-static constexpr const char* s_required_device_extensions[] = {
-	VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
-};
+// No hard-required device extensions beyond the swapchain (handled separately).
+// VK_KHR_push_descriptor used to be required, but it's now OPTIONAL: some Mali
+// drivers (e.g. Mali-G52) don't expose it at all, and we have a full
+// non-push-descriptor binding fallback — so requiring it needlessly rejected
+// otherwise-capable GPUs ("No physical devices found"). Kept as a (currently
+// empty) list so the existing required-extension scan loops stay valid.
+static constexpr std::array<const char*, 0> s_required_device_extensions = {};
 
 GSDeviceVK::GSDeviceVK()
 {
@@ -411,6 +415,9 @@ bool GSDeviceVK::SelectDeviceExtensions(ExtensionList* extension_list, bool enab
 			return false;
 	}
 
+	// Optional now (was required). Enabled when present; CreateDevice decides
+	// whether to actually use it (never on Mali — driver bug) or fall back.
+	m_optional_extensions.vk_khr_push_descriptor = SupportsExtension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, false);
 	m_optional_extensions.vk_ext_provoking_vertex = SupportsExtension(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, false);
 	m_optional_extensions.vk_ext_memory_budget = SupportsExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, false);
 	m_optional_extensions.vk_ext_calibrated_timestamps =
@@ -782,25 +789,29 @@ bool GSDeviceVK::ProcessDeviceExtensions()
 
 	VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor_properties = {
 		VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
-	Vulkan::AddPointerToChain(&properties2, &push_descriptor_properties);
+	if (m_optional_extensions.vk_khr_push_descriptor)
+		Vulkan::AddPointerToChain(&properties2, &push_descriptor_properties);
 
 	// query
 	vkGetPhysicalDeviceProperties2(m_physical_device, &properties2);
 
-	// confirm we actually support it
-	if (push_descriptor_properties.maxPushDescriptors < NUM_TFX_TEXTURES)
+	// Decide whether to bind textures via VK_KHR_push_descriptor. It's optional
+	// now — when it's absent (some Mali, e.g. Mali-G52), unusable, or known-buggy
+	// we fall back to per-frame allocated descriptor sets so Vulkan still runs.
+	m_use_push_descriptors = m_optional_extensions.vk_khr_push_descriptor;
+	if (m_use_push_descriptors && push_descriptor_properties.maxPushDescriptors < NUM_TFX_TEXTURES)
 	{
-		Console.Error("VK: maxPushDescriptors (%u) is below required (%u)", push_descriptor_properties.maxPushDescriptors,
-			NUM_TFX_TEXTURES);
-		return false;
+		Console.Warning("VK: maxPushDescriptors (%u) below required (%u) - using descriptor-set fallback.",
+			push_descriptor_properties.maxPushDescriptors, NUM_TFX_TEXTURES);
+		m_use_push_descriptors = false;
 	}
-
-	// Mali (ARM, vendorID 0x13B5) advertises VK_KHR_push_descriptor but its driver null-derefs inside
-	// vkCmdPushDescriptorSetKHR on the first textured draw. Fall back to per-frame allocated descriptor
-	// sets on Mali only; every other vendor keeps the (faster) push-descriptor path unchanged.
-	m_use_push_descriptors = (properties2.properties.vendorID != 0x13B5u);
+	// Mali (ARM, vendorID 0x13B5) advertises VK_KHR_push_descriptor but its driver
+	// null-derefs inside vkCmdPushDescriptorSetKHR on the first textured draw, so
+	// never use it there even when present.
+	if (m_use_push_descriptors && properties2.properties.vendorID == 0x13B5u)
+		m_use_push_descriptors = false;
 	if (!m_use_push_descriptors)
-		Console.Warning("VK: Mali GPU detected - using non-push-descriptor texture binding fallback.");
+		Console.Warning("VK: Using non-push-descriptor texture binding fallback.");
 
 	if (m_optional_extensions.vk_ext_line_rasterization && !line_rasterization_feature.bresenhamLines)
 	{
