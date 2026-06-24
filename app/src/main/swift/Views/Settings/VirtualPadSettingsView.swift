@@ -53,6 +53,16 @@ struct VirtualPadSettingsView: View {
                 Toggle(settings.localized("Auto Full Screen"), isOn: $settings.autoFullscreen)
                 Toggle(settings.localized("Hide Menu Button"), isOn: $settings.hideMenuButton)
 
+                Toggle(settings.localized("D-pad Diagonals"), isOn: $settings.dpadDiagonalsEnabled)
+                Text(settings.localized("Allows one-finger diagonal and quarter-circle motions on the virtual D-pad."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle(settings.localized("Face Button Combo Zones"), isOn: $settings.faceComboZonesEnabled)
+                Text(settings.localized("Press between face buttons to trigger both buttons at once."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text(settings.localized("Analog Stick Size"))

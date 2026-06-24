@@ -13,9 +13,9 @@ endif()
 
 set(ARMSX2_VERSION_MAJOR 2)
 set(ARMSX2_VERSION_MINOR 3)
-set(ARMSX2_VERSION_PATCH 0)
+set(ARMSX2_VERSION_PATCH 1)
 set(ARMSX2_VERSION "${ARMSX2_VERSION_MAJOR}.${ARMSX2_VERSION_MINOR}.${ARMSX2_VERSION_PATCH}")
-set(ARMSX2_BUILD_NUMBER 230)
+set(ARMSX2_BUILD_NUMBER 231)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 	set(CMAKE_C_COMPILER_WORKS 1)
@@ -146,6 +146,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		${CMAKE_SOURCE_DIR}/../swift/Views/MetalGameView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Views/EmulatorView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Views/VirtualControllerView.swift
+		${CMAKE_SOURCE_DIR}/../swift/Views/CheatsPatchesManagerView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Views/LicenseView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Views/Settings/SettingsRootView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Views/Settings/AppearanceSettingsView.swift
@@ -175,6 +176,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		${CMAKE_SOURCE_DIR}/../swift/Models/ImportDocumentPicker.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/ShareSheet.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/CoverStore.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/PatchModels.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/PnachParser.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/PatchStore.swift
 	)
 
 	configure_file("${CMAKE_SOURCE_DIR}/Info.plist.in" "${CMAKE_BINARY_DIR}/Info.plist" @ONLY)

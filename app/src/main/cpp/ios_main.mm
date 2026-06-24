@@ -3118,7 +3118,17 @@ namespace Host
     bool ShouldPreferHostFileSelector() { return false; }
     void OnCoverDownloaderOpenRequested() {}
     void OnCreateMemoryCardOpenRequested() {}
-    void OnAchievementsHardcoreModeChanged(bool) { ARMSX2_PostRetroAchievementsStateChanged(); }
+    void OnAchievementsHardcoreModeChanged(bool) {
+        ARMSX2_PostRetroAchievementsStateChanged();
+        // Re-evaluate .pnach enable lists now: ReloadEnabledLists gates cheats and patches on
+        // Hardcore, so previously-enabled entries stop applying (or resume) the moment Hardcore
+        // toggles, without waiting for the next patch reload.
+        if (VMManager::HasValidVM()) {
+            RunOnCPUThread([]() {
+                VMManager::ReloadPatches(false, true, false, true);
+            }, false);
+        }
+    }
     void SetMouseLock(bool) {}
     int LocaleSensitiveCompare(std::string_view lhs, std::string_view rhs) { return lhs.compare(rhs); }
     void OpenURL(std::string_view) {}
@@ -4500,7 +4510,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_43_v230_metadata_v1\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_43_v231_metadata_v1\n");
     fprintf(stderr, "@@FF_FIX@@ offspeed_present_skip=1 present_cap60=1 adaptive_backoff=1 drawable_wait_probe=1 vm_pace_probe=1 turbo_only_toggle=1\n");
     fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     
