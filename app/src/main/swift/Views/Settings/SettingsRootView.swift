@@ -399,10 +399,6 @@ private struct NetworkSettingsView: View {
     @State private var settings = SettingsStore.shared
     @State private var hosts: [DNSHost] = []
 
-    private var ethUsesSockets: Bool {
-        ARMSX2Bridge.getINIString("DEV9/Eth", key: "EthApi", defaultValue: "Sockets") == "Sockets"
-    }
-
     var body: some View {
         Form {
             Section(settings.localized("PS2 HDD")) {
@@ -451,16 +447,6 @@ private struct NetworkSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-
-            Section(settings.localized("Intercept DHCP")) {
-                Toggle(settings.localized("Intercept DHCP"), isOn: $settings.dev9InterceptDHCP)
-                ipRow(settings.localized("PS2 Address"), $settings.dev9PS2IP)
-                Toggle(settings.localized("Auto Subnet Mask"), isOn: $settings.dev9AutoMask)
-                ipRow(settings.localized("Subnet Mask"), $settings.dev9Mask)
-                Toggle(settings.localized("Auto Gateway"), isOn: $settings.dev9AutoGateway)
-                ipRow(settings.localized("Gateway Address"), $settings.dev9Gateway)
-            }
-            .disabled(!settings.dev9EthernetEnabled || ethUsesSockets)
 
             Section(settings.localized("DNS")) {
                 dnsRow("DNS1", mode: $settings.dev9DNS1Mode, address: $settings.dev9DNS1)
