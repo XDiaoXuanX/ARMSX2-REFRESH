@@ -50,6 +50,9 @@
 #include "native-lib.h"
 #include "libchdr/chd.h"
 #include <algorithm>
+#include <cmath>
+
+#include "common/HostSys.h"
 #include <cctype>
 #include <condition_variable>
 #include <deque>
@@ -779,11 +782,32 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_setFpsCap(JNIEnv *env, jclass clazz,
                                                jint p_fps) {
-    // Deprecated. The previous Android-only FPS cap skipped GS rendering, which
-    // broke BIOS/game visuals in titles which depend on every GS update. Keep
-    // the JNI symbol so older settings/UI calls are harmless, but route users
-    // through PCSX2's normal frame limiter / NominalScalar pacing instead.
-    Console.WriteLnFmt("@@ANDROID_FPSCAP@@ ignored={}", p_fps);
+    // Max presented-FPS cap. INDEPENDENT of the Speed Limit % — it caps the
+    // DISPLAY frame rate by dropping presents on the GS thread (GSRenderer::VSync)
+    // while emulation keeps running full speed. It never touches NominalScalar,
+    // so it does not slow the game and does not fight the Speed Limit %. The cap
+    // is adaptive (drops only when ahead of the target interval), so a game
+    // already at/below the target is unaffected — no over-skip. 0 = off.
+    //
+    // No RetroAchievements guard needed: capping the present rate is not a
+    // slowdown (game logic still advances in real time), so hardcore is fine.
+    const u32 fps = (p_fps > 0) ? static_cast<u32>(std::min(p_fps, 1000)) : 0u;
+    u64 interval = 0;
+    if (fps > 0)
+    {
+        // A present-rate cap can only drop whole displayed frames, so it snaps to
+        // a whole division of the game's refresh: present every round(native/fps)
+        // vsyncs. The interval is (div - 0.5) vsyncs in CPU ticks — the half-frame
+        // margin makes the divisor boundary clear reliably (so e.g. a 30 cap holds
+        // steady instead of wobbling on the 2-frame edge), and targets that aren't
+        // a whole division (e.g. 50 on a 60Hz game) resolve to the nearest rate.
+        const double native = static_cast<double>(VMManager::GetFrameRate()); // ~59.94 / 50
+        const long div = std::max(1L, std::lround(native / static_cast<double>(fps)));
+        const double vsync_ticks = static_cast<double>(GetTickFrequency()) / native;
+        interval = static_cast<u64>((static_cast<double>(div) - 0.5) * vsync_ticks);
+    }
+    GSSetMaxPresentFps(fps, interval);
+    Console.WriteLnFmt("@@ANDROID_FPSCAP@@ fps={} interval_ticks={}", fps, interval);
 }
 
 extern "C"
@@ -2385,6 +2409,12 @@ Java_kr_co_iefriends_pcsx2_NativeApp_osdShowFrameTimes(JNIEnv*, jclass, jboolean
     applyOsdSetting();
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_osdShowHardwareInfo(JNIEnv*, jclass, jboolean enabled) {
+    EmuConfig.GS.OsdShowHardwareInfo = enabled;
+    applyOsdSetting();
+}
+
 // Master OSD toggle — flips every OSD bit we enable at first init in
 // initialize() so the in-game overlay's OSD pill is a single switch.
 // Writes BASE too so the state survives the next ApplySettings reload
@@ -2420,6 +2450,71 @@ Java_kr_co_iefriends_pcsx2_NativeApp_osdShowAll(JNIEnv*, jclass, jboolean enable
         s_settings_interface->Save();
 
     applyOsdSetting();
+}
+
+// ---- Per-game settings export (upstream-style sparse game INI) ----
+// Mirrors PCSX2's FullscreenUI game-settings save (FullscreenUI.cpp): the
+// Kotlin side streams only the keys that differ from global into a fresh
+// INISettingsInterface at gamesettings/<serial>_<CRC>.ini, then commit drops
+// empty sections and deletes the file when there are no overrides — so the
+// on-disk artifact is sparse and portable, exactly like the desktop UI writes.
+// The running game already reflects the change live (Kotlin's applySafeLiveDelta /
+// ConfigStore), so we deliberately do NOT ReloadGameSettings here: that calls
+// ApplySettings (a VM park) and would reintroduce the per-tap hitch the live
+// delta path exists to avoid. The INI is picked up as the game layer on the
+// next boot via UpdateGameSettingsLayer.
+static std::unique_ptr<INISettingsInterface> s_export_game_ini;
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_gameIniBeginWrite(JNIEnv*, jclass) {
+    if (!VMManager::HasValidVM())
+        return JNI_FALSE;
+    const u32 crc = VMManager::GetDiscCRC();
+    if (crc == 0)
+        return JNI_FALSE;
+    // Fresh interface (no Load) so the export is a clean regeneration of the
+    // current overrides — stale keys from a previous save never linger.
+    s_export_game_ini = std::make_unique<INISettingsInterface>(
+        VMManager::GetGameSettingsPath(VMManager::GetDiscSerial(), crc));
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_gameIniPut(JNIEnv* env, jclass,
+                                                jstring p_section, jstring p_key, jstring p_value) {
+    if (!s_export_game_ini)
+        return;
+    const char* section = env->GetStringUTFChars(p_section, nullptr);
+    const char* key = env->GetStringUTFChars(p_key, nullptr);
+    const char* value = env->GetStringUTFChars(p_value, nullptr);
+    // CSimpleIni is untyped string storage; the typed getters (GetBoolValue etc.)
+    // parse the string back, so writing the Kotlin string repr round-trips.
+    if (section && key && value)
+        s_export_game_ini->SetStringValue(section, key, value);
+    if (value) env->ReleaseStringUTFChars(p_value, value);
+    if (key) env->ReleaseStringUTFChars(p_key, key);
+    if (section) env->ReleaseStringUTFChars(p_section, section);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_gameIniCommitWrite(JNIEnv*, jclass) {
+    if (!s_export_game_ini)
+        return JNI_FALSE;
+    Error error;
+    bool ok = true;
+    s_export_game_ini->RemoveEmptySections();
+    if (s_export_game_ini->IsEmpty()) {
+        // No per-game overrides — remove the file entirely (FullscreenUI parity).
+        const std::string fn = s_export_game_ini->GetFileName();
+        if (FileSystem::FileExists(fn.c_str()))
+            ok = FileSystem::DeleteFilePath(fn.c_str(), &error);
+    } else {
+        ok = s_export_game_ini->Save(&error);
+    }
+    s_export_game_ini.reset();
+    if (!ok)
+        Console.ErrorFmt("@@ANDROID_GAMEINI@@ commit failed: {}", error.GetDescription());
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

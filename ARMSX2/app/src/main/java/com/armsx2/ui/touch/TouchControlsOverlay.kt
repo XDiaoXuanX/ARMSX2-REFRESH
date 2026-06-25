@@ -98,9 +98,10 @@ fun TouchControlsOverlay() {
         var lShoulderPressed by remember { mutableStateOf<Set<TouchButtonId>>(emptySet()) }
         var rShoulderPressed by remember { mutableStateOf<Set<TouchButtonId>>(emptySet()) }
 
-        // Tap-to-reveal settings cog (top-right). Hidden entirely when on-screen
-        // controls are set to Never, so it can't sit on top of R1 (use a
-        // physical menu-button binding or the pause touch button instead).
+        // Tap-to-reveal settings cog (top-center). Moved off the top-right corner
+        // so it no longer sits under the R1/R2 on-screen cluster (the "behind R2"
+        // complaint). Hidden entirely when on-screen controls are set to Never (use
+        // a physical menu-button binding or the pause touch button instead).
         if (!edit && TouchControls.visibilityMode.value != 0) {
             var showSettingsCog by remember { mutableStateOf(false) }
             LaunchedEffect(showSettingsCog) {
@@ -111,7 +112,7 @@ fun TouchControlsOverlay() {
             }
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
+                    .align(Alignment.TopCenter)
                     .size(74.dp)
                     .clickable(
                         indication = null,
@@ -121,7 +122,7 @@ fun TouchControlsOverlay() {
             if (showSettingsCog) {
                 InGameSettingsButton(
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
+                        .align(Alignment.TopCenter)
                         .padding(14.dp),
                     onClick = {
                         showSettingsCog = false

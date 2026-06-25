@@ -295,6 +295,14 @@ object InGameOverlay {
         } else {
             applySafeLiveDelta(previous, updated)
         }
+        // Per-game scope: also regenerate the sparse, portable game-settings INI
+        // (upstream FullscreenUI style) for the running game. The live apply
+        // already happened above; this only refreshes the on-disk overrides so
+        // they're visible/portable and load as the game layer on next boot.
+        if (settingsScope.value == SettingsScope.Game && currentSerial.value != null &&
+            Main.eState.value != EmuState.STOPPED) {
+            updated.writeGameSettingsIni(ConfigStore.loadGlobal())
+        }
         frameLimitOn.value = updated.frameLimitEnable
         osdShown.value = anyOsdElementEnabled(updated)
     }
@@ -307,7 +315,9 @@ object InGameOverlay {
             settings.osdShowGpu ||
             settings.osdShowResolution ||
             settings.osdShowGsStats ||
-            settings.osdShowFrameTimes
+            settings.osdShowFrameTimes ||
+            settings.osdShowHardwareInfo ||
+            settings.osdShowVersion
 
     private fun withAllOsdElements(settings: Settings, enabled: Boolean): Settings =
         settings.copy(
@@ -319,6 +329,8 @@ object InGameOverlay {
             osdShowResolution = enabled,
             osdShowGsStats = enabled,
             osdShowFrameTimes = enabled,
+            osdShowHardwareInfo = enabled,
+            osdShowVersion = enabled,
         )
 
     private fun syncQuickTogglesFromSettings(settings: Settings) {
@@ -338,11 +350,13 @@ object InGameOverlay {
             NativeApp.speedhackLimitermode(if (updated.frameLimitEnable) 0 else 3)
         }
 
-        // Speed Limit / Custom FPS — setNominalSpeed is a light direct re-pace
-        // (sets EmuConfig.NominalScalar + UpdateTargetSpeed), no VM park, so it's
-        // safe on this in-game delta path. Persistence is handled by ConfigStore.
+        // Speed Limit % (emulation speed → NominalScalar) and Max FPS cap (GS
+        // present rate) are INDEPENDENT light re-applies, no VM park — safe on
+        // this delta path. Persistence is handled by ConfigStore.
         if (previous.nominalSpeedPercent != updated.nominalSpeedPercent)
             NativeApp.setNominalSpeed(updated.nominalSpeedPercent.coerceIn(10, 1000))
+        if (previous.fpsLimit != updated.fpsLimit)
+            NativeApp.setFpsCap(updated.fpsLimit.coerceIn(0, 1000))
 
         // Audio — SPU2 setters apply live to the open stream, no VM park.
         if (previous.audioVolume != updated.audioVolume)
@@ -444,6 +458,14 @@ object InGameOverlay {
         if (previous.osdShowFrameTimes != updated.osdShowFrameTimes) {
             NativeApp.setSetting("EmuCore/GS", "OsdShowFrameTimes", "bool", updated.osdShowFrameTimes.toString())
             NativeApp.osdShowFrameTimes(updated.osdShowFrameTimes)
+        }
+        if (previous.osdShowHardwareInfo != updated.osdShowHardwareInfo) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowHardwareInfo", "bool", updated.osdShowHardwareInfo.toString())
+            NativeApp.osdShowHardwareInfo(updated.osdShowHardwareInfo)
+        }
+        if (previous.osdShowVersion != updated.osdShowVersion) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowVersion", "bool", updated.osdShowVersion.toString())
+            NativeApp.osdShowVersion(updated.osdShowVersion)
         }
 
         // Renderer / hardware-fix / upscaling-fix changes apply live via a GS-only
@@ -1086,18 +1108,36 @@ object InGameOverlay {
                     .padding(20.dp),
                 horizontalAlignment = Alignment.End,
             ) {
-                // Dedicated close button so touch users don't have to tap the
-                // dim backdrop (easy to hit by accident) to leave the overlay.
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(Color.White.copy(alpha = 0.12f))
-                        .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(20.dp))
-                        .clickable { closeAndResume() },
-                    contentAlignment = Alignment.Center,
+                // Resume + close, side by side. The ✕ already resumes the game
+                // (closeAndResume), but users read it as "exit" and assume the game
+                // is frozen — so we put an obvious green ▶ Resume right next to it.
+                // Both do the same safe thing: leave the menu and resume.
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("✕", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color(0xFF2E7D32).copy(alpha = 0.92f))
+                            .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(20.dp))
+                            .clickable { closeAndResume() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("▶", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color.White.copy(alpha = 0.12f))
+                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(20.dp))
+                            .clickable { closeAndResume() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("✕", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -1682,7 +1722,9 @@ object InGameOverlay {
         // rows looked ragged / overran the bottom. Derive one height that fits all
         // 3 rows in the available space, clamped so cells aren't tiny or huge.
         val gap = 8.dp
-        val cellH = ((maxHeight - gap * 2) / 3).coerceIn(64.dp, 112.dp)
+        // Cap shorter (was 112) so the Play-tab bubbles stay compact on
+        // tall panels / small screens instead of ballooning to fill height.
+        val cellH = ((maxHeight - gap * 2) / 3).coerceIn(64.dp, 96.dp)
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)

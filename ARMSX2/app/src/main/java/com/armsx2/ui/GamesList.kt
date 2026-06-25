@@ -67,6 +67,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -310,10 +311,12 @@ object GamesList {
                 cacheLoaded.value = true
                 val (cachedKey, cachedGames) = loadCache(context)
                 if (cachedKey == romsKey) {
+                    // Show the cached list instantly for a snappy open, then fall
+                    // through to a background rescan so games added to the folder
+                    // since last launch are picked up automatically (issue #223) —
+                    // no manual Refresh tap needed, and no blocking wait.
                     games.clear()
                     games.addAll(cachedGames)
-                    lastScannedRoms.value = romsKey
-                    return@LaunchedEffect
                 }
             }
 
@@ -419,11 +422,20 @@ object GamesList {
         landscape: Boolean,
         modifier: Modifier = Modifier,
     ) {
+        // Fit-per-row: size each shelf to the covers that actually fit the screen
+        // width, so games wrap onto MORE shelves and the user only scrolls DOWN —
+        // no horizontal scroll (the "scroll right forever" complaint). Uses the
+        // larger of the two shelf cover widths so neither shelf overflows.
+        val screenWidthDp = LocalConfiguration.current.screenWidthDp
+        val coverPlusGapDp = (if (landscape) 92 else 98) + 28
+        val navRailDp = if (landscape) 88 else 0
+        val availDp = (screenWidthDp - navRailDp - 52).coerceAtLeast(coverPlusGapDp)
+        val perRow = ((availDp + 28) / coverPlusGapDp).coerceAtLeast(1)
         val currentShelfGames = recentUris
             .mapNotNull { uri -> games.firstOrNull { it.uri.toString() == uri } }
-            .take(5)
-            .ifEmpty { games.take(if (landscape) 8 else 6) }
-        val libraryRows = games.chunked(if (landscape) 8 else 5)
+            .take(perRow)
+            .ifEmpty { games.take(perRow) }
+        val libraryRows = games.chunked(perRow)
         val controllerLayoutRows = buildList {
             if (currentShelfGames.isNotEmpty()) add(currentShelfGames)
             addAll(libraryRows)
@@ -925,7 +937,7 @@ object GamesList {
                 )
                 InfoParagraph(
                     "In-game menu",
-                    "While in a game, tap the top-right of the screen to pop up the gear " +
+                    "While in a game, tap the top-middle of the screen to pop up the gear " +
                         "icon — tap it to open the pause overlay. On a controller, you can " +
                         "bind hotkeys for the menu and many other toggles in Settings.",
                 )

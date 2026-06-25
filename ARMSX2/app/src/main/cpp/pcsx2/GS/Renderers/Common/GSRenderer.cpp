@@ -20,6 +20,7 @@
 #include "common/Path.h"
 #include "common/StringUtil.h"
 #include "common/Timer.h"
+#include "common/HostSys.h"
 
 #include "fmt/format.h"
 #include "IconsFontAwesome.h"
@@ -649,6 +650,20 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	else
 	{
 		m_manual_frameskip_counter = 0;
+	}
+
+	// Max-FPS cap (Android): hold the *presented* frame rate at/below a target
+	// without slowing emulation (decoupled from the speed limiter / Speed %).
+	// Adaptive — drops a present only when we're ahead of the target interval, so
+	// a game already at/below the cap is unaffected (no over-skip). Set via the
+	// JNI setFpsCap; the EE keeps running full speed, only presents are dropped.
+	if (const u64 cap_interval = GSGetMaxPresentInterval(); cap_interval > 0 && !skip_frame && !GSCapture::IsCapturingVideo())
+	{
+		const u64 now = GetCPUTicks();
+		if (m_fps_cap_last_present != 0 && (now - m_fps_cap_last_present) < cap_interval)
+			skip_frame = true; // ahead of the (vsync-aligned) target → drop this present
+		else
+			m_fps_cap_last_present = now; // presenting → mark the time
 	}
 
 	const bool blank_frame = !Merge(field);

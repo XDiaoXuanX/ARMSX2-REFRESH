@@ -364,6 +364,13 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 			if (GSConfig.OsdShowVPS)
 				s_speed_line.append_format("{}VPS: {:.2f}", s_speed_line.empty() ? "" : " | ", PerformanceMetrics::GetFPS());
 
+			// Android Max-FPS cap: surface the actual displayed (presented) rate
+			// and the cap target. The FPS/VPS lines above show the internal/vsync
+			// rate, which the present-side cap intentionally doesn't change, so
+			// without this the cap looks like it's doing nothing on the OSD.
+			if (const u32 fps_cap = GSGetMaxPresentFps(); fps_cap > 0)
+				s_speed_line.append_format("{}Display: {:.0f} (cap {})", s_speed_line.empty() ? "" : " | ", PerformanceMetrics::GetPresentFPS(), fps_cap);
+
 			if (GSConfig.OsdShowSpeed)
 			{
 				s_speed_line.append_format("{}Speed: {}%", s_speed_line.empty() ? "" : " | ", static_cast<u32>(std::round(speed)));

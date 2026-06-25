@@ -416,7 +416,10 @@ fun ToggleBubble(
     }
     Column(
         modifier = modifier
-            .aspectRatio(1.35f)
+            // Wider ratio = shorter cell, so the gamefix/speedhack grids
+            // (5+ rows of four) fit small-screen panels with far less
+            // scrolling. The On/Off label + state line still fit at ~60dp.
+            .aspectRatio(2.0f)
             .clip(RoundedCornerShape(10.dp))
             .background(bg)
             .border(1.dp, border, RoundedCornerShape(10.dp))

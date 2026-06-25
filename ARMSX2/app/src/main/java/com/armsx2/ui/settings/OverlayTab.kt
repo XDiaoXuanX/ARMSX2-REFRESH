@@ -65,5 +65,9 @@ fun OverlayTab(state: MutableState<Settings>) {
         ToggleRow("GS statistics", s.osdShowGsStats) { apply(s.copy(osdShowGsStats = it)) }
         SettingsDivider()
         ToggleRow("Frame times graph", s.osdShowFrameTimes) { apply(s.copy(osdShowFrameTimes = it)) }
+        SettingsDivider()
+        ToggleRow("Hardware info (CPU/GPU model)", s.osdShowHardwareInfo) { apply(s.copy(osdShowHardwareInfo = it)) }
+        SettingsDivider()
+        ToggleRow("Emulator version", s.osdShowVersion) { apply(s.copy(osdShowVersion = it)) }
     }
 }

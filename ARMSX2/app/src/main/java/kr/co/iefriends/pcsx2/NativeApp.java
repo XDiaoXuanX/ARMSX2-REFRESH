@@ -221,6 +221,16 @@ public class NativeApp {
 	public static native void osdShowResolution(boolean enabled);
 	public static native void osdShowGSStats(boolean enabled);
 	public static native void osdShowFrameTimes(boolean enabled);
+	public static native void osdShowHardwareInfo(boolean enabled);
+	public static native void osdShowVersion(boolean enabled);
+
+	/** Per-game settings export — writes only the keys that differ from global
+	 *  into gamesettings/<serial>_<CRC>.ini for the running game (sparse, like
+	 *  PCSX2's desktop UI). Stream: gameIniBeginWrite() once, gameIniPut() per
+	 *  override key, gameIniCommitWrite() to save (or delete when empty). */
+	public static native boolean gameIniBeginWrite();
+	public static native void gameIniPut(String section, String key, String value);
+	public static native boolean gameIniCommitWrite();
 
 	/** Pin a custom Vulkan driver (e.g. Mesa Turnip) for the next VM
 	 *  start. Must be called BEFORE Main.start() — the first MTGS::Open
