@@ -941,6 +941,39 @@ object GamesList {
                         "icon — tap it to open the pause overlay. On a controller, you can " +
                         "bind hotkeys for the menu and many other toggles in Settings.",
                 )
+                // Open / copy the app data folder (memory cards, custom textures, etc.).
+                val ctx = LocalContext.current
+                val dataPath = remember {
+                    Main.systemDirPosix() ?: ctx.getExternalFilesDir(null)?.absolutePath ?: ""
+                }
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 14.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF16202C))
+                        .clickable { openOrCopyDataFolder(ctx) }
+                        .padding(12.dp),
+                ) {
+                    Text(
+                        "Open data folder",
+                        color = Colors.pasx2_blue,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Manage memory cards, custom textures, and other files. Tap to open it in " +
+                            "a file manager (or copy the path if none can open it).",
+                        color = Color.White.copy(alpha = 0.72f),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                    )
+                    if (dataPath.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(dataPath, color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
+                    }
+                }
                 Spacer(Modifier.height(18.dp))
                 Text(
                     "Tap anywhere or press B to close",
@@ -969,6 +1002,41 @@ object GamesList {
                 fontSize = 12.sp,
                 lineHeight = 16.sp,
             )
+        }
+    }
+
+    /** Best-effort: open the app data folder in a file manager; if nothing can
+     *  handle it (common on newer Android for Android/data), copy the path to
+     *  the clipboard so the user can paste it. Avoids MANAGE_EXTERNAL_STORAGE
+     *  (removed for Play compliance) — uses a documents URI + clipboard. */
+    private fun openOrCopyDataFolder(context: android.content.Context) {
+        val path = Main.systemDirPosix()
+            ?: context.getExternalFilesDir(null)?.absolutePath ?: ""
+        val opened = runCatching {
+            val docId = "primary:Android/data/${context.packageName}/files"
+            val uri = android.provider.DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents", docId)
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, android.provider.DocumentsContract.Document.MIME_TYPE_DIR)
+                addFlags(
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
+            context.startActivity(intent)
+            true
+        }.getOrDefault(false)
+        if (!opened) {
+            runCatching {
+                val cb = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+                cb.setPrimaryClip(android.content.ClipData.newPlainText("ARMSX2 data folder", path))
+            }
+            android.widget.Toast.makeText(
+                context,
+                "No file manager could open it here. Path copied:\n$path",
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
         }
     }
 

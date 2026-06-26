@@ -150,14 +150,14 @@ fun PerformanceTab(state: MutableState<Settings>) {
             )
         }
         SettingsDivider()
-        // Max FPS cap — caps the presented frame rate independently of the Speed
+        // Frame Rate Control — caps the presented frame rate independently of the Speed
         // Limit %. The native side drops presents on the GS thread to hold this
         // rate while emulation runs full speed (no slowdown). Presets only.
         run {
             val fpsPresets = listOf(0, 60, 30, 20, 15)
             val idx = fpsPresets.indexOf(s.fpsLimit).let { if (it < 0) 0 else it }
             IntSliderRow(
-                label = "Max FPS Cap",
+                label = "Frame Rate Control",
                 value = idx,
                 min = 0,
                 max = fpsPresets.size - 1,

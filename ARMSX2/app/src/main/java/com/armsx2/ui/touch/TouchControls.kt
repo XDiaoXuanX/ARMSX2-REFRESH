@@ -3,9 +3,12 @@ package com.armsx2.ui.touch
 import android.view.KeyEvent
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import com.armsx2.EmuState
 import com.armsx2.Main
+import com.armsx2.ui.InGameOverlay
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 /**
  * On-screen touch controls — state, persistence, and the runtime
@@ -25,6 +28,10 @@ object TouchControls {
     private const val KEY_OPACITY = "touch.opacity"
     private const val KEY_FACE_MULTI = "touch.faceMulti"
     private const val KEY_VIS_MODE = "touch.visibilityMode"
+    // Per-game active-profile override: touch.active.game.<serial> -> profile name.
+    private const val KEY_ACTIVE_GAME_PREFIX = "touch.active.game."
+    // Portable on-disk mirror of profiles, under <DataRoot>/inputprofiles/.
+    private const val PROFILE_FILE_SUFFIX = ".touch.json"
 
     /** Visible to the user. False when a controller is being used (latched
      *  off in onControllerInputDetected); flipped back on by any screen
@@ -36,6 +43,17 @@ object TouchControls {
      *  suppressed. Toggled from InGameOverlay's "Edit Touch Controls"
      *  row. */
     val editMode = mutableStateOf(false)
+
+    /** Leave layout-edit mode and resume the game. Edit mode is entered from
+     *  the (paused) pause overlay and runs with the VM paused for a stable
+     *  editing screen, so on exit we must resume — otherwise the game stays
+     *  frozen with no overlay shown until the user re-opens the menu and hits
+     *  Resume (the "emulator froze after saving a controller profile" report).
+     *  No-op if the VM isn't paused. */
+    fun exitEditMode() {
+        editMode.value = false
+        if (Main.eState.value == EmuState.PAUSED) Main.resume()
+    }
 
     /** Currently-selected widget in edit mode. When non-null, the edit
      *  toolbar exposes a size slider for the selected widget — useful
@@ -125,6 +143,10 @@ object TouchControls {
                 }
             }
         }
+        // Merge in portable profiles from <DataRoot>/inputprofiles/ that aren't
+        // already in prefs — lets profiles survive a data-folder move (the user's
+        // pain point) and be shared/hand-dropped. Prefs stays the live source.
+        importFolderProfilesInto(list)
         if (list.isEmpty()) {
             list.add(TouchProfile("Default", TouchLayout.default()))
         }
@@ -151,6 +173,7 @@ object TouchControls {
             .putBoolean(KEY_FACE_MULTI, faceMultiTouch.value)
             .putInt(KEY_VIS_MODE, visibilityMode.value)
             .apply()
+        syncFolder()
     }
 
     /** Set the on-screen controls visibility mode (see [visibilityMode]). */
@@ -197,6 +220,12 @@ object TouchControls {
         val match = profiles.firstOrNull { it.name == name } ?: return
         activeProfileName.value = name
         activeLayout.value = match.layout.copy()
+        // When a game is running, remember this profile FOR that game so it
+        // auto-applies on the next boot (per-game tier). With no game (library),
+        // it's just the global default, persisted via KEY_ACTIVE in persist().
+        val serial = InGameOverlay.currentSerial.value
+        if (serial != null)
+            Main.prefs.edit().putString(KEY_ACTIVE_GAME_PREFIX + serial, name).apply()
         persist()
     }
 
@@ -210,11 +239,82 @@ object TouchControls {
             activeProfileName.value = fallback.name
             activeLayout.value = fallback.layout.copy()
         }
+        // Drop any per-game overrides that pointed at the deleted profile.
+        clearGameOverridesFor(name)
         persist()
     }
 
     fun resetActiveToDefault() {
         activeLayout.value = TouchLayout.default()
+    }
+
+    // ---- Per-game tier + portable inputprofiles/ folder ----
+
+    /** Apply the per-game touch profile recorded for [serial] (call on game boot).
+     *  No-op when the game has no override — the global selection stays. Does NOT
+     *  persist (auto-apply must not overwrite the global default). */
+    fun applyForSerial(serial: String?) {
+        if (serial == null) return
+        val name = Main.prefs.getString(KEY_ACTIVE_GAME_PREFIX + serial, null) ?: return
+        if (name == activeProfileName.value) return
+        val match = profiles.firstOrNull { it.name == name } ?: return
+        activeProfileName.value = name
+        activeLayout.value = match.layout.copy()
+    }
+
+    private fun clearGameOverridesFor(profileName: String) {
+        val ed = Main.prefs.edit()
+        for ((k, v) in Main.prefs.all) {
+            if (k.startsWith(KEY_ACTIVE_GAME_PREFIX) && v == profileName) ed.remove(k)
+        }
+        ed.apply()
+    }
+
+    /** `<DataRoot>/inputprofiles/` (native creates it on init). Null when no
+     *  system dir is configured yet. */
+    private fun profilesDir(): File? {
+        // systemDirPosix() is null for the DEFAULT (private app folder) — fall
+        // back to getExternalFilesDir (= Android/data/<pkg>/files), which is
+        // exactly where the native core puts EmuFolders::InputProfiles.
+        val root = Main.systemDirPosix()
+            ?: Main.instance?.applicationContext?.getExternalFilesDir(null)?.absolutePath
+            ?: return null
+        val dir = File(root, "inputprofiles")
+        if (!dir.exists()) runCatching { dir.mkdirs() }
+        return if (dir.isDirectory) dir else null
+    }
+
+    private fun fileNameFor(name: String): String =
+        name.replace(Regex("[^A-Za-z0-9 _.-]"), "_") + PROFILE_FILE_SUFFIX
+
+    /** Mirror the in-memory profiles to the portable folder: write each one and
+     *  delete orphaned files (covers delete/rename). Best-effort. */
+    private fun syncFolder() {
+        val dir = profilesDir() ?: return
+        runCatching {
+            val want = HashMap<String, TouchProfile>()
+            for (p in profiles) want[fileNameFor(p.name)] = p
+            for ((fn, p) in want) File(dir, fn).writeText(p.toJson().toString())
+            dir.listFiles { f -> f.name.endsWith(PROFILE_FILE_SUFFIX) }?.forEach { f ->
+                if (f.name !in want) runCatching { f.delete() }
+            }
+        }
+    }
+
+    /** Add portable folder profiles not already present (by name) into [list]. */
+    private fun importFolderProfilesInto(list: MutableList<TouchProfile>) {
+        val dir = profilesDir() ?: return
+        runCatching {
+            val have = list.map { it.name }.toHashSet()
+            dir.listFiles { f -> f.name.endsWith(PROFILE_FILE_SUFFIX) }
+                ?.sortedBy { it.name }
+                ?.forEach { f ->
+                    runCatching {
+                        val prof = TouchProfile.fromJson(JSONObject(f.readText()))
+                        if (prof.name !in have) { list.add(prof); have.add(prof.name) }
+                    }
+                }
+        }
     }
 
     /** Reload the live layout from the saved active profile, discarding

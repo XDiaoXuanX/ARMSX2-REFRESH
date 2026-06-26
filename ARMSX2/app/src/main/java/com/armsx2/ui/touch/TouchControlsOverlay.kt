@@ -71,6 +71,11 @@ import kotlin.math.min
 @Composable
 fun TouchControlsOverlay() {
     TouchControls.ensureLoaded()
+    // Auto-apply the per-game touch profile when a game boots (serial becomes
+    // known). Placed before the early-returns below so it fires regardless of
+    // overlay visibility; keyed on the serial so it only re-applies on a change.
+    val gameSerial = InGameOverlay.currentSerial.value
+    LaunchedEffect(gameSerial) { TouchControls.applyForSerial(gameSerial) }
     val running = Main.eState.value == EmuState.RUNNING ||
                   Main.eState.value == EmuState.PAUSED
     if (!running) return
@@ -970,11 +975,11 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
         ) {
             ToolbarChip("Save") {
                 TouchControls.saveLiveLayoutToActive()
-                TouchControls.editMode.value = false
+                TouchControls.exitEditMode()
             }
             ToolbarChip("Discard") {
                 TouchControls.discardEdits()
-                TouchControls.editMode.value = false
+                TouchControls.exitEditMode()
             }
             ToolbarChip("Reset") { TouchControls.resetActiveToDefault() }
             ToolbarChip("Profiles") { TouchControls.profileDialogOpen.value = true }
@@ -1104,6 +1109,14 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                 color = Color.White,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
+            )
+            Text(
+                if (InGameOverlay.currentSerial.value != null)
+                    "Choosing a profile here also sets it as this game's layout. Profiles save to the inputprofiles folder."
+                else
+                    "Profiles save to the inputprofiles folder, so they're portable and survive moving your data folder.",
+                color = Color(0xFFB0B0B0),
+                fontSize = 11.sp,
             )
             Spacer(Modifier.height(4.dp))
             for (p in TouchControls.profiles) {

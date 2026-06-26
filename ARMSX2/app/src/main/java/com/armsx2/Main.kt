@@ -1035,14 +1035,35 @@ class Main: ComponentActivity() {
                 WindowImpl.Window {
                     if (surface.value != null) {
                         // Pull Compose focus onto the surface as soon as it's
-                        // composed. Without this the AndroidView starts
-                        // un-focused, so onKeyEvent silently drops gamepad
-                        // input until the user taps the screen / presses A
-                        // to grant focus by hand. Also re-runs whenever
-                        // surface.value changes (e.g. after orientation
-                        // change rebuilds the SurfaceView).
-                        androidx.compose.runtime.LaunchedEffect(surface.value) {
-                            focusRequester.requestFocus()
+                        // composed AND whenever a game starts running. Without
+                        // this the AndroidView starts un-focused, so onKeyEvent
+                        // silently drops gamepad input until the user taps the
+                        // screen / presses A to grant focus by hand.
+                        //
+                        // Keying only on surface.value (which is created once at
+                        // onCreate and never reassigned) meant focus was grabbed
+                        // a single time at startup and never again — so launching
+                        // a game from the library left the surface un-focused on
+                        // the STOPPED->RUNNING transition. Android's focus
+                        // traversal then ate the first few physical face-button
+                        // presses (A->confirm, B->back move focus in) before the
+                        // surface finally took focus, which is why users had to
+                        // mash Cross/Triangle a few times to "wake" the pad and
+                        // Square (no traversal fallback) appeared totally dead.
+                        // Re-key on eState + showLibrary so focus follows the
+                        // launch transition; skip while an overlay is open (the
+                        // effect below owns focus in that case).
+                        androidx.compose.runtime.LaunchedEffect(
+                            surface.value, eState.value, WindowImpl.showLibrary.value
+                        ) {
+                            if (eState.value == EmuState.RUNNING &&
+                                !WindowImpl.showLibrary.value &&
+                                !WindowImpl.overlayVisible.value
+                            ) {
+                                surface.value?.isFocusable = true
+                                surface.value?.isFocusableInTouchMode = true
+                                runCatching { focusRequester.requestFocus() }
+                            }
                         }
                         // Controller menu nav: the embedded game SurfaceView holds
                         // Android-level focus, and while an embedded View has focus
@@ -1063,6 +1084,23 @@ class Main: ComponentActivity() {
                                 sv?.isFocusableInTouchMode = true
                                 if (eState.value == EmuState.RUNNING)
                                     runCatching { focusRequester.requestFocus() }
+                                // Invariant: the pause overlay is the only thing
+                                // that keeps the game paused from the UI. When it
+                                // closes, make sure the VM is running again —
+                                // several close paths (applying a controller/
+                                // settings profile, swap disc) left it PAUSED with
+                                // NO overlay shown, so the game looked "frozen"
+                                // until the user re-opened the menu and hit Resume.
+                                // Library manages its own run state; touch-layout
+                                // edit mode is intentionally kept paused for a
+                                // stable editing screen (it resumes on exit, see
+                                // TouchControls.exitEditMode). No-op if running.
+                                if (eState.value == EmuState.PAUSED &&
+                                    !WindowImpl.showLibrary.value &&
+                                    !com.armsx2.ui.touch.TouchControls.editMode.value
+                                ) {
+                                    resume()
+                                }
                             }
                         }
                         AndroidView(factory = { surface.value!! }, modifier = Modifier
@@ -1163,6 +1201,11 @@ class Main: ComponentActivity() {
                 KeyEvent.ACTION_DOWN -> heldKeys.add(kc)
                 KeyEvent.ACTION_UP -> heldKeys.remove(kc)
             }
+        }
+        // Track the active gamepad so PS2 rumble routes to its vibrator.
+        if (event.isFromSource(InputDevice.SOURCE_GAMEPAD) ||
+            event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
+            NativeApp.sRumbleDeviceId = event.deviceId
         }
         // System-hotkey capture (from the Hotkeys tab). Handled here, not in
         // Compose, so it can capture KEYCODE_BACK and back-paddle keys (the back
@@ -1628,6 +1671,7 @@ class Main: ComponentActivity() {
         ) {
             return false
         }
+        NativeApp.sRumbleDeviceId = ev.deviceId  // track active gamepad for rumble
 
         com.armsx2.ui.touch.TouchControls.onControllerInputDetected()
         return if (WindowImpl.overlayVisible.value) {

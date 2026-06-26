@@ -59,6 +59,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.onSizeChanged
@@ -164,6 +165,7 @@ object InGameOverlay {
         Pad("Pad"),
         Hotkeys("Hotkeys"),
         Recompiler("JIT"),
+        Info("Info"),
     }
     private val currentTab = mutableStateOf(Tab.PlayingNow)
 
@@ -350,7 +352,7 @@ object InGameOverlay {
             NativeApp.speedhackLimitermode(if (updated.frameLimitEnable) 0 else 3)
         }
 
-        // Speed Limit % (emulation speed → NominalScalar) and Max FPS cap (GS
+        // Speed Limit % (emulation speed → NominalScalar) and Frame Rate Control (GS
         // present rate) are INDEPENDENT light re-applies, no VM park — safe on
         // this delta path. Persistence is handled by ConfigStore.
         if (previous.nominalSpeedPercent != updated.nominalSpeedPercent)
@@ -665,7 +667,7 @@ object InGameOverlay {
 
     private fun cycleTab(delta: Int) {
         val tabs = if (settingsOnly.value) {
-            listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Hotkeys, Tab.Recompiler)
+            listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Hotkeys, Tab.Recompiler, Tab.Info)
         } else {
             Tab.values().toList()
         }
@@ -1576,8 +1578,74 @@ object InGameOverlay {
             Tab.Pad -> PadTab(settingsState)
             Tab.Hotkeys -> HotkeysTab(settingsState)
             Tab.Recompiler -> RecompilerTab(settingsState)
+            Tab.Info -> GameInfoTab()
         }
         SettingsControllerNav.end()
+    }
+
+    /** Game properties — Title / Serial / CRC / Region / Type / Path, each row
+     *  tap-to-copy. Uses the previewed (long-pressed) game, or the running game.
+     *  CRC comes from the game-list entry (works without booting). */
+    @Composable
+    private fun GameInfoTab() {
+        val game = previewGame.value ?: Main.currentGame.value
+        val crc = remember(game?.uri) {
+            runCatching {
+                game?.uri?.let { uri ->
+                    NativeApp.getGameTitle(uri.toString()).split("|").getOrNull(2)
+                        ?.substringAfter('(', "")?.substringBefore(')')?.trim()
+                        ?.takeIf { it.isNotEmpty() && it != "00000000" }
+                }
+            }.getOrNull()
+        }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 4.dp),
+        ) {
+            InfoCopyRow("Title", game?.title)
+            InfoCopyRow("Serial", game?.serial)
+            InfoCopyRow("CRC", crc)
+            InfoCopyRow("Region", game?.region)
+            InfoCopyRow("Type", game?.extension?.takeIf { it.isNotEmpty() })
+            InfoCopyRow("Path", game?.uri?.toString())
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Tap a row to copy it to the clipboard.",
+                color = Color.White.copy(alpha = 0.5f),
+                fontSize = 11.sp,
+            )
+        }
+    }
+
+    @Composable
+    private fun InfoCopyRow(label: String, value: String?) {
+        if (value.isNullOrEmpty()) return
+        val ctx = LocalContext.current
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clickable {
+                    runCatching {
+                        val cb = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                            as android.content.ClipboardManager
+                        cb.setPrimaryClip(android.content.ClipData.newPlainText(label, value))
+                    }
+                    android.widget.Toast
+                        .makeText(ctx, "$label copied", android.widget.Toast.LENGTH_SHORT)
+                        .show()
+                }
+                .padding(vertical = 8.dp, horizontal = 4.dp),
+        ) {
+            Text(
+                label,
+                color = Colors.pasx2_blue,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(value, color = Color.White, fontSize = 13.sp)
+        }
     }
 
     /** Horizontal tab chip strip. Active tab gets PS2-blue underline +
@@ -1593,7 +1661,7 @@ object InGameOverlay {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             val tabs = if (settingsOnly.value) {
-                listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Hotkeys, Tab.Recompiler)
+                listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Hotkeys, Tab.Recompiler, Tab.Info)
             } else {
                 Tab.values().toList()
             }
@@ -1659,14 +1727,28 @@ object InGameOverlay {
                 active = settingsScope.value == SettingsScope.Global,
                 enabled = true,
                 modifier = Modifier.weight(1f),
-            ) { settingsScope.value = SettingsScope.Global }
+            ) {
+                if (settingsScope.value != SettingsScope.Global) {
+                    // Switching tiers must RE-HYDRATE the edited Settings from
+                    // the tier being switched TO. Without this the prior tier's
+                    // values stay in settingsState and the next edit persists
+                    // them into the wrong tier (the global ↔ per-game bleed).
+                    settingsScope.value = SettingsScope.Global
+                    settingsState.value = ConfigStore.loadGlobal()
+                    syncQuickTogglesFromSettings(settingsState.value)
+                }
+            }
             ScopeHalf(
                 label = if (serial != null) "Game · $serial" else "Game",
                 active = settingsScope.value == SettingsScope.Game,
                 enabled = gameEnabled,
                 modifier = Modifier.weight(1f),
             ) {
-                if (gameEnabled) settingsScope.value = SettingsScope.Game
+                if (gameEnabled && settingsScope.value != SettingsScope.Game) {
+                    settingsScope.value = SettingsScope.Game
+                    settingsState.value = ConfigStore.resolveForGame(currentSerial.value)
+                    syncQuickTogglesFromSettings(settingsState.value)
+                }
             }
         }
     }

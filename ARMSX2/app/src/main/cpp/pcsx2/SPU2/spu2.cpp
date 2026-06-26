@@ -221,9 +221,24 @@ void SPU2::SaveOutputVolume()
 	}
 }
 
+// Settings-apply parks the VM (commitSettings / live GS) and the pause edge
+// would otherwise pause the output device. A heavy gamefix can park for
+// seconds; pausing a low-latency Android stream that long lets the OS reclaim
+// it, and the recovery raced the resume so audio stayed dead until a manual
+// menu resume. When this is set, the pause/resume edges are skipped and the
+// stream is left running (silence-on-underrun) for the duration of the park.
+static bool s_output_pause_suppressed = false;
+
 void SPU2::SetOutputPaused(bool paused)
 {
+	if (s_output_pause_suppressed)
+		return;
 	s_output_stream->SetPaused(paused);
+}
+
+void SPU2::SetOutputPauseSuppressed(bool suppressed)
+{
+	s_output_pause_suppressed = suppressed;
 }
 
 void SPU2::SetAudioCaptureActive(bool active)

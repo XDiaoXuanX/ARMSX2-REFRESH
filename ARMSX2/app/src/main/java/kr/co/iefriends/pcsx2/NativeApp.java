@@ -3,11 +3,16 @@ package kr.co.iefriends.pcsx2;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.ParcelFileDescriptor;
 import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
 import android.system.Os;
 import android.system.OsConstants;
+import android.view.InputDevice;
 import android.view.Surface;
 
 import com.armsx2.BiosInfo;
@@ -249,6 +254,59 @@ public class NativeApp {
 	public static native void setPadVibration(boolean isonoff);
 	public static native void setPadButton(int index, int range, boolean iskeypressed);
 	public static native void resetKeyStatus();
+
+	// ---- Controller rumble (BT/USB gamepads via Android InputDevice) ----
+	// Device id of the most-recently-used gamepad, set from Main.dispatchKeyEvent.
+	public static volatile int sRumbleDeviceId = -1;
+	// Master enable (default on).
+	public static volatile boolean sRumbleEnabled = true;
+	// One-shot length; re-issued when the game changes intensity, cancelled on
+	// zero. Long enough to cover sustained rumble between intensity changes.
+	private static final int RUMBLE_MS = 3000;
+
+	/** Called from native (IOP thread) when PS2 pad motor intensity changes.
+	 *  largeMotor/smallMotor are 0..255. Vibrates the active controller — no-op
+	 *  when no gamepad is active or it has no vibrator. */
+	public static void onPadRumble(int largeMotor, int smallMotor) {
+		if (!sRumbleEnabled) return;
+		final int devId = sRumbleDeviceId;
+		if (devId < 0) return;
+		try {
+			InputDevice dev = InputDevice.getDevice(devId);
+			if (dev == null) return;
+			float low = Math.max(0f, Math.min(1f, largeMotor / 255f));   // low-frequency / large
+			float high = Math.max(0f, Math.min(1f, smallMotor / 255f));  // high-frequency / small
+			if (Build.VERSION.SDK_INT >= 31) {
+				VibratorManager vm = dev.getVibratorManager();
+				int[] ids = vm.getVibratorIds();
+				if (ids.length >= 2) {
+					rumbleOne(vm.getVibrator(ids[0]), low);
+					rumbleOne(vm.getVibrator(ids[1]), high);
+				} else if (ids.length == 1) {
+					rumbleOne(vm.getVibrator(ids[0]), Math.max(low, high));
+				}
+			} else {
+				rumbleOne(dev.getVibrator(), Math.max(low, high));
+			}
+		} catch (Throwable ignored) {
+		}
+	}
+
+	private static void rumbleOne(Vibrator v, float intensity) {
+		if (v == null || !v.hasVibrator()) return;
+		if (intensity <= 0f) {
+			try { v.cancel(); } catch (Throwable ignored) {}
+			return;
+		}
+		int amp = Math.round(intensity * 255f);
+		if (amp < 1) amp = 1;
+		if (amp > 255) amp = 255;
+		try {
+			v.vibrate(VibrationEffect.createOneShot(RUMBLE_MS, amp));
+		} catch (Throwable t) {
+			try { v.vibrate(RUMBLE_MS); } catch (Throwable ignored) {}
+		}
+	}
 
 	public static native void setAspectRatio(int type);
 	public static native void speedhackLimitermode(int value);

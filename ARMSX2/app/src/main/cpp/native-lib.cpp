@@ -142,6 +142,7 @@ static JNIEnv env_main;
 static JavaVM*    s_jvm              = nullptr;
 static jclass     s_NativeApp_class  = nullptr;  // GlobalRef
 static jmethodID  s_vmSetPaused_mid  = nullptr;
+static jmethodID  s_onPadRumble_mid  = nullptr;
 
 ////
 std::string GetJavaString(JNIEnv *env, jstring jstr) {
@@ -323,6 +324,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
         s_NativeApp_class = static_cast<jclass>(env->NewGlobalRef(local));
         env->DeleteLocalRef(local);
         s_vmSetPaused_mid = env->GetStaticMethodID(s_NativeApp_class, "vmSetPaused", "(Z)V");
+        s_onPadRumble_mid = env->GetStaticMethodID(s_NativeApp_class, "onPadRumble", "(II)V");
     }
 
     // Bind the JNI-backed HTTP downloader's class + method IDs while we
@@ -338,8 +340,9 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getGameTitle(JNIEnv *env, jclass clazz,
                                                   jstring p_szpath) {
     std::string _szPath = GetJavaString(env, p_szpath);
 
-    const GameList::Entry *entry;
-    entry = GameList::GetEntryForPath(_szPath.c_str());
+    const GameList::Entry *entry = GameList::GetEntryForPath(_szPath.c_str());
+    if (!entry)
+        return env->NewStringUTF("");
 
     std::string ret;
     ret.append(entry->title);
@@ -886,11 +889,25 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setInstantVU1(JNIEnv*, jclass, jboolean ena
 // fails to park, parked() stays false and the caller must skip the state op.
 class ScopedVMPause {
 public:
-    ScopedVMPause() {
+    // pause_audio=false keeps the SPU2 output device running across the park.
+    // Used by the settings-apply paths (commitSettings / live GS): a heavy
+    // gamefix can park the VM for seconds, and pausing the low-latency Android
+    // audio stream that long let the OS reclaim it — audio then stayed muted
+    // until a manual menu resume. The CPU/MTGS/MTVU threads are still parked
+    // for the JIT/GS rebuild; only the audio pause edges are suppressed, and
+    // the stream emits silence on underrun so there's no audible artifact.
+    explicit ScopedVMPause(bool pause_audio = true) {
         m_was_running = (VMManager::GetState() == VMState::Running);
         m_was_paused = (VMManager::GetState() == VMState::Paused);
         if (m_was_running)
         {
+            // Set BEFORE SetPaused(true) so the pause edge is suppressed; the
+            // dtor clears it AFTER SetPaused(false) so the resume edge is too.
+            if (!pause_audio)
+            {
+                m_audio_pause_suppressed = true;
+                SPU2::SetOutputPauseSuppressed(true);
+            }
             VMManager::SetPaused(true);
             if (!s_execute_exit.load(std::memory_order_acquire) && Cpu)
                 Cpu->ExitExecution();
@@ -904,6 +921,8 @@ public:
     ~ScopedVMPause() {
         if (m_was_running && !s_stop_requested.load(std::memory_order_acquire))
             VMManager::SetPaused(false);
+        if (m_audio_pause_suppressed)
+            SPU2::SetOutputPauseSuppressed(false);
     }
     ScopedVMPause(const ScopedVMPause&) = delete;
     ScopedVMPause& operator=(const ScopedVMPause&) = delete;
@@ -914,6 +933,7 @@ private:
     bool m_was_running = false;
     bool m_was_paused = false;
     bool m_parked = false;
+    bool m_audio_pause_suppressed = false;
 };
 
 static void LogAndroidGSSettings(const char* reason)
@@ -951,7 +971,9 @@ static bool ApplyLiveGSSettingsIfOpen(const char* reason)
 {
     if (MTGS::IsOpen())
     {
-        ScopedVMPause vm_pause;
+        // pause_audio=false: keep the audio device alive across the park so a
+        // live GS reconfigure can't mute audio (see ScopedVMPause).
+        ScopedVMPause vm_pause(/*pause_audio=*/false);
         if (!vm_pause.parked())
         {
             Console.WriteLnFmt("@@ANDROID_GS_SETTINGS@@ reason={} skipped=cpu_not_parked", reason);
@@ -1027,7 +1049,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_commitSettings(JNIEnv *env, jclass clazz) {
         // cost when the VM is already parked. Skipped entirely pre-VM:
         // s_execute_exit is false before the first Execute(), so the guard
         // would spin its full 3s watchdog during setup-wizard commits.
-        ScopedVMPause vm_pause;
+        // pause_audio=false: a heavy gamefix can park the VM for seconds;
+        // pausing the audio device that long lets Android reclaim it and the
+        // game goes silent until a manual menu resume. Keep it running (it
+        // fills with silence on underrun) while the JIT/GS caches rebuild.
+        ScopedVMPause vm_pause(/*pause_audio=*/false);
         VMManager::ApplySettings();
         if (MTGS::IsOpen())
             MTGS::ApplySettings();
@@ -2985,6 +3011,25 @@ void Native::vmSetPaused(bool paused) {
     }
 
     env->CallStaticVoidMethod(s_NativeApp_class, s_vmSetPaused_mid, static_cast<jboolean>(paused));
+
+    if (attached) s_jvm->DetachCurrentThread();
+}
+
+void Native::onPadRumble(int largeMotor, int smallMotor) {
+    if (!s_jvm || !s_NativeApp_class || !s_onPadRumble_mid) return;
+
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    const int status = s_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (status == JNI_EDETACHED) {
+        if (s_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = true;
+    } else if (status != JNI_OK) {
+        return;
+    }
+
+    env->CallStaticVoidMethod(s_NativeApp_class, s_onPadRumble_mid,
+                              static_cast<jint>(largeMotor), static_cast<jint>(smallMotor));
 
     if (attached) s_jvm->DetachCurrentThread();
 }

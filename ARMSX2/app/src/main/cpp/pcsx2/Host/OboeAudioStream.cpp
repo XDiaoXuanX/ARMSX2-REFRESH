@@ -231,16 +231,24 @@ void OboeAudioStream::SetPaused(bool paused)
 
 	if (paused)
 	{
-		oboe::Result result = m_stream->requestPause();
-		if (result != oboe::Result::OK)
+		if (m_stream)
 		{
-			Console.Error("(Oboe) requestPause() failed: %d", result);
-			return;
+			oboe::Result result = m_stream->requestPause();
+			if (result != oboe::Result::OK)
+				Console.Error("(Oboe) requestPause() failed: %d", result);
 		}
+		// Mark not-playing even if requestPause() failed, so the paused/
+		// playing bookkeeping can't desync and strand a later resume.
 		m_playing = false;
 	}
 	else
 	{
+		// Resume must be authoritative. If m_playing desynced to true (e.g.
+		// an error-recovery reopen ran while we thought the stream was
+		// paused), Start()'s `if (m_playing) return true;` guard would
+		// swallow the restart and leave audio dead. Clear it first so the
+		// resume always actually re-issues requestStart().
+		m_playing = false;
 		Start();
 	}
 	m_paused = paused;
