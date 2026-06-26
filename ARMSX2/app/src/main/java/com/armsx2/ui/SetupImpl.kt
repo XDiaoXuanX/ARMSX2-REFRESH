@@ -143,6 +143,11 @@ object SetupImpl {
      *  null = no error. */
     private val systemDirError = mutableStateOf<String?>(null)
 
+    /** Set when the user changes the data-root (Internal<->SD) AFTER setup is
+     *  already complete. The native root is pinned per process, so we show a
+     *  confirm + restart the app rather than silently not applying the change. */
+    private val storageRestartPending = mutableStateOf(false)
+
     // -------- ROMs dirs setup state --------
     /** Working list of ROM-folder URIs while the wizard is open. Persists
      *  to Main.romsDirs (and prefs) on Next at the ROMs step. The user
@@ -651,6 +656,19 @@ object SetupImpl {
                 refreshAllowNext()
                 return
             }
+            // Re-entry (settings cog) where the data root actually CHANGED:
+            // native pinned EmuFolders::DataRoot once at startup and can't
+            // hot-swap it, so the new location won't take effect until a cold
+            // start. Confirm + restart instead of silently leaving data behind.
+            // (First run has no prior init root → currentInitDataRoot() is null
+            // and setupComplete is false, so it completes normally.)
+            if (Main.setupComplete.value &&
+                Main.currentInitDataRoot() != null &&
+                Main.assetCopyRoot(context) != Main.currentInitDataRoot()
+            ) {
+                storageRestartPending.value = true
+                return
+            }
             Main.finishSetup()
             allowPrev.value = false
             allowNext.value = false
@@ -712,8 +730,19 @@ object SetupImpl {
                                 // avoid for Play compliance.
                                 val sd = Main.sdCardDataDir(context)
                                 if (sd == null) {
-                                    systemDirError.value = "No SD card detected. Memory cards, save states, " +
-                                        "and configs will stay on Internal storage."
+                                    // No removable volume → SD is impossible on this
+                                    // device. Fall FULLY back to Internal so the state
+                                    // is coherent (no stale "SD Card" display), and
+                                    // surface a visible reason — the dashboard now
+                                    // renders systemDirError (previously it was only
+                                    // shown on a screen the wizard never opens, so the
+                                    // SD tap appeared to silently do nothing).
+                                    systemDirError.value = "No SD card detected — staying on Internal storage."
+                                    systemDirUseDefault.value = true
+                                    systemDirUri.value = null
+                                    systemDirDisplay.value = null
+                                    Main.systemDir.value = null
+                                    Main.prefs.edit().remove("systemDir").apply()
                                 } else {
                                     Main.systemDir.value = sd
                                     Main.prefs.edit().putString("systemDir", sd).apply()
@@ -732,6 +761,66 @@ object SetupImpl {
                             onFinish = { finishDashboard() },
                         )
                     }
+                }
+            }
+            if (storageRestartPending.value) {
+                StorageRestartOverlay(
+                    onRestart = {
+                        Main.finishSetup()
+                        Main.restartApp(context)
+                    },
+                    onCancel = { storageRestartPending.value = false },
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun StorageRestartOverlay(onRestart: () -> Unit, onCancel: () -> Unit) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.78f))
+                // Absorb taps so the setup behind the modal can't be touched.
+                .clickable(onClick = {}),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.82f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFF0C1418))
+                    .border(1.dp, Color(0xFF38D5CB).copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Text(
+                    "Restart required",
+                    color = Color(0xFF7CF6EF),
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
+                )
+                Text(
+                    "Moving app data to a new location takes effect after a restart. " +
+                        "ARMSX2 will close and reopen now.",
+                    color = Color.White.copy(alpha = 0.82f),
+                    fontSize = 13.sp,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    SetupMiniButton(
+                        text = "Cancel",
+                        modifier = Modifier.weight(1f).height(40.dp),
+                        onClick = onCancel,
+                    )
+                    SetupMiniButton(
+                        text = "Restart now",
+                        modifier = Modifier.weight(1f).height(40.dp),
+                        onClick = onRestart,
+                    )
                 }
             }
         }
@@ -1050,7 +1139,10 @@ object SetupImpl {
                 SetupTapZone(
                     modifier = Modifier
                         .offset(x = maxWidth * 0.06f, y = maxHeight * 0.07f)
-                        .size(width = maxWidth * 0.88f, height = maxHeight * 0.20f),
+                        // Height trimmed (0.20→0.17) so this SD-Card hit area no
+                        // longer overlaps the "Internal" pill below (at y 0.252+),
+                        // which otherwise stole taps near the boundary.
+                        .size(width = maxWidth * 0.88f, height = maxHeight * 0.17f),
                     onClick = onPickSystem,
                 )
                 SetupTapZone(
@@ -1080,6 +1172,19 @@ object SetupImpl {
                         .size(width = maxWidth * 0.20f, height = maxHeight * 0.038f),
                     onClick = onUseDefaultSystem,
                 )
+                // App-data error (e.g. "No SD card detected") — rendered HERE so a
+                // failed SD-Card tap is visible. Previously systemDirError only
+                // showed on SetupSystemDirContent, which this dashboard never opens,
+                // so picking SD on a device with no card appeared to do nothing.
+                systemDirError.value?.let { err ->
+                    SetupStatusChip(
+                        text = err,
+                        ready = false,
+                        modifier = Modifier
+                            .offset(x = maxWidth * 0.11f, y = maxHeight * 0.295f)
+                            .size(width = maxWidth * 0.82f, height = maxHeight * 0.04f),
+                    )
+                }
                 SetupStatusChip(
                     text = biosStatus(),
                     ready = biosReady(),

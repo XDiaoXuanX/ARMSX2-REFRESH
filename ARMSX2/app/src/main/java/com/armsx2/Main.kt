@@ -643,6 +643,26 @@ class Main: ComponentActivity() {
             setupEditorVisible.value = true
         }
 
+        /** The data root that NativeApp.initialize() was actually handed
+         *  (captured in kickoffEmucoreInit). EmuFolders::DataRoot is pinned
+         *  ONCE per process, so the setup wizard compares against this to know
+         *  whether a storage-location change actually needs a process restart
+         *  to take effect (it can't be hot-swapped while the process lives). */
+        private var lastInitDataRoot: String? = null
+        fun currentInitDataRoot(): String? = lastInitDataRoot
+
+        /** Cold-restart the app so native re-runs initialize() with the newly
+         *  chosen data root. Used after the user moves app data between Internal
+         *  and SD in the setup wizard. */
+        fun restartApp(context: Context) {
+            val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                context.startActivity(intent)
+            }
+            Runtime.getRuntime().exit(0)
+        }
+
         fun renderOpenGL() {
             NativeApp.renderOpenGL()
         }
@@ -826,6 +846,10 @@ class Main: ComponentActivity() {
     private fun kickoffEmucoreInit() {
         if (emucoreInitDone) return
         emucoreInitDone = true
+        // Record the root native is about to pin (same resolution as
+        // NativeApp.initializeOnce's dataPath) so a later storage change can be
+        // detected and trigger a restart instead of silently not taking effect.
+        lastInitDataRoot = assetCopyRoot(applicationContext)
 
         // Default resources — shaders, GameIndex, fonts, fullscreenui,
         // patches.zip, controller DB. assetCopyRoot resolves to the
