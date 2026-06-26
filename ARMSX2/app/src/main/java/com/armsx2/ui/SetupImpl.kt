@@ -3,7 +3,11 @@ package com.armsx2.ui
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.os.ParcelFileDescriptor
+import android.provider.Settings
+import com.armsx2.BuildConfig
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -142,6 +146,13 @@ object SetupImpl {
      *  (typically scoped-storage write rejection on a non-app-private folder).
      *  null = no error. */
     private val systemDirError = mutableStateOf<String?>(null)
+
+    /** github (all-files) flavor only: the App-Data pick opens a small chooser
+     *  (Internal / SD / any folder) instead of going straight to SD. With
+     *  MANAGE_EXTERNAL_STORAGE granted, an arbitrary folder is raw-writable by
+     *  the core, so the existing write-probe in finishSystemDirStep accepts it.
+     *  Never shown on the play build (BuildConfig.STORAGE_ALL_FILES == false). */
+    private val showStorageChooser = mutableStateOf(false)
 
     /** Set when the user changes the data-root (Internal<->SD) AFTER setup is
      *  already complete. The native root is pinned per process, so we show a
@@ -332,6 +343,12 @@ object SetupImpl {
             null
         }
     }
+
+    /** True when the github build already holds All-Files Access (or is on an
+     *  older API where it isn't the gating model). Only meaningful on the
+     *  github flavor; the play build never reaches the all-files chooser. */
+    private fun allFilesAccessGranted(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
 
     private fun finishSystemDirStep(context: Context): String? {
         // App-private fallback path. Wipe any prior systemDir pref so
@@ -619,6 +636,91 @@ object SetupImpl {
             }
         }
 
+        // github (all-files) only: pick ANY folder as the writable data root.
+        // The picked tree URI resolves to a /storage path; with All-Files
+        // Access the write-probe passes and finishSystemDirStep persists it.
+        val systemFolderLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocumentTree()
+        ) { treeUri: Uri? ->
+            if (treeUri == null) return@rememberLauncherForActivityResult
+            val posix = Main.resolveTreeUriToPosix(treeUri.toString())
+            if (posix == null || !Main.validateSystemDirWritable(posix)) {
+                systemDirError.value = if (!allFilesAccessGranted())
+                    "Couldn't write to that folder. Grant All-Files Access, then pick it again."
+                else
+                    "That folder can't be used for writable emulator data. Try another."
+                return@rememberLauncherForActivityResult
+            }
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            } catch (_: SecurityException) { /* already persisted */ }
+            systemDirUri.value = treeUri
+            systemDirDisplay.value = treeUri.lastPathSegment?.substringAfterLast(':')?.ifBlank { null }
+                ?: "Custom folder"
+            systemDirUseDefault.value = false
+            systemDirError.value = null
+            refreshAllowNext()
+        }
+
+        // Tracks All-Files Access so the chooser's button label flips to
+        // "Custom Folder…" the moment the user returns from granting it.
+        // StartActivityForResult fires its callback on return regardless of
+        // result code, so we just re-read the permission state then.
+        val allFilesGranted = remember { mutableStateOf(allFilesAccessGranted()) }
+        val allFilesSettingsLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) {
+            allFilesGranted.value = allFilesAccessGranted()
+        }
+        fun launchAllFilesAccess() {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+            try {
+                allFilesSettingsLauncher.launch(
+                    Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:" + context.packageName)))
+            } catch (_: Exception) {
+                // Some OEMs don't honor the per-app action; fall back to the global list.
+                try {
+                    allFilesSettingsLauncher.launch(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (_: Exception) { /* nothing else to try */ }
+            }
+        }
+
+        // Internal (app-private) — the no-permission default. Shared by the
+        // dashboard's Internal button and the github storage chooser.
+        fun applyInternalSystem() {
+            systemDirUseDefault.value = true
+            systemDirUri.value = null
+            systemDirDisplay.value = null
+            systemDirError.value = null
+            Main.systemDir.value = null
+            Main.prefs.edit().remove("systemDir").apply()
+            refreshAllowNext()
+        }
+
+        // SD Card — the SD's app-specific dir (raw-writable, no permission).
+        // Falls fully back to Internal with a visible reason when no card is
+        // present. Shared by the dashboard SD pick and the github chooser.
+        fun applySdCardSystem() {
+            val sd = Main.sdCardDataDir(context)
+            if (sd == null) {
+                systemDirError.value = "No SD card detected — staying on Internal storage."
+                systemDirUseDefault.value = true
+                systemDirUri.value = null
+                systemDirDisplay.value = null
+                Main.systemDir.value = null
+                Main.prefs.edit().remove("systemDir").apply()
+            } else {
+                Main.systemDir.value = sd
+                Main.prefs.edit().putString("systemDir", sd).apply()
+                systemDirUseDefault.value = false
+                systemDirDisplay.value = "SD Card"
+                systemDirError.value = null
+            }
+            refreshAllowNext()
+        }
+
         fun openBiosFlow() {
             if (biosDirUri.value == null) {
                 Main.biosDir.value?.let { saved ->
@@ -712,45 +814,17 @@ object SetupImpl {
                                 allowPrev.value = false
                                 allowNext.value = true
                             },
-                            onUseDefaultSystem = {
-                                // "Internal" = the app-private folder on the main device
-                                // (getExternalFilesDir(null)). Clear any prior SD pick.
-                                systemDirUseDefault.value = true
-                                systemDirUri.value = null
-                                systemDirDisplay.value = null
-                                systemDirError.value = null
-                                Main.systemDir.value = null
-                                Main.prefs.edit().remove("systemDir").apply()
-                                refreshAllowNext()
-                            },
+                            onUseDefaultSystem = { applyInternalSystem() },
                             onPickSystem = {
-                                // Volume choice: point the data root at the SD card's
-                                // app-specific dir (raw-writable, no permission). Arbitrary
-                                // folders aren't possible without all-files access, which we
-                                // avoid for Play compliance.
-                                val sd = Main.sdCardDataDir(context)
-                                if (sd == null) {
-                                    // No removable volume → SD is impossible on this
-                                    // device. Fall FULLY back to Internal so the state
-                                    // is coherent (no stale "SD Card" display), and
-                                    // surface a visible reason — the dashboard now
-                                    // renders systemDirError (previously it was only
-                                    // shown on a screen the wizard never opens, so the
-                                    // SD tap appeared to silently do nothing).
-                                    systemDirError.value = "No SD card detected — staying on Internal storage."
-                                    systemDirUseDefault.value = true
-                                    systemDirUri.value = null
-                                    systemDirDisplay.value = null
-                                    Main.systemDir.value = null
-                                    Main.prefs.edit().remove("systemDir").apply()
+                                // play build: SD Card directly — arbitrary folders need
+                                // all-files access, which the Play build avoids for policy
+                                // compliance. github build: open the chooser so the user
+                                // can pick Internal, SD, or ANY folder (All-Files Access).
+                                if (BuildConfig.STORAGE_ALL_FILES) {
+                                    showStorageChooser.value = true
                                 } else {
-                                    Main.systemDir.value = sd
-                                    Main.prefs.edit().putString("systemDir", sd).apply()
-                                    systemDirUseDefault.value = false
-                                    systemDirDisplay.value = "SD Card"
-                                    systemDirError.value = null
+                                    applySdCardSystem()
                                 }
-                                refreshAllowNext()
                             },
                             onPickBiosFolder = { openBiosFlow() },
                             onPickRoms = { romsLauncher.launch(null) },
@@ -770,6 +844,25 @@ object SetupImpl {
                         Main.restartApp(context)
                     },
                     onCancel = { storageRestartPending.value = false },
+                )
+            }
+            if (showStorageChooser.value) {
+                StorageChooserOverlay(
+                    granted = allFilesGranted.value,
+                    onInternal = { applyInternalSystem(); showStorageChooser.value = false },
+                    onSdCard = { applySdCardSystem(); showStorageChooser.value = false },
+                    onCustomFolder = {
+                        // Need All-Files Access first; granting it refreshes
+                        // allFilesGranted (launcher callback) so the button flips to
+                        // "Custom Folder…" and a second tap opens the picker.
+                        if (allFilesGranted.value) {
+                            showStorageChooser.value = false
+                            systemFolderLauncher.launch(null)
+                        } else {
+                            launchAllFilesAccess()
+                        }
+                    },
+                    onDismiss = { showStorageChooser.value = false },
                 )
             }
         }
@@ -822,6 +915,74 @@ object SetupImpl {
                         onClick = onRestart,
                     )
                 }
+            }
+        }
+    }
+
+    /** github (all-files) storage picker. Internal / SD / any folder. The
+     *  Custom Folder button first ensures All-Files Access (its label flips to
+     *  "Grant All-Files Access…" until granted), then opens the folder picker.
+     *  Never shown on the play build. */
+    @Composable
+    private fun StorageChooserOverlay(
+        granted: Boolean,
+        onInternal: () -> Unit,
+        onSdCard: () -> Unit,
+        onCustomFolder: () -> Unit,
+        onDismiss: () -> Unit,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.78f))
+                // Absorb taps on the scrim so the setup behind can't be touched.
+                .clickable(onClick = {}),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.82f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFF0C1418))
+                    .border(1.dp, Color(0xFF38D5CB).copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "App data location",
+                    color = Color(0xFF7CF6EF),
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
+                )
+                Text(
+                    "Internal lives in app-private storage (wiped on uninstall). SD Card creates " +
+                        "an app-prefixed folder on your card, meant for Google Play users. Custom " +
+                        "Folder uses All-Files Access to keep your data in a real folder you choose, " +
+                        "so it survives uninstalls.",
+                    color = Color.White.copy(alpha = 0.82f),
+                    fontSize = 12.sp,
+                )
+                SetupMiniButton(
+                    text = "Internal (app-private)",
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    onClick = onInternal,
+                )
+                SetupMiniButton(
+                    text = "SD Card",
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    onClick = onSdCard,
+                )
+                SetupMiniButton(
+                    text = if (granted) "Custom Folder…" else "Grant All-Files Access…",
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    onClick = onCustomFolder,
+                )
+                SetupMiniButton(
+                    text = "Cancel",
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    onClick = onDismiss,
+                )
             }
         }
     }

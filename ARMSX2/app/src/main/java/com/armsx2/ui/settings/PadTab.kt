@@ -88,6 +88,33 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         SettingsDivider()
         @Suppress("UNUSED_EXPRESSION")
         refreshToken.value
+        // Analog stick remapping — make a physical stick act as the D-pad or the
+        // face buttons (great for fighting games on analog-centric controllers).
+        run {
+            val stickOpts = ControllerMappings.StickMode.values().map { it.label }
+            SegmentedRow(
+                label = "Left Stick",
+                options = stickOpts,
+                selectedIndex = ControllerMappings.leftStickMode().ordinal,
+                description = "What the left analog stick sends: Analog (default), D-Pad, or Face buttons.",
+                onChange = {
+                    ControllerMappings.setLeftStickMode(ControllerMappings.StickMode.values()[it])
+                    refreshToken.value++
+                },
+            )
+            SettingsDivider()
+            SegmentedRow(
+                label = "Right Stick",
+                options = stickOpts,
+                selectedIndex = ControllerMappings.rightStickMode().ordinal,
+                description = "What the right analog stick sends: Analog (default), D-Pad, or Face buttons.",
+                onChange = {
+                    ControllerMappings.setRightStickMode(ControllerMappings.StickMode.values()[it])
+                    refreshToken.value++
+                },
+            )
+            SettingsDivider()
+        }
         ControllerMappings.actions.forEach { action ->
             val physical = ControllerMappings.physicalFor(action)
             PadBindingRow(

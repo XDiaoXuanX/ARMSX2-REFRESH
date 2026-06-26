@@ -276,6 +276,14 @@ public class NativeApp {
 			if (dev == null) return;
 			float low = Math.max(0f, Math.min(1f, largeMotor / 255f));   // low-frequency / large
 			float high = Math.max(0f, Math.min(1f, smallMotor / 255f));  // high-frequency / small
+			// Single combined motor can't reproduce both PS2 actuators, so blend
+			// them the way AetherSX2/NetherSX2 do (org.libsdl.app
+			// SDLControllerManager): 0.6*large + 0.4*small. The PS2 small motor is
+			// BINARY (full-scale 0xff whenever it pulses), so the old Math.max()
+			// slammed the lone motor to FULL on every small-motor buzz — it felt
+			// like the large motor was firing for small-motor events. The weighted
+			// mix keeps a small-only pulse light and distinct from a large pulse.
+			float combined = Math.min(1f, low * 0.6f + high * 0.4f);
 			if (Build.VERSION.SDK_INT >= 31) {
 				VibratorManager vm = dev.getVibratorManager();
 				int[] ids = vm.getVibratorIds();
@@ -283,10 +291,10 @@ public class NativeApp {
 					rumbleOne(vm.getVibrator(ids[0]), low);
 					rumbleOne(vm.getVibrator(ids[1]), high);
 				} else if (ids.length == 1) {
-					rumbleOne(vm.getVibrator(ids[0]), Math.max(low, high));
+					rumbleOne(vm.getVibrator(ids[0]), combined);
 				}
 			} else {
-				rumbleOne(dev.getVibrator(), Math.max(low, high));
+				rumbleOne(dev.getVibrator(), combined);
 			}
 		} catch (Throwable ignored) {
 		}

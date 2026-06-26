@@ -653,17 +653,28 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	}
 
 	// Max-FPS cap (Android): hold the *presented* frame rate at/below a target
-	// without slowing emulation (decoupled from the speed limiter / Speed %).
-	// Adaptive — drops a present only when we're ahead of the target interval, so
-	// a game already at/below the cap is unaffected (no over-skip). Set via the
-	// JNI setFpsCap; the EE keeps running full speed, only presents are dropped.
+	// without slowing emulation (decoupled from the speed limiter / Speed %). The
+	// EE keeps running full speed, only presents are dropped. Set via setFpsCap.
+	//
+	// ACCUMULATOR pacer: schedule the next present at +cap_interval and drop every
+	// frame until that time. This holds the AVERAGE present rate at ANY target
+	// (e.g. 47 / 55 fps for the per-game "golden spot" tuning), not just whole
+	// divisions of the source rate. Targets between the clean divisions get
+	// slightly uneven spacing (a periodic doubled frame) — the price of an
+	// arbitrary cap. Resync after a stall so we never burst-present to catch up.
 	if (const u64 cap_interval = GSGetMaxPresentInterval(); cap_interval > 0 && !skip_frame && !GSCapture::IsCapturingVideo())
 	{
 		const u64 now = GetCPUTicks();
-		if (m_fps_cap_last_present != 0 && (now - m_fps_cap_last_present) < cap_interval)
-			skip_frame = true; // ahead of the (vsync-aligned) target → drop this present
+		if (m_fps_cap_next_present == 0)
+			m_fps_cap_next_present = now; // first present primes the schedule
+		if (now < m_fps_cap_next_present)
+			skip_frame = true; // not yet time for the next present → drop it
 		else
-			m_fps_cap_last_present = now; // presenting → mark the time
+		{
+			m_fps_cap_next_present += cap_interval;
+			if (m_fps_cap_next_present < now)
+				m_fps_cap_next_present = now + cap_interval; // stalled → resync, no burst
+		}
 	}
 
 	const bool blank_frame = !Merge(field);

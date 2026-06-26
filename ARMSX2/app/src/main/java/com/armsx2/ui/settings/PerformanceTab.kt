@@ -133,39 +133,30 @@ fun PerformanceTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(vu1RoundMode = it)) },
         )
         SettingsDivider()
-        // Speed Limit / Custom FPS — caps emulation speed as a % of native
-        // (100% ≈ 60fps NTSC / 50fps PAL). Only effective with the Frame
-        // Limiter on. Driven by a preset index; stores the actual percent.
-        run {
-            val speedPresets = listOf(25, 50, 75, 100, 150, 200, 300)
-            val idx = speedPresets.indexOf(s.nominalSpeedPercent).let { if (it < 0) 3 else it }
-            IntSliderRow(
-                label = "FPS / Speed Limit",
-                value = idx,
-                min = 0,
-                max = speedPresets.size - 1,
-                description = "Caps emulation speed as a percent of the game's native rate.",
-                valueFormatter = { "${speedPresets[it]}%" },
-                onChange = { apply(s.copy(nominalSpeedPercent = speedPresets[it])) },
-            )
-        }
+        // Speed Limit % — caps emulation speed as a % of native (100 = full speed).
+        // Arbitrary value; default stays 100. Affects audio pitch / timing / RA.
+        IntSliderRow(
+            label = "Speed Limit %",
+            value = s.nominalSpeedPercent.coerceIn(10, 200),
+            min = 10,
+            max = 200,
+            description = "Emulation speed as % of native (100 = full speed). Affects audio pitch, game timing and RetroAchievements (hardcore stays at/above 100%). This is NOT a display cap — pair it with Display FPS Cap for per-game tuning. Best left at 100 unless a game needs it.",
+            valueFormatter = { "$it%" },
+            onChange = { apply(s.copy(nominalSpeedPercent = it)) },
+        )
         SettingsDivider()
-        // Frame Rate Control — caps the presented frame rate independently of the Speed
-        // Limit %. The native side drops presents on the GS thread to hold this
-        // rate while emulation runs full speed (no slowdown). Presets only.
-        run {
-            val fpsPresets = listOf(0, 60, 30, 20, 15)
-            val idx = fpsPresets.indexOf(s.fpsLimit).let { if (it < 0) 0 else it }
-            IntSliderRow(
-                label = "Frame Rate Control",
-                value = idx,
-                min = 0,
-                max = fpsPresets.size - 1,
-                description = "Caps the on-screen frame rate to save power — emulation keeps full speed and the Speed Limit is unaffected. A game already below the cap is left alone.",
-                valueFormatter = { if (fpsPresets[it] == 0) "Off" else "${fpsPresets[it]} fps" },
-                onChange = { apply(s.copy(fpsLimit = fpsPresets[it])) },
-            )
-        }
+        // Display FPS Cap — caps the PRESENTED frame rate independently of Speed %.
+        // The GS thread paces presents (accumulator) to hold ANY target rate while
+        // emulation runs full speed (no slowdown). Arbitrary value; 0 = off.
+        IntSliderRow(
+            label = "Display FPS Cap",
+            value = s.fpsLimit.coerceIn(0, 60),
+            min = 0,
+            max = 60,
+            description = "Caps the PRESENTED (display) frame rate — emulation keeps full speed, so this is a display cap, not true emulation FPS. Any value works (use with Speed Limit % to fine-tune per game). 0 = off; values between the clean rates (60/30/20/15) pace a little unevenly.",
+            valueFormatter = { if (it == 0) "Off" else "$it fps" },
+            onChange = { apply(s.copy(fpsLimit = it)) },
+        )
         SettingsDivider()
         IntSliderRow(
             label = "Frame Skip",

@@ -51,9 +51,9 @@ fun AudioTab(state: MutableState<Settings>) {
         ToggleRow("Mute", s.audioMuted) { apply(s.copy(audioMuted = it)) }
         SettingsDivider()
         ToggleRow(
-            "Time Stretch",
+            "Audio Synchronization",
             s.audioTimeStretch,
-            description = "Keeps audio pitch stable when emulation speed varies. Off = a bit less CPU, but pitch/clock can drift under load.",
+            description = "Time Stretch — keeps audio pitch stable when emulation speed varies (PCSX2 2.7 \"Synchronization\"). Off = a bit less CPU, but pitch/clock can drift under load.",
         ) { apply(s.copy(audioTimeStretch = it)) }
         SettingsDivider()
         IntSliderRow(

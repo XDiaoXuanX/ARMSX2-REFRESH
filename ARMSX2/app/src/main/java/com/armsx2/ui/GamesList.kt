@@ -91,6 +91,10 @@ import com.armsx2.Main
 import kr.co.iefriends.pcsx2.NativeApp
 import org.json.JSONArray
 import org.json.JSONObject
+import android.os.Build
+import android.os.Environment
+import android.os.ParcelFileDescriptor
+import com.armsx2.BuildConfig
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -363,8 +367,20 @@ object GamesList {
      *  caches that were built before .img/.mdf/.nrg/.dump were probed for
      *  serials and before DMC2 Dante/Lucia filename fallback landed — bump
      *  again any time the probe coverage changes. */
+    /** github (all-files) build with All-Files Access actually granted: read ROMs
+     *  via raw /storage paths instead of SAF, because holding the permission evicts
+     *  the persisted SAF tree grant so openFileDescriptor() throws. Play (flavor
+     *  STORAGE_ALL_FILES=false) and github-without-the-grant keep the SAF path. */
+    private fun allFilesRomMode(): Boolean =
+        BuildConfig.STORAGE_ALL_FILES &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            Environment.isExternalStorageManager()
+
+    // The "|raw" suffix keeps the raw-mode cache (file:// URIs) separate from the
+    // SAF cache (content:// URIs), so toggling All-Files Access can't make the
+    // launch path use a URI from the wrong mode.
     private fun cacheKeyForDirs(dirs: List<String>): String =
-        dirs.toSet().sorted().joinToString("|") + "|v3"
+        dirs.toSet().sorted().joinToString("|") + "|v3" + if (allFilesRomMode()) "|raw" else ""
 
     @Composable
     private fun LibraryScreen(context: Context, romsDirs: List<String>, romsKey: String) {
@@ -1335,7 +1351,11 @@ object GamesList {
         controllerSelectedUri.value = game.uri.toString()
         WindowImpl.showLibrary.value = false
         markRecentlyPlayed(game)
-        Main.launchGame(game.uri.toString(), game)
+        // Raw-mode games (all-files build) carry a file:// URI — hand the core the
+        // bare /storage path so CDVD opens it directly, not via the SAF FD bridge.
+        val launchArg = if (game.uri.scheme == "file") (game.uri.path ?: game.uri.toString())
+            else game.uri.toString()
+        Main.launchGame(launchArg, game)
     }
 
     private fun updateControllerLayout(controllerRowsForUi: List<ControllerGameRow>) {
@@ -1975,6 +1995,16 @@ object GamesList {
                 val collected = linkedMapOf<String, GameInfo>() // URI → info, preserves first-seen order
                 for (dirUri in romsUriStrings) {
                     val uri = try { Uri.parse(dirUri) } catch (_: Exception) { null } ?: continue
+                    // All-files build: walk the folder by raw path (the SAF grant is
+                    // evicted while All-Files Access is held). Falls back to SAF when
+                    // the tree URI can't be resolved to a real path.
+                    if (allFilesRomMode()) {
+                        val root = Main.resolveTreeUriToPosix(dirUri)?.let { File(it) }
+                        if (root != null && root.isDirectory) {
+                            scanTreeRawInto(root, collected, 0)
+                            continue
+                        }
+                    }
                     val tree = DocumentFile.fromTreeUri(context, uri) ?: continue
                     scanTreeInto(context, tree, collected, 0)
                 }
@@ -2075,6 +2105,60 @@ object GamesList {
             val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
             val fd = pfd.detachFd()
             NativeApp.getGameSerialFromFd(fd) // consumes fd
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Raw-path counterpart of [scanTreeInto] for the all-files build. Walks the
+     *  folder with java.io.File and tags each game with a file:// URI so the
+     *  launch/probe paths open it directly instead of via the SAF FD bridge. */
+    private fun scanTreeRawInto(
+        dir: File,
+        collected: MutableMap<String, GameInfo>,
+        depth: Int,
+    ) {
+        if (depth > MAX_SCAN_DEPTH) return
+        val entries = try { dir.listFiles() } catch (_: Exception) { null } ?: return
+        for (f in entries) {
+            if (f.isDirectory) {
+                scanTreeRawInto(f, collected, depth + 1)
+                continue
+            }
+            val name = f.name
+            val ext = name.substringAfterLast('.', "").lowercase()
+            if (ext !in GAME_EXTENSIONS) continue
+            val fileUri = Uri.fromFile(f)
+            val rawProbe = when (ext) {
+                "iso", "bin", "chd", "img", "mdf", "nrg", "dump" -> probeDiscSerialRaw(f)
+                else -> null
+            }
+            val (probeSerial, probePlatform) = parseProbeResult(rawProbe)
+            val (titleFromName, serialFromName) = FilenameParser.parse(name)
+            val finalSerial = probeSerial ?: serialFromName
+            val finalPlatform = probePlatform ?: GamePlatform.PS2
+            val compatRaw = if (finalSerial != null)
+                NativeApp.getCompatibilityForSerial(finalSerial) else 0
+            val compatStars = (compatRaw - 1).coerceIn(0, 5)
+            collected.putIfAbsent(
+                fileUri.toString(),
+                GameInfo(
+                    uri = fileUri,
+                    title = titleFromName,
+                    serial = finalSerial,
+                    compatibility = compatStars,
+                    extension = ext.uppercase(),
+                    platform = finalPlatform,
+                ),
+            )
+        }
+    }
+
+    /** Open a real file for read and hand the fd to native for the serial probe. */
+    private fun probeDiscSerialRaw(file: File): String? {
+        return try {
+            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            NativeApp.getGameSerialFromFd(pfd.detachFd()) // consumes fd
         } catch (_: Exception) {
             null
         }

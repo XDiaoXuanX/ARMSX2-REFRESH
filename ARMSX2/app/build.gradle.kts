@@ -109,6 +109,25 @@ android {
             }
         }
     }
+    // Distribution split: the Play AAB (play flavor) stays scoped-storage /
+    // SAF only — src/main/AndroidManifest.xml has NO MANAGE_EXTERNAL_STORAGE,
+    // so play is Play-policy clean by construction. The sideloaded GitHub APK
+    // (github flavor) merges src/github/AndroidManifest.xml, which adds
+    // MANAGE_EXTERNAL_STORAGE back, and STORAGE_ALL_FILES gates the runtime
+    // all-files / custom-folder path in the setup wizard. applicationId is left
+    // to defaultConfig (driven by -Parmsx2.applicationId) so both flavors honor
+    // the release/AAB pipeline's CLI override.
+    flavorDimensions += "store"
+    productFlavors {
+        create("github") {
+            dimension = "store"
+            buildConfigField("boolean", "STORAGE_ALL_FILES", "true")
+        }
+        create("play") {
+            dimension = "store"
+            buildConfigField("boolean", "STORAGE_ALL_FILES", "false")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11

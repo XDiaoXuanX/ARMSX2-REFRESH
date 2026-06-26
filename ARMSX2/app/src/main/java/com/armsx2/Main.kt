@@ -107,6 +107,9 @@ class SurfaceCallbacks(context: Context) : SurfaceView(context), SurfaceHolder.C
 }
 
 private const val STICK_DEAD = 0.15f
+// Threshold past which a stick remapped to D-pad / face buttons registers as a
+// digital press. Higher than STICK_DEAD so a resting/wobbling stick doesn't fire.
+private const val STICK_DIGITAL_THRESHOLD = 0.5f
 private const val UI_NAV_DEAD = 0.20f
 private const val UI_NAV_RELEASE_DEAD = 0.06f
 private const val UI_HAT_DEAD = 0.50f
@@ -1056,6 +1059,15 @@ class Main: ComponentActivity() {
             if (!setupComplete.value || setupEditorVisible.value) {
                 SetupImpl.SetupWindow()
             } else if (setupComplete.value) {
+                // Per-game play-time tracking: count while RUNNING, accumulate on
+                // pause / stop / background. Keyed on the serial too so the session
+                // re-arms once currentGame resolves shortly after launch.
+                androidx.compose.runtime.LaunchedEffect(eState.value, currentGame.value?.serial) {
+                    if (eState.value == EmuState.RUNNING)
+                        PlayTime.startSession(currentGame.value?.serial)
+                    else
+                        PlayTime.endSession()
+                }
                 WindowImpl.Window {
                     if (surface.value != null) {
                         // Pull Compose focus onto the surface as soon as it's
@@ -1604,10 +1616,15 @@ class Main: ComponentActivity() {
             // event reaching this method means a controller (or similar
             // pointing device) is being used; latch touch controls off.
             com.armsx2.ui.touch.TouchControls.onControllerInputDetected()
-            sendAxis(ev, MotionEvent.AXIS_X,     posCode = 111, negCode = 113) // L right / left
-            sendAxis(ev, MotionEvent.AXIS_Y,     posCode = 112, negCode = 110) // L down  / up
-            sendAxis(ev, MotionEvent.AXIS_Z,     posCode = 121, negCode = 123) // R right / left
-            sendAxis(ev, MotionEvent.AXIS_RZ,    posCode = 122, negCode = 120) // R down  / up
+            // Analog sticks → analog (default) OR remapped to the D-pad / face
+            // buttons (per ControllerMappings.{left,right}StickMode) — useful for
+            // fighting games on analog-centric pads (e.g. left stick = D-pad).
+            dispatchStick(ev, ControllerMappings.leftStickMode(),
+                MotionEvent.AXIS_X, MotionEvent.AXIS_Y,
+                aXPos = 111, aXNeg = 113, aYPos = 112, aYNeg = 110) // L right/left, down/up
+            dispatchStick(ev, ControllerMappings.rightStickMode(),
+                MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ,
+                aXPos = 121, aXNeg = 123, aYPos = 122, aYNeg = 120) // R right/left, down/up
             sendAxis(ev, MotionEvent.AXIS_HAT_X, posCode = 22,  negCode = 21)  // D right / left
             sendAxis(ev, MotionEvent.AXIS_HAT_Y, posCode = 20,  negCode = 19)  // D down  / up
             // Analog triggers (L2/R2). Xbox / DualShock / most modern pads
@@ -1903,6 +1920,37 @@ class Main: ComponentActivity() {
         NativeApp.setPadButton(negCode, (negVal * 32767).toInt(), negVal > 0f)
     }
 
+    /** Route one physical stick's two axes to the PS2 pad per [mode]: native analog
+     *  stick (default), or thresholded digital D-pad / face-button presses. */
+    private fun dispatchStick(
+        event: MotionEvent, mode: ControllerMappings.StickMode,
+        axisX: Int, axisY: Int,
+        aXPos: Int, aXNeg: Int, aYPos: Int, aYNeg: Int,
+    ) {
+        when (mode) {
+            ControllerMappings.StickMode.ANALOG -> {
+                sendAxis(event, axisX, aXPos, aXNeg)
+                sendAxis(event, axisY, aYPos, aYNeg)
+            }
+            ControllerMappings.StickMode.DPAD -> {
+                sendAxisDigital(event, axisX, posCode = 22, negCode = 21) // D-pad right / left
+                sendAxisDigital(event, axisY, posCode = 20, negCode = 19) // D-pad down / up
+            }
+            ControllerMappings.StickMode.FACE -> {
+                sendAxisDigital(event, axisX, posCode = 97, negCode = 99)  // Circle / Square (right/left)
+                sendAxisDigital(event, axisY, posCode = 96, negCode = 100) // Cross / Triangle (down/up)
+            }
+        }
+    }
+
+    /** Stick-as-button: press [posCode] / [negCode] once the axis passes the digital
+     *  threshold. setPadButton is a state set, so re-sending the same state is a no-op. */
+    private fun sendAxisDigital(event: MotionEvent, axis: Int, posCode: Int, negCode: Int) {
+        val v = event.getAxisValue(axis)
+        NativeApp.setPadButton(posCode, 32767, v > STICK_DIGITAL_THRESHOLD)
+        NativeApp.setPadButton(negCode, 32767, v < -STICK_DIGITAL_THRESHOLD)
+    }
+
     private fun sendTrigger(event: MotionEvent, axisA: Int, axisB: Int, code: Int) {
         val v = maxOf(event.getAxisValue(axisA), event.getAxisValue(axisB))
         val clamped = if (v > STICK_DEAD) v.coerceAtMost(1f) else 0f
@@ -1910,8 +1958,14 @@ class Main: ComponentActivity() {
     }
 
     override fun onPause() {
+        // Leaving the app (home / recents / slide-out) while a game is running:
+        // open the pause OVERLAY instead of a silent pause. A bare pause left
+        // users staring at a frozen game with no obvious way back — they had to
+        // know to open the menu and tap Resume. open() pauses the VM AND shows
+        // the pause menu, so returning lands straight on the Resume button.
+        // No-op if the overlay is already up (it already paused the game).
         if (eState.value == EmuState.RUNNING)
-            pause()
+            InGameOverlay.open()
         // Persist Vulkan pipeline cache before Android can reap the process.
         // ~VKShaderCache only fires on a clean device teardown, but swipe-kill
         // / OOM-kill skip that path — every cold launch would otherwise

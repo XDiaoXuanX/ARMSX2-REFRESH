@@ -105,9 +105,11 @@ fun TouchControlsOverlay() {
 
         // Tap-to-reveal settings cog (top-center). Moved off the top-right corner
         // so it no longer sits under the R1/R2 on-screen cluster (the "behind R2"
-        // complaint). Hidden entirely when on-screen controls are set to Never (use
-        // a physical menu-button binding or the pause touch button instead).
-        if (!edit && TouchControls.visibilityMode.value != 0) {
+        // complaint). Kept available even when on-screen controls = Never: it's an
+        // INVISIBLE top-center tap zone (no clutter, doesn't overlap R1), so a
+        // controller user can hide every gameplay button yet still tap the gear to
+        // pause / open settings — no need to map a physical menu button for it.
+        if (!edit) {
             var showSettingsCog by remember { mutableStateOf(false) }
             LaunchedEffect(showSettingsCog) {
                 if (showSettingsCog) {

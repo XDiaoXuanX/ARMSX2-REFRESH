@@ -340,7 +340,18 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getGameTitle(JNIEnv *env, jclass clazz,
                                                   jstring p_szpath) {
     std::string _szPath = GetJavaString(env, p_szpath);
 
+    // The Android library is scanned in Kotlin, so the NATIVE game-list cache is
+    // usually empty — GetEntryForPath misses and the info tab gets no CRC (the
+    // title/serial come from the Kotlin GameInfo, which is why those showed but
+    // CRC was blank). Fall back to an on-demand populate (reads the disc to
+    // compute serial + CRC). Callers invoke getGameTitle off the UI thread.
+    GameList::Entry temp_entry;
     const GameList::Entry *entry = GameList::GetEntryForPath(_szPath.c_str());
+    if (!entry || entry->crc == 0)
+    {
+        if (GameList::PopulateEntryFromPath(_szPath, &temp_entry))
+            entry = &temp_entry;
+    }
     if (!entry)
         return env->NewStringUTF("");
 
@@ -653,6 +664,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setPadButton(JNIEnv *env, jclass clazz,
         case 121: _key = PadDualshock2::Inputs::PAD_R_RIGHT; break;
         case 122: _key = PadDualshock2::Inputs::PAD_R_DOWN; break;
         case 123: _key = PadDualshock2::Inputs::PAD_R_LEFT; break;
+        // Custom target (ControllerMappings "analog" action) — the DualShock2
+        // Analog/mode button. Toggles analog mode; some early games (e.g. Driving
+        // Emotion Type-S) need it pressed before the sticks work at all. The
+        // native PAD already handles the toggle (shows "Analog light is now ...").
+        case 200: _key = PadDualshock2::Inputs::PAD_ANALOG; break;
         default: _key = PadDualshock2::Inputs::PAD_CROSS ; break;
     }
 
@@ -798,16 +814,15 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setFpsCap(JNIEnv *env, jclass clazz,
     u64 interval = 0;
     if (fps > 0)
     {
-        // A present-rate cap can only drop whole displayed frames, so it snaps to
-        // a whole division of the game's refresh: present every round(native/fps)
-        // vsyncs. The interval is (div - 0.5) vsyncs in CPU ticks — the half-frame
-        // margin makes the divisor boundary clear reliably (so e.g. a 30 cap holds
-        // steady instead of wobbling on the 2-frame edge), and targets that aren't
-        // a whole division (e.g. 50 on a 60Hz game) resolve to the nearest rate.
+        // Arbitrary present-rate cap: present at most once per (1/fps) seconds. The
+        // GS-thread accumulator pacer (GSRenderer::VSync) holds this average rate
+        // for ANY target (e.g. 47/55 for per-game golden-spot tuning), not just
+        // whole divisions of the source. Capping at/above the game's own rate
+        // can't drop frames (the source produces no more), so treat that as off.
         const double native = static_cast<double>(VMManager::GetFrameRate()); // ~59.94 / 50
-        const long div = std::max(1L, std::lround(native / static_cast<double>(fps)));
-        const double vsync_ticks = static_cast<double>(GetTickFrequency()) / native;
-        interval = static_cast<u64>((static_cast<double>(div) - 0.5) * vsync_ticks);
+        if (static_cast<double>(fps) < native - 0.5)
+            interval = static_cast<u64>(static_cast<double>(GetTickFrequency()) / static_cast<double>(fps));
+        // else interval stays 0 → off (no effective cap)
     }
     GSSetMaxPresentFps(fps, interval);
     Console.WriteLnFmt("@@ANDROID_FPSCAP@@ fps={} interval_ticks={}", fps, interval);

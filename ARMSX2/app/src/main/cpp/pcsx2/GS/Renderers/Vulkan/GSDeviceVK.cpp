@@ -2803,9 +2803,19 @@ bool GSDeviceVK::CheckFeatures()
 	if (m_device_properties.vendorID == 0x13B5u)
 		SetRuntimeGPUProfile(RuntimeGpuProfile::Mali);
 
-	// framebuffer_fetch stays disabled: the leading false also covers the Adreno-840
-	// rasterization-order stale-read issue described above. Mali must use the barrier path.
-	m_features.framebuffer_fetch = false &&
+	// framebuffer_fetch: kept OFF for Adreno (the historical leading-false covered the
+	// Adreno-840 rasterization-order stale-read bug) and every non-Mali vendor — UNCHANGED.
+	// For MALI ONLY (0x13B5) ENABLE it when the device actually exposes ROAA: the
+	// per-PRIMITIVE texture-barrier blend path the Mali profile forces (above) tanks
+	// blend-heavy games — GT4 is a 10-20fps slideshow. With fbfetch on, that SAME forced SW
+	// blend reads Cd in-shader (subpassLoad/ROAA) so DetermineBarriers() (GSRendererHW.cpp)
+	// drops every barrier — fast AND still correct (the profile keeps SW blend, never the
+	// broken HW dual-source unit). The earlier "still corrupted" attempt enabled fbfetch
+	// WITHOUT the Mali profile, so the HW dual-source path still ran — this keeps the profile.
+	// Safe-by-construction: a literal no-op (identical to before) on any Mali lacking the
+	// extension, and it never touches Adreno or other vendors.
+	const bool is_mali_vk = (m_device_properties.vendorID == 0x13B5u);
+	m_features.framebuffer_fetch = is_mali_vk &&
 		m_optional_extensions.vk_ext_rasterization_order_attachment_access && !GSConfig.DisableFramebufferFetch;
 	m_features.texture_barrier = GSConfig.OverrideTextureBarriers != 0;
 	m_features.multidraw_fb_copy = false;

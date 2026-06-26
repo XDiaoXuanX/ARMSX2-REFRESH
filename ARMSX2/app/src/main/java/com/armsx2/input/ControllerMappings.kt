@@ -29,7 +29,36 @@ object ControllerMappings {
         Action("r3", "R3", KeyEvent.KEYCODE_BUTTON_THUMBR, KeyEvent.KEYCODE_BUTTON_THUMBR),
         Action("select", "Select", KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.KEYCODE_BUTTON_SELECT),
         Action("start", "Start", KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_START),
+        // The DualShock2 Analog/mode button. Target 200 -> native PAD_ANALOG
+        // (see native-lib.cpp setPadButton). UNBOUND by default — there's no
+        // standard Android keycode for it, so the user binds a button. Lets the
+        // few games that require the analog toggle (e.g. Driving Emotion Type-S)
+        // actually enable their sticks. Parity with desktop PCSX2.
+        Action("analog", "Analog (toggle)", 200, KeyEvent.KEYCODE_UNKNOWN),
     )
+
+    // ---- Analog stick remapping (physical sticks → digital PS2 inputs) ----
+    // Lets a physical stick drive the D-pad or the face buttons instead of the PS2
+    // analog stick — handy for fighting games on analog-centric pads (e.g. left
+    // stick = D-pad). Global, like the button bindings; persisted in Main.prefs.
+    enum class StickMode(val id: String, val label: String) {
+        ANALOG("analog", "Analog"),
+        DPAD("dpad", "D-Pad"),
+        FACE("face", "Face"),
+    }
+
+    private const val KEY_LSTICK = "pad.lstick.mode"
+    private const val KEY_RSTICK = "pad.rstick.mode"
+
+    private fun stickModeFor(key: String): StickMode {
+        val id = Main.prefs.getString(key, StickMode.ANALOG.id)
+        return StickMode.values().firstOrNull { it.id == id } ?: StickMode.ANALOG
+    }
+
+    fun leftStickMode(): StickMode = stickModeFor(KEY_LSTICK)
+    fun rightStickMode(): StickMode = stickModeFor(KEY_RSTICK)
+    fun setLeftStickMode(m: StickMode) = Main.prefs.edit().putString(KEY_LSTICK, m.id).apply()
+    fun setRightStickMode(m: StickMode) = Main.prefs.edit().putString(KEY_RSTICK, m.id).apply()
 
     private const val KEY_PREFIX = "pad.map."
 
@@ -37,6 +66,7 @@ object ControllerMappings {
         Main.prefs.getInt(KEY_PREFIX + action.id, action.defaultPhysicalKeyCode)
 
     fun labelForKey(keyCode: Int): String = when (keyCode) {
+        KeyEvent.KEYCODE_UNKNOWN -> "Not set"
         KeyEvent.KEYCODE_DPAD_UP -> "D-Pad Up"
         KeyEvent.KEYCODE_DPAD_DOWN -> "D-Pad Down"
         KeyEvent.KEYCODE_DPAD_LEFT -> "D-Pad Left"

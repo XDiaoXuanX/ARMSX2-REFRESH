@@ -62,6 +62,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clipToBounds
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -86,6 +88,7 @@ import coil.request.ImageRequest
 import com.armsx2.EmuState
 import com.armsx2.GameInfo
 import com.armsx2.Main
+import com.armsx2.PlayTime
 import com.armsx2.R
 import com.armsx2.config.ConfigStore
 import com.armsx2.config.LiveGsApplyQueue
@@ -1589,14 +1592,21 @@ object InGameOverlay {
     @Composable
     private fun GameInfoTab() {
         val game = previewGame.value ?: Main.currentGame.value
-        val crc = remember(game?.uri) {
-            runCatching {
-                game?.uri?.let { uri ->
-                    NativeApp.getGameTitle(uri.toString()).split("|").getOrNull(2)
-                        ?.substringAfter('(', "")?.substringBefore(')')?.trim()
-                        ?.takeIf { it.isNotEmpty() && it != "00000000" }
-                }
-            }.getOrNull()
+        // getGameTitle now falls back to an on-demand disc scan when the native
+        // game-list cache misses (which it usually does — the Android library is
+        // scanned in Kotlin), so resolve the CRC OFF the UI thread to avoid
+        // janking the Info tab. The row stays hidden until it resolves.
+        var crc by remember(game?.uri) { mutableStateOf<String?>(null) }
+        LaunchedEffect(game?.uri) {
+            crc = withContext(Dispatchers.IO) {
+                runCatching {
+                    game?.uri?.let { uri ->
+                        NativeApp.getGameTitle(uri.toString()).split("|").getOrNull(2)
+                            ?.substringAfter('(', "")?.substringBefore(')')?.trim()
+                            ?.takeIf { it.isNotEmpty() && it != "00000000" }
+                    }
+                }.getOrNull()
+            }
         }
         Column(
             Modifier
@@ -1607,6 +1617,14 @@ object InGameOverlay {
             InfoCopyRow("Title", game?.title)
             InfoCopyRow("Serial", game?.serial)
             InfoCopyRow("CRC", crc)
+            InfoCopyRow(
+                "Time Played",
+                PlayTime.formatPlayed(PlayTime.playedSeconds(game?.serial)).takeIf { it.isNotEmpty() },
+            )
+            InfoCopyRow(
+                "Last Played",
+                PlayTime.formatLastPlayed(PlayTime.lastPlayedMillis(game?.serial)).takeIf { it.isNotEmpty() },
+            )
             InfoCopyRow("Region", game?.region)
             InfoCopyRow("Type", game?.extension?.takeIf { it.isNotEmpty() })
             InfoCopyRow("Path", game?.uri?.toString())
