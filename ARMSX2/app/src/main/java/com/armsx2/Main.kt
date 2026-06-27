@@ -337,6 +337,23 @@ class Main: ComponentActivity() {
         @Volatile private var vmRestartAfterStop = false
         @Volatile private var vmRunLoopActive = false
 
+        // Quit-after-the-VM-stops latch — set by the "Close Game & Quit" hotkey, or by
+        // a frontend-launched game's Close Game. One-shot: read+cleared by
+        // finishToLauncherIfRequested in whichever terminal STOPPED branch fires first.
+        @Volatile var quitAfterStop = false
+        // True while the CURRENT game was launched from an external frontend intent.
+        @Volatile var launchedExternally = false
+
+        /** Terminal (non-restart) STOPPED branches call this: if a quit was requested,
+         *  finish the Activity back to the launcher/frontend AFTER the VM has fully
+         *  unwound and flushed (memcards/savestate). Marshalled to the UI thread. */
+        private fun finishToLauncherIfRequested() {
+            if (quitAfterStop) {
+                quitAfterStop = false
+                instance?.runOnUiThread { instance?.finishAndRemoveTask() }
+            }
+        }
+
         @JvmStatic
         fun isVmStopInProgress(): Boolean = vmStopInProgress
 
@@ -380,6 +397,7 @@ class Main: ComponentActivity() {
                         WindowImpl.toolbarVisible.value = true
                         WindowImpl.showLibrary.value = false
                         WindowImpl.overlayVisible.value = false
+                        finishToLauncherIfRequested()
                     }
                 }
             }
@@ -458,7 +476,7 @@ class Main: ComponentActivity() {
          * without re-querying gamedb. Pass null when launching from a
          * path that doesn't have a GameInfo (Swap/Boot Disc file picker).
          */
-        fun launchGame(uri: String, info: GameInfo? = null) {
+        fun launchGame(uri: String, info: GameInfo? = null, external: Boolean = false) {
             if (uri.isBlank()) {
                 println("@@ANDROID_LAUNCH_REJECT@@ reason=blank_uri title=${info?.title ?: ""}")
                 return
@@ -469,6 +487,7 @@ class Main: ComponentActivity() {
                     "stopping=$vmStopInProgress nativeReady=${nativeReady.value}"
             )
             currentGame.value = info
+            launchedExternally = external
             m_szGamefile = uri
             synchronized(vmLifecycleLock) {
                 if (eState.value != EmuState.STOPPED || vmStopInProgress || vmRunLoopActive) {
@@ -487,7 +506,7 @@ class Main: ComponentActivity() {
                 return
 
             pendingExternalLaunch.value = null
-            launchGame(queued, null)
+            launchGame(queued, null, external = true)
         }
 
         /**
@@ -621,6 +640,7 @@ class Main: ComponentActivity() {
                             WindowImpl.showLibrary.value = false
                             WindowImpl.overlayVisible.value = false
                         }
+                        finishToLauncherIfRequested()
                     }
                 }
             }
@@ -932,11 +952,22 @@ class Main: ComponentActivity() {
         }
     }
 
-    fun sendKeyAction(p_action: KeyEventType, p_keycode: Int) {
+    fun sendKeyAction(p_action: KeyEventType, p_keycode_in: Int) {
         // Any physical gamepad key event implies the user is on a
         // controller — latch the on-screen touch controls hidden until a
         // screen press flips them back on. Idempotent.
         com.armsx2.ui.touch.TouchControls.onControllerInputDetected()
+        // D-pad as left analog stick: a physical d-pad press (arriving as a key,
+        // not a HAT) drives the left stick instead of the digital d-pad. The
+        // remapped code is >=110 so the analog-force branch below gives a
+        // (near-)full deflection. HAT-style d-pads are folded into the stick in
+        // dispatchStick instead. 19=Up 20=Down 21=Left 22=Right ->
+        // 110=L_Up 112=L_Down 113=L_Left 111=L_Right.
+        val p_keycode = if (ControllerMappings.dpadAsLeftStick()) {
+            when (p_keycode_in) {
+                19 -> 110; 20 -> 112; 21 -> 113; 22 -> 111; else -> p_keycode_in
+            }
+        } else p_keycode_in
         if (p_action == KeyEventType.KeyDown) {
             var pad_force = 0
             if (p_keycode >= 110) {
@@ -969,6 +1000,7 @@ class Main: ComponentActivity() {
         }
         prefs = applicationContext.getSharedPreferences("ARMSX2", MODE_PRIVATE)
         com.armsx2.CoverArtStyle.load()
+        com.armsx2.LibraryTitles.load()
         setupComplete.value = prefs.getBoolean("setupComplete", false)
         systemDir.value = prefs.getString("systemDir", null)
         bios.value = prefs.getString("bios", null)
@@ -1563,7 +1595,21 @@ class Main: ComponentActivity() {
                     return true
                 }
                 ControllerMappings.SysHotkey.CLOSE_GAME -> {
-                    if (down) Main.stop()
+                    if (down) {
+                        // If this game was launched from a frontend (ES-DE etc.) and the
+                        // user opted in, closing it returns to the frontend instead of
+                        // the ARMSX2 library.
+                        if (Main.launchedExternally &&
+                            Main.prefs.getBoolean("ui.exitToLauncherExternal", true))
+                            Main.quitAfterStop = true
+                        Main.stop()
+                    }
+                    return true
+                }
+                ControllerMappings.SysHotkey.QUIT_APP -> {
+                    // Stop the VM (flushes memcards/savestate), then finish the app once
+                    // the VM has fully unwound — never finish inline (stop() is async).
+                    if (down) { Main.quitAfterStop = true; Main.stop() }
                     return true
                 }
                 null -> {}
@@ -1621,12 +1667,19 @@ class Main: ComponentActivity() {
             // fighting games on analog-centric pads (e.g. left stick = D-pad).
             dispatchStick(ev, ControllerMappings.leftStickMode(),
                 MotionEvent.AXIS_X, MotionEvent.AXIS_Y,
-                aXPos = 111, aXNeg = 113, aYPos = 112, aYNeg = 110) // L right/left, down/up
+                aXPos = 111, aXNeg = 113, aYPos = 112, aYNeg = 110, // L right/left, down/up
+                leftStick = true)
             dispatchStick(ev, ControllerMappings.rightStickMode(),
                 MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ,
-                aXPos = 121, aXNeg = 123, aYPos = 122, aYNeg = 120) // R right/left, down/up
-            sendAxis(ev, MotionEvent.AXIS_HAT_X, posCode = 22,  negCode = 21)  // D right / left
-            sendAxis(ev, MotionEvent.AXIS_HAT_Y, posCode = 20,  negCode = 19)  // D down  / up
+                aXPos = 121, aXNeg = 123, aYPos = 122, aYNeg = 120, // R right/left, down/up
+                leftStick = false)
+            // D-pad: the physical HAT *and* any stick remapped to D-pad drive the
+            // same four PAD buttons. Combine every source and write each direction
+            // once — otherwise the centered HAT released the stick-as-D-pad press
+            // on the very same motion event (last write wins), so a stick set to
+            // D-pad never registered while face-button mapping (different codes)
+            // worked fine.
+            dispatchDpadCombined(ev)
             // Analog triggers (L2/R2). Xbox / DualShock / most modern pads
             // report these as 0..1 motion-axis values, not Key.ButtonL2/R2
             // key events, so the onKeyEvent path above never sees them.
@@ -1920,26 +1973,75 @@ class Main: ComponentActivity() {
         NativeApp.setPadButton(negCode, (negVal * 32767).toInt(), negVal > 0f)
     }
 
+    /** Like sendAxis but drives one analog direction-pair from whichever of two
+     *  axes is deflected more — used to fold the physical D-pad (a centered HAT
+     *  axis) into the left stick for "D-pad as Left Stick" without a separate
+     *  writer releasing the stick on the next event. The HAT reads ±1 so a d-pad
+     *  press becomes full deflection. */
+    private fun sendAxisMax(event: MotionEvent, axisA: Int, axisB: Int, posCode: Int, negCode: Int) {
+        val a = event.getAxisValue(axisA)
+        val b = event.getAxisValue(axisB)
+        val pos = maxOf(if (a > STICK_DEAD) a else 0f, if (b > STICK_DEAD) b else 0f)
+        val neg = maxOf(if (a < -STICK_DEAD) -a else 0f, if (b < -STICK_DEAD) -b else 0f)
+        NativeApp.setPadButton(posCode, (pos * 32767).toInt(), pos > 0f)
+        NativeApp.setPadButton(negCode, (neg * 32767).toInt(), neg > 0f)
+    }
+
     /** Route one physical stick's two axes to the PS2 pad per [mode]: native analog
-     *  stick (default), or thresholded digital D-pad / face-button presses. */
+     *  stick (default), thresholded digital D-pad / face presses, or per-direction
+     *  CUSTOM binds. [leftStick] selects which stick's CUSTOM binds to read. */
     private fun dispatchStick(
         event: MotionEvent, mode: ControllerMappings.StickMode,
         axisX: Int, axisY: Int,
         aXPos: Int, aXNeg: Int, aYPos: Int, aYNeg: Int,
+        leftStick: Boolean,
     ) {
         when (mode) {
             ControllerMappings.StickMode.ANALOG -> {
-                sendAxis(event, axisX, aXPos, aXNeg)
-                sendAxis(event, axisY, aYPos, aYNeg)
-            }
-            ControllerMappings.StickMode.DPAD -> {
-                sendAxisDigital(event, axisX, posCode = 22, negCode = 21) // D-pad right / left
-                sendAxisDigital(event, axisY, posCode = 20, negCode = 19) // D-pad down / up
+                if (leftStick && ControllerMappings.dpadAsLeftStick()) {
+                    // Fold the physical D-pad (HAT) into the left stick so the
+                    // D-pad drives analog movement. Combining into ONE writer (max
+                    // deflection per axis) avoids the resting stick releasing the
+                    // D-pad's press — the HAT is gated out of dispatchDpadCombined.
+                    sendAxisMax(event, axisX, MotionEvent.AXIS_HAT_X, aXPos, aXNeg)
+                    sendAxisMax(event, axisY, MotionEvent.AXIS_HAT_Y, aYPos, aYNeg)
+                } else {
+                    sendAxis(event, axisX, aXPos, aXNeg)
+                    sendAxis(event, axisY, aYPos, aYNeg)
+                }
             }
             ControllerMappings.StickMode.FACE -> {
                 sendAxisDigital(event, axisX, posCode = 97, negCode = 99)  // Circle / Square (right/left)
                 sendAxisDigital(event, axisY, posCode = 96, negCode = 100) // Cross / Triangle (down/up)
             }
+            ControllerMappings.StickMode.CUSTOM -> {
+                // Each direction is bound to any PS2 button. D-pad targets (19-22)
+                // are owned by dispatchDpadCombined() (avoids the release race);
+                // emitCustom keeps analog targets proportional, others thresholded.
+                val vx = event.getAxisValue(axisX)
+                val vy = event.getAxisValue(axisY)
+                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.RIGHT),
+                    if (vx > 0f) vx else 0f)
+                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.LEFT),
+                    if (vx < 0f) -vx else 0f)
+                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.DOWN),
+                    if (vy > 0f) vy else 0f)
+                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.UP),
+                    if (vy < 0f) -vy else 0f)
+            }
+        }
+    }
+
+    /** Emit one CUSTOM stick-direction binding given its 0..1 deflection [mag]
+     *  toward that direction. D-pad codes (19-22) are skipped — dispatchDpadCombined
+     *  owns them; analog codes (110-123) stay proportional; others are thresholded. */
+    private fun emitCustom(code: Int, mag: Float) {
+        if (code in 19..22) return
+        if (code in 110..123) {
+            val m = if (mag > STICK_DEAD) mag else 0f
+            NativeApp.setPadButton(code, (m * 32767).toInt(), m > 0f)
+        } else {
+            NativeApp.setPadButton(code, 32767, mag > STICK_DIGITAL_THRESHOLD)
         }
     }
 
@@ -1949,6 +2051,101 @@ class Main: ComponentActivity() {
         val v = event.getAxisValue(axis)
         NativeApp.setPadButton(posCode, 32767, v > STICK_DIGITAL_THRESHOLD)
         NativeApp.setPadButton(negCode, 32767, v < -STICK_DIGITAL_THRESHOLD)
+    }
+
+    // D-pad codes (19-22) THIS function last pressed, so it releases only its own
+    // presses. Owns the D-pad from ALL non-KeyEvent sources: the physical HAT, a
+    // stick in DPAD mode, and any CUSTOM stick direction bound to a D-pad code.
+    private val dpadOwnHeld = HashSet<Int>()
+
+    /** True when any CUSTOM-mode stick has a direction bound to a D-pad code. */
+    private fun customTargetsDpad(): Boolean {
+        for (isLeft in booleanArrayOf(true, false)) {
+            if (ControllerMappings.stickModeFor(isLeft) != ControllerMappings.StickMode.CUSTOM) continue
+            for (dir in ControllerMappings.StickDir.values())
+                if (ControllerMappings.customStickCode(isLeft, dir) in 19..22) return true
+        }
+        return false
+    }
+
+    /** Drive the PS2 D-pad from every non-KeyEvent source that can map to it — the
+     *  physical HAT, a stick in DPAD mode, and CUSTOM directions bound to a D-pad
+     *  code — through ONE change-tracked owner. Writing all four codes every event
+     *  (the old approach) released a held direction whenever the stick re-centered
+     *  or another stick emitted an event; tracking our own presses avoids that and
+     *  never clobbers a physical D-pad arriving as KeyEvents. */
+    private fun dispatchDpadCombined(ev: MotionEvent) {
+        // When the D-pad drives the left stick, the HAT is folded into the stick
+        // in dispatchStick — ignore it here so it doesn't ALSO press the d-pad.
+        val dpadAsStick = ControllerMappings.dpadAsLeftStick()
+        val hatX = if (dpadAsStick) 0f else ev.getAxisValue(MotionEvent.AXIS_HAT_X)
+        val hatY = if (dpadAsStick) 0f else ev.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        val hatActive = hatX != 0f || hatY != 0f
+        // DPAD-mode sticks are now written directly in dispatchStick (self-healing,
+        // like FACE). Do NOT fold them here, or the combined owner's change-tracked
+        // release would fight the direct writer. The combined owner still handles
+        // the physical HAT and CUSTOM directions bound to a d-pad code.
+        val leftDpad = false
+        val rightDpad = false
+        // Nothing we own could be active → release what we hold and bail, so we
+        // never touch the D-pad bits a KeyEvent-style physical D-pad drives.
+        if (!hatActive && !leftDpad && !rightDpad && !customTargetsDpad()) {
+            if (dpadOwnHeld.isNotEmpty()) {
+                dpadOwnHeld.forEach { NativeApp.setPadButton(it, 0, false) }
+                dpadOwnHeld.clear()
+            }
+            return
+        }
+        var right = hatX > 0.5f
+        var left = hatX < -0.5f
+        var down = hatY > 0.5f
+        var up = hatY < -0.5f
+
+        fun foldStick(axisX: Int, axisY: Int) {
+            val x = ev.getAxisValue(axisX)
+            val y = ev.getAxisValue(axisY)
+            right = right || x > STICK_DIGITAL_THRESHOLD
+            left = left || x < -STICK_DIGITAL_THRESHOLD
+            down = down || y > STICK_DIGITAL_THRESHOLD
+            up = up || y < -STICK_DIGITAL_THRESHOLD
+        }
+        if (leftDpad) foldStick(MotionEvent.AXIS_X, MotionEvent.AXIS_Y)
+        if (rightDpad) foldStick(MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ)
+
+        // Fold CUSTOM directions that target a D-pad code so they share this owner.
+        fun foldCustom(isLeft: Boolean, axisX: Int, axisY: Int) {
+            if (ControllerMappings.stickModeFor(isLeft) != ControllerMappings.StickMode.CUSTOM) return
+            val x = ev.getAxisValue(axisX)
+            val y = ev.getAxisValue(axisY)
+            fun mark(dir: ControllerMappings.StickDir, active: Boolean) {
+                if (!active) return
+                when (ControllerMappings.customStickCode(isLeft, dir)) {
+                    22 -> right = true
+                    21 -> left = true
+                    20 -> down = true
+                    19 -> up = true
+                }
+            }
+            mark(ControllerMappings.StickDir.RIGHT, x > STICK_DIGITAL_THRESHOLD)
+            mark(ControllerMappings.StickDir.LEFT, x < -STICK_DIGITAL_THRESHOLD)
+            mark(ControllerMappings.StickDir.DOWN, y > STICK_DIGITAL_THRESHOLD)
+            mark(ControllerMappings.StickDir.UP, y < -STICK_DIGITAL_THRESHOLD)
+        }
+        foldCustom(true, MotionEvent.AXIS_X, MotionEvent.AXIS_Y)
+        foldCustom(false, MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ)
+
+        // Write only on change so a resting stick's motion stream can't re-release
+        // a direction the physical D-pad is also holding.
+        fun apply(code: Int, on: Boolean) {
+            val was = dpadOwnHeld.contains(code)
+            if (on == was) return
+            NativeApp.setPadButton(code, if (on) 32767 else 0, on)
+            if (on) dpadOwnHeld.add(code) else dpadOwnHeld.remove(code)
+        }
+        apply(22, right) // D-pad right
+        apply(21, left)  // D-pad left
+        apply(20, down)  // D-pad down
+        apply(19, up)    // D-pad up
     }
 
     private fun sendTrigger(event: MotionEvent, axisA: Int, axisB: Int, code: Int) {

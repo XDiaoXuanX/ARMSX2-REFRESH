@@ -1199,15 +1199,20 @@ object SetupImpl {
                         SetupStepCard(
                             step = "1.",
                             title = "App Data Folder",
-                            description = "Where memory cards, save states, and configs are stored. Internal uses your main device storage; SD Card uses a memory card if one is present. (Game ROMs are added separately.)",
+                            description = if (BuildConfig.STORAGE_ALL_FILES)
+                                "Where memory cards, save states, and configs are stored. Choose Internal, an SD card, or a custom folder. (Game ROMs are added separately.)"
+                            else
+                                "Where memory cards, save states, and configs are stored. Internal uses your main device storage; SD Card uses a memory card if one is present. (Game ROMs are added separately.)",
                             ready = appFolderReady(),
                             status = appFolderStatus(),
                             visual = SetupVisual.Folder,
-                            onClick = onUseDefaultSystem,
-                            primaryLabel = "SD Card",
+                            // github build: one button opens the Internal/SD/Custom chooser.
+                            // play build: SD Card / Internal as before.
+                            onClick = if (BuildConfig.STORAGE_ALL_FILES) onPickSystem else onUseDefaultSystem,
+                            primaryLabel = if (BuildConfig.STORAGE_ALL_FILES) "Choose Data Location" else "SD Card",
                             onPrimary = onPickSystem,
-                            secondaryLabel = "Internal",
-                            onSecondary = onUseDefaultSystem,
+                            secondaryLabel = if (BuildConfig.STORAGE_ALL_FILES) null else "Internal",
+                            onSecondary = if (BuildConfig.STORAGE_ALL_FILES) null else onUseDefaultSystem,
                         )
                     }
                     item {
@@ -1327,11 +1332,12 @@ object SetupImpl {
                         .size(width = maxWidth * 0.50f, height = maxHeight * 0.032f),
                 )
                 SetupMiniButton(
-                    text = "Internal",
+                    // github: one chooser entry point; play: the Internal shortcut.
+                    text = if (BuildConfig.STORAGE_ALL_FILES) "Choose" else "Internal",
                     modifier = Modifier
                         .offset(x = maxWidth * 0.68f, y = maxHeight * 0.252f)
                         .size(width = maxWidth * 0.20f, height = maxHeight * 0.038f),
-                    onClick = onUseDefaultSystem,
+                    onClick = if (BuildConfig.STORAGE_ALL_FILES) onPickSystem else onUseDefaultSystem,
                 )
                 // App-data error (e.g. "No SD card detected") — rendered HERE so a
                 // failed SD-Card tap is visible. Previously systemDirError only

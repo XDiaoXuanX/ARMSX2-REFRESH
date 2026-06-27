@@ -74,8 +74,16 @@ fun TouchControlsOverlay() {
     // Auto-apply the per-game touch profile when a game boots (serial becomes
     // known). Placed before the early-returns below so it fires regardless of
     // overlay visibility; keyed on the serial so it only re-applies on a change.
-    val gameSerial = InGameOverlay.currentSerial.value
-    LaunchedEffect(gameSerial) { TouchControls.applyForSerial(gameSerial) }
+    // Prefer the launch-time serial (Main.currentGame is set in launchGame BEFORE
+    // the VM starts) so the per-game profile applies from the first frame, not only
+    // after the pause overlay opens (which is what populated InGameOverlay.currentSerial).
+    // Re-key on eState so it re-applies on the STOPPED->RUNNING transition.
+    val gameSerial = Main.currentGame.value?.serial?.takeIf { it.isNotEmpty() }
+        ?: InGameOverlay.currentSerial.value
+    LaunchedEffect(gameSerial, Main.eState.value) {
+        if (Main.eState.value == EmuState.RUNNING || Main.eState.value == EmuState.PAUSED)
+            TouchControls.applyForSerial(gameSerial)
+    }
     val running = Main.eState.value == EmuState.RUNNING ||
                   Main.eState.value == EmuState.PAUSED
     if (!running) return
@@ -983,7 +991,13 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
                 TouchControls.discardEdits()
                 TouchControls.exitEditMode()
             }
-            ToolbarChip("Reset") { TouchControls.resetActiveToDefault() }
+            ToolbarChip("Reset") {
+                TouchControls.resetActiveToDefault()
+                TouchControls.clearGameLayout(
+                    Main.currentGame.value?.serial?.takeIf { it.isNotEmpty() }
+                        ?: InGameOverlay.currentSerial.value
+                )
+            }
             ToolbarChip("Profiles") { TouchControls.profileDialogOpen.value = true }
             ToolbarChip(if (TouchControls.faceMultiTouch.value) "Multi-Touch On" else "Multi-Touch Off") {
                 TouchControls.setFaceMultiTouch(!TouchControls.faceMultiTouch.value)

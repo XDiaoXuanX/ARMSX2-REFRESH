@@ -71,6 +71,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -86,6 +88,7 @@ import com.armsx2.EmuState
 import com.armsx2.FilenameParser
 import com.armsx2.CoverArtStyle
 import com.armsx2.GameInfo
+import com.armsx2.LibraryTitles
 import com.armsx2.GamePlatform
 import com.armsx2.Main
 import kr.co.iefriends.pcsx2.NativeApp
@@ -113,6 +116,11 @@ private val GAME_EXTENSIONS = setOf(
  *  "one game per folder" / "by-letter" organisation, capped so a pathological
  *  tree (or a SAF mount that loops) can't make the scan run away. */
 private const val MAX_SCAN_DEPTH = 12
+
+// Display font for the under-cover game titles: Bebas Neue (SIL Open Font
+// License). All-caps + condensed, so long titles fit; OFL is fork-safe and
+// redistributable, unlike the earlier commercial font.
+private val TitleFont = FontFamily(Font(R.font.bebas_neue))
 
 object GamesList {
     private const val KEY_LIBRARY_BACKGROUND = "library.background.path"
@@ -158,10 +166,11 @@ object GamesList {
     private enum class Zone { TOOLBAR, GRID, RAIL }
     private val controllerZone = mutableStateOf(Zone.GRID)
     private val controllerToolbarIndex = mutableStateOf(0)
-    // The left rail holds an info button (top) and the gear (bottom). On small
-    // screens the old help text was tall enough to push the gear off-screen, so
-    // it now lives behind this button as its own screen. 0 = info, 1 = gear.
-    private val railSelection = mutableStateOf(1)
+    // The left rail holds an info button (top), an "Aa" titles toggle (middle),
+    // and the gear (bottom). On small screens the old help text was tall enough
+    // to push the gear off-screen, so it now lives behind the info button as its
+    // own screen. 0 = info, 1 = titles toggle, 2 = gear.
+    private val railSelection = mutableStateOf(2)
     private val infoDialogOpen = mutableStateOf(false)
     // Toolbar actions, published from HeaderRow composition so they capture the
     // live ActivityResult launchers / context. Label + click action, in order.
@@ -191,9 +200,9 @@ object GamesList {
                 return true
             }
             Zone.RAIL -> {
-                // Info button (top) + gear (bottom) live on the rail. Up/down
-                // switch between them; right returns to the grid.
-                if (dy != 0) railSelection.value = (railSelection.value + if (dy < 0) -1 else 1).coerceIn(0, 1)
+                // Info (top) + titles toggle (middle) + gear (bottom) live on the
+                // rail. Up/down move between them; right returns to the grid.
+                if (dy != 0) railSelection.value = (railSelection.value + if (dy < 0) -1 else 1).coerceIn(0, 2)
                 if (dx > 0) controllerZone.value = Zone.GRID
                 return true
             }
@@ -205,7 +214,7 @@ object GamesList {
             // No games yet — up reaches the toolbar, left reaches the gear, so
             // the controller can scan / open setup on a fresh install.
             if (dy < 0) controllerZone.value = Zone.TOOLBAR
-            else if (dx < 0) { railSelection.value = 1; controllerZone.value = Zone.RAIL }
+            else if (dx < 0) { railSelection.value = 2; controllerZone.value = Zone.RAIL }
             return true
         }
 
@@ -221,7 +230,7 @@ object GamesList {
         } else if (dx != 0) {
             if (dx < 0 && current.columnIndex == 0) {
                 // Left off the first cover of any shelf → the gear on the rail.
-                railSelection.value = 1
+                railSelection.value = 2
                 controllerZone.value = Zone.RAIL
                 return true
             }
@@ -238,8 +247,11 @@ object GamesList {
             Zone.TOOLBAR ->
                 controllerToolbarActions.getOrNull(controllerToolbarIndex.value)?.second?.invoke()
             Zone.RAIL ->
-                if (railSelection.value == 0) infoDialogOpen.value = true
-                else InGameOverlay.openGlobalSettings()
+                when (railSelection.value) {
+                    0 -> infoDialogOpen.value = true
+                    1 -> LibraryTitles.set(!LibraryTitles.show.value)
+                    else -> InGameOverlay.openGlobalSettings()
+                }
             Zone.GRID -> {
                 val rows = controllerRows.filter { it.games.isNotEmpty() }
                 if (rows.isNotEmpty()) launchGame(controllerSelectedPosition(rows).game)
@@ -608,7 +620,12 @@ object GamesList {
                             coverWidth = if (landscape) 92.dp else 98.dp,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(if (landscape) 220.dp else 194.dp),
+                                // Grow the shelf when titles are on so the 2-line
+                                // label + version tag below the cover isn't clipped.
+                                .height(
+                                    (if (landscape) 220.dp else 194.dp) +
+                                        if (LibraryTitles.show.value) 44.dp else 0.dp,
+                                ),
                     )
                 }
             } else {
@@ -638,7 +655,12 @@ object GamesList {
                         coverWidth = if (landscape) 86.dp else 98.dp,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(if (landscape) 204.dp else 230.dp),
+                            // Grow the shelf when titles are on so the 2-line
+                            // label + version tag below the cover isn't clipped.
+                            .height(
+                                (if (landscape) 204.dp else 230.dp) +
+                                    if (LibraryTitles.show.value) 44.dp else 0.dp,
+                            ),
                     )
                 }
             }
@@ -788,15 +810,23 @@ object GamesList {
                 verticalArrangement = Arrangement.SpaceBetween,
             ) {
                 NavButton(NavKind.Library, "LIBRARY", active = true) {}
-                InfoButton(
-                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 0,
-                ) { infoDialogOpen.value = true }
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    InfoButton(
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 0,
+                    ) { infoDialogOpen.value = true }
+                    TitlesToggleButton(
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 1,
+                    )
+                }
                 Box(Modifier.offset(y = 12.dp)) {
                     NavButton(
                         NavKind.Settings,
                         null,
                         active = false,
-                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 1,
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 2,
                     ) { InGameOverlay.openGlobalSettings() }
                 }
             }
@@ -815,14 +845,22 @@ object GamesList {
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 NavButton(NavKind.Library, "LIBRARY", active = true) {}
-                InfoButton(
-                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 0,
-                ) { infoDialogOpen.value = true }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    InfoButton(
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 0,
+                    ) { infoDialogOpen.value = true }
+                    TitlesToggleButton(
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 1,
+                    )
+                }
                 NavButton(
                     NavKind.Settings,
                     null,
                     active = false,
-                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 1,
+                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 2,
                 ) { InGameOverlay.openGlobalSettings() }
             }
         }
@@ -910,6 +948,36 @@ object GamesList {
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
+            )
+        }
+    }
+
+    /** Left-rail toggle (under the info button) for showing game titles under
+     *  the shelf covers. "Aa" lights up when on; tap flips [LibraryTitles] live.
+     *  [highlighted] draws the controller-focus ring (independent of on/off). */
+    @Composable
+    private fun TitlesToggleButton(highlighted: Boolean = false) {
+        val on = LibraryTitles.show.value
+        val glow = Color(0xFF3DA5FF)
+        Box(
+            Modifier
+                .size(42.dp)
+                .then(
+                    if (highlighted)
+                        Modifier.shadow(10.dp, CircleShape, ambientColor = glow, spotColor = glow)
+                    else Modifier
+                )
+                .clip(CircleShape)
+                .background(if (on || highlighted) glow.copy(alpha = 0.30f) else Color.White.copy(alpha = 0.10f))
+                .then(if (on || highlighted) Modifier.border(1.dp, glow, CircleShape) else Modifier)
+                .clickable { LibraryTitles.set(!on) },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "Aa",
+                color = if (on || highlighted) Color.White else Color.White.copy(alpha = 0.55f),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
             )
         }
     }
@@ -1334,6 +1402,39 @@ object GamesList {
                         .fillMaxWidth()
                         .padding(top = 6.dp),
                 )
+            }
+            // Optional game title under the cover, toggled from the left rail.
+            if (LibraryTitles.show.value) {
+                Text(
+                    game.title,
+                    color = Color.White.copy(alpha = 0.9f),
+                    fontFamily = TitleFont,
+                    fontSize = 12.sp,
+                    lineHeight = 13.sp,
+                    maxLines = 2,
+                    textAlign = TextAlign.Center,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 2.dp, end = 2.dp, top = 3.dp),
+                )
+                // Version/edition tag (disc version from the filename, else serial)
+                // so two copies of the same game are distinguishable.
+                game.versionTag?.let { tag ->
+                    Text(
+                        tag,
+                        color = Color.White.copy(alpha = 0.45f),
+                        fontFamily = TitleFont,
+                        fontSize = 10.sp,
+                        lineHeight = 11.sp,
+                        maxLines = 1,
+                        textAlign = TextAlign.Center,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 2.dp, end = 2.dp),
+                    )
+                }
             }
         }
     }

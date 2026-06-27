@@ -43,8 +43,10 @@ object ControllerMappings {
     // stick = D-pad). Global, like the button bindings; persisted in Main.prefs.
     enum class StickMode(val id: String, val label: String) {
         ANALOG("analog", "Analog"),
-        DPAD("dpad", "D-Pad"),
         FACE("face", "Face"),
+        // Per-direction binding: each direction sends any PS2 button (incl. d-pad),
+        // captured by "Press a button". This supersedes the old fixed D-Pad preset.
+        CUSTOM("custom", "Custom"),
     }
 
     private const val KEY_LSTICK = "pad.lstick.mode"
@@ -59,6 +61,79 @@ object ControllerMappings {
     fun rightStickMode(): StickMode = stickModeFor(KEY_RSTICK)
     fun setLeftStickMode(m: StickMode) = Main.prefs.edit().putString(KEY_LSTICK, m.id).apply()
     fun setRightStickMode(m: StickMode) = Main.prefs.edit().putString(KEY_RSTICK, m.id).apply()
+    /** Mode for the left (true) or right (false) stick — used by the dispatcher. */
+    fun stickModeFor(left: Boolean): StickMode = if (left) leftStickMode() else rightStickMode()
+
+    // Make the physical D-pad drive the LEFT analog stick (full deflection) so it
+    // works in games that only read the analog stick. While on, the D-pad no
+    // longer sends digital d-pad presses in-game.
+    private const val KEY_DPAD_AS_LSTICK = "pad.dpadAsLeftStick"
+    fun dpadAsLeftStick(): Boolean = Main.prefs.getBoolean(KEY_DPAD_AS_LSTICK, false)
+    fun setDpadAsLeftStick(on: Boolean) = Main.prefs.edit().putBoolean(KEY_DPAD_AS_LSTICK, on).apply()
+
+    // ---- Custom per-direction stick→button binding (StickMode.CUSTOM) ----
+
+    /** The four directions of a stick, each independently bindable in CUSTOM mode. */
+    enum class StickDir(val id: String) { UP("up"), DOWN("down"), LEFT("left"), RIGHT("right") }
+
+    /** A PS2 button a stick direction may map to (digital setPadButton codes from
+     *  native-lib.cpp). [label] drives the picker UI. */
+    data class PsButton(val code: Int, val label: String)
+    val stickTargets = listOf(
+        PsButton(19, "D-Pad Up"), PsButton(20, "D-Pad Down"),
+        PsButton(21, "D-Pad Left"), PsButton(22, "D-Pad Right"),
+        PsButton(96, "Cross"), PsButton(97, "Circle"),
+        PsButton(99, "Square"), PsButton(100, "Triangle"),
+        PsButton(102, "L1"), PsButton(103, "R1"),
+        PsButton(104, "L2"), PsButton(105, "R2"),
+        PsButton(106, "L3"), PsButton(107, "R3"),
+        PsButton(108, "Start"), PsButton(109, "Select"),
+        PsButton(200, "Analog (toggle)"),
+    )
+    fun stickTargetLabel(code: Int): String =
+        stickTargets.firstOrNull { it.code == code }?.label ?: "Code $code"
+
+    // Default per-direction code = the stick's native analog code, so a fresh
+    // CUSTOM stick behaves exactly like ANALOG until the user rebinds a direction.
+    private fun defaultCustomCode(left: Boolean, dir: StickDir): Int = when {
+        left && dir == StickDir.UP -> 110
+        left && dir == StickDir.DOWN -> 112
+        left && dir == StickDir.LEFT -> 113
+        left && dir == StickDir.RIGHT -> 111
+        !left && dir == StickDir.UP -> 120
+        !left && dir == StickDir.DOWN -> 122
+        !left && dir == StickDir.LEFT -> 123
+        else -> 121 // right stick, RIGHT
+    }
+    private fun customKey(left: Boolean, dir: StickDir) =
+        "pad.${if (left) "lstick" else "rstick"}.${dir.id}.code"
+    fun customStickCode(left: Boolean, dir: StickDir): Int =
+        Main.prefs.getInt(customKey(left, dir), defaultCustomCode(left, dir))
+    fun setCustomStickCode(left: Boolean, dir: StickDir, code: Int) =
+        Main.prefs.edit().putInt(customKey(left, dir), code).apply()
+
+    /** Active CUSTOM stick-direction capture target, or null. (left, dir). When
+     *  non-null the Pad tab is waiting for a physical button to bind to this
+     *  direction — same model as [captureHotkey] / the per-Action [padCapturing]
+     *  flow. Observed by the row UI for the yellow "Press a button..." text. */
+    val captureStickDir = mutableStateOf<Pair<Boolean, StickDir>?>(null)
+
+    /** Bumped after a stick-dir (re)bind so the observing row recomposes. */
+    val stickBindTick = mutableStateOf(0)
+
+    /** Resolve a captured physical keycode to the PS2 setPadButton code it drives,
+     *  or null if that physical button isn't bound to any pad Action. Same
+     *  physical->target lookup the gameplay path uses, e.g. physical-Cross -> 96.
+     *  Reusing it means "stick Up = Cross" needs no new table. */
+    fun stickCodeForPhysical(physicalKeyCode: Int): Int? = targetForPhysical(physicalKeyCode)
+
+    fun beginStickCapture(left: Boolean, dir: StickDir) { captureStickDir.value = left to dir }
+    fun endStickCapture() { captureStickDir.value = null; stickBindTick.value++ }
+
+    /** Clear a direction back to its analog default (the Reset affordance). */
+    fun resetStickCode(left: Boolean, dir: StickDir) {
+        Main.prefs.edit().remove(customKey(left, dir)).apply(); stickBindTick.value++
+    }
 
     private const val KEY_PREFIX = "pad.map."
 
@@ -114,6 +189,7 @@ object ControllerMappings {
         RES_DOWN("pad.resdown.keycode", "Decrease Resolution"),
         ACHIEVEMENTS("pad.achievements.keycode", "Open Achievements"),
         CLOSE_GAME("pad.closegame.keycode", "Close Game"),
+        QUIT_APP("pad.quitapp.keycode", "Close Game & Quit"),
         // Hold-type binding: while the bound button is held, pressure-capable PS2
         // buttons report a soft (~50%) press. Handled as a HOLD in
         // Main.dispatchKeyEvent (sets TouchControls.pressureModifierHeld), not as a

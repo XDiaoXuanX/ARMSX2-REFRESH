@@ -701,7 +701,9 @@ object InGameOverlay {
     }
 
     private fun openSaveStates() {
-        enterState(if (hardcoreOn.value) State.HardcoreSaveStateBlocked else State.SaveStateSlots)
+        // Saving IS allowed in RetroAchievements hardcore (matches desktop PCSX2);
+        // only loading is blocked — see openLoadStates + native LoadStateFromSlot.
+        enterState(State.SaveStateSlots)
     }
 
     private fun openLoadStates() {
@@ -1843,7 +1845,7 @@ object InGameOverlay {
 	                BubbleButton(
 	                    "Save State",
 	                    LineAwesomeIcons.SaveSolid,
-	                    dim = hardcoreOn.value,
+	                    // Saving is allowed in hardcore — only loading is blocked.
 	                    selected = playSelection.value == 1,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(1) }
@@ -2140,7 +2142,7 @@ object InGameOverlay {
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                "Save states and load states are blocked while RetroAchievements Hardcore mode is active. Disable Hardcore from the Achievements panel to use them.",
+                "Loading save states is blocked while RetroAchievements Hardcore mode is active (saving is still allowed). Disable Hardcore from the Achievements panel to load.",
                 color = Color(0xFFEEDDDD),
                 fontSize = 11.sp,
             )
@@ -2199,7 +2201,7 @@ object InGameOverlay {
                 )
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    "Hardcore mode disables save states, load states, and cheats. Achievements unlocked while hardcore is active are recorded as such on RetroAchievements.",
+                    "Hardcore mode disables loading save states and cheats (you can still save, and widescreen/interlace patches still apply). Achievements unlocked while hardcore is active are recorded as such on RetroAchievements.",
                     color = Color(0xFFDDDDEE),
                     fontSize = 13.sp,
                 )

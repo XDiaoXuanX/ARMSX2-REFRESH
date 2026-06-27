@@ -20,6 +20,22 @@ object CoverArtStyle {
 }
 
 /**
+ * Library toggle: show the game title under each cover on the shelves. Off by
+ * default — the cover already carries the title and a label under every card
+ * crowds the shelf UI — but exposed as a quick toggle on the library's left
+ * rail for users who keep multiple versions of a game or browse by name.
+ */
+object LibraryTitles {
+    private const val KEY = "library.showTitles"
+    val show = mutableStateOf(false)
+    fun load() { show.value = Main.prefs.getBoolean(KEY, false) }
+    fun set(value: Boolean) {
+        show.value = value
+        Main.prefs.edit().putBoolean(KEY, value).apply()
+    }
+}
+
+/**
  * One row in the games-list screen. Today the title/serial come from
  * filename parsing — game titles like "Final Fantasy X (USA) [SLUS-20312]"
  * are common dump conventions. compatibility is left at 0 (no stars filled)
@@ -71,6 +87,14 @@ data class GameInfo(
      *  Rendered ahead of the title so the region is always visible even when a
      *  long name wraps/ellipsizes. */
     val regionFlag: String? get() = region?.let { regionFlagFor(it) }
+
+    /** A short version/edition tag shown under the title so two copies of the
+     *  same game can be told apart: a disc-version token parsed from the dump
+     *  filename (e.g. "v3.00") when present, otherwise the serial. */
+    val versionTag: String? get() {
+        val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')
+        return name?.let { FilenameParser.versionTokenOf(it) } ?: serial
+    }
 }
 
 /** Map a PS1/PS2 serial prefix to a region label. */
@@ -106,6 +130,15 @@ fun regionFlagFor(region: String): String? = when (region) {
 object FilenameParser {
     private val serialRegex = Regex("""([A-Za-z]{4})[\s_-]?(\d{3})\.?(\d{2})""")
     private val tagsRegex = Regex("""[\[(].*?[\])]""")
+    // Disc-version token (e.g. "v3.00", "v 1.0"). The 'v' prefix is required so
+    // release years ("(2004)") and unrelated x.y numbers aren't mistaken for it.
+    private val versionRegex = Regex("""(?i)\bv\.?\s?(\d{1,2}(?:\.\d{1,2}){1,2})\b""")
+
+    /** A disc-version token like "v3.00" parsed from a filename, or null. Lets
+     *  two copies of the same game (same serial, different disc revision) be told
+     *  apart when the dump filename carries the version. */
+    fun versionTokenOf(filename: String): String? =
+        versionRegex.find(filename)?.let { "v" + it.groupValues[1] }
     private val whitespaceRegex = Regex("""\s+""")
     private val nonWordRegex = Regex("""[^a-z0-9]+""")
 

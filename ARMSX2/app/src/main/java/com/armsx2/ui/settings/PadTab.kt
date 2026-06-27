@@ -45,17 +45,23 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
     val refreshToken = remember { mutableStateOf(0) }
     val focusRequester = remember { FocusRequester() }
 
-    LaunchedEffect(capture.value) {
+    val stickCapture = ControllerMappings.captureStickDir
+    LaunchedEffect(capture.value, stickCapture.value) {
         // Tell Main.dispatchKeyEvent to stop intercepting controller buttons for
         // overlay nav while we're capturing, so B/A/Y/etc. reach onPreviewKeyEvent
-        // and bind instead of (e.g.) exiting the menu.
-        ControllerMappings.padCapturing.value = capture.value != null
-        if (capture.value != null)
+        // and bind instead of (e.g.) exiting the menu. Either an Action capture or
+        // a stick-direction capture arms the bypass.
+        val capturingNow = capture.value != null || stickCapture.value != null
+        ControllerMappings.padCapturing.value = capturingNow
+        if (capturingNow)
             focusRequester.requestFocus()
     }
     // Safety: clear the bypass flag if the tab leaves composition mid-capture.
     DisposableEffect(Unit) {
-        onDispose { ControllerMappings.padCapturing.value = false }
+        onDispose {
+            ControllerMappings.padCapturing.value = false
+            ControllerMappings.captureStickDir.value = null
+        }
     }
 
     Column(
@@ -64,7 +70,28 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             .focusRequester(focusRequester)
             .focusable()
             .onPreviewKeyEvent { event ->
-                // Regular button capture only — the menu button is captured in
+                // Stick-direction CUSTOM capture: resolve the pressed physical
+                // button to the PS2 code it drives (same physical->target lookup
+                // as gameplay) and bind that direction. Shares this focusable and
+                // the padCapturing bypass with the per-Action capture below.
+                val sc = stickCapture.value
+                if (sc != null) {
+                    if (event.type != KeyEventType.KeyDown)
+                        return@onPreviewKeyEvent true
+                    val ncode = event.key.nativeKeyCode
+                    if (ncode == android.view.KeyEvent.KEYCODE_UNKNOWN)
+                        return@onPreviewKeyEvent true
+                    val ps2 = ControllerMappings.stickCodeForPhysical(ncode)
+                    if (ps2 != null) {
+                        ControllerMappings.setCustomStickCode(sc.first, sc.second, ps2)
+                        ControllerMappings.endStickCapture()
+                        refreshToken.value++
+                    }
+                    // If the pressed button isn't mapped to any pad Action, keep
+                    // waiting (swallow) rather than binding nothing.
+                    return@onPreviewKeyEvent true
+                }
+                // Regular button capture — the menu button is captured in
                 // Main.dispatchKeyEvent so it can grab BACK / back-paddle keys.
                 val action = capture.value ?: return@onPreviewKeyEvent false
                 if (event.type != KeyEventType.KeyDown)
@@ -96,23 +123,44 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 label = "Left Stick",
                 options = stickOpts,
                 selectedIndex = ControllerMappings.leftStickMode().ordinal,
-                description = "What the left analog stick sends: Analog (default), D-Pad, or Face buttons.",
+                description = "What the left analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
                 onChange = {
                     ControllerMappings.setLeftStickMode(ControllerMappings.StickMode.values()[it])
                     refreshToken.value++
                 },
             )
             SettingsDivider()
+            if (ControllerMappings.leftStickMode() == ControllerMappings.StickMode.CUSTOM) {
+                ControllerMappings.StickDir.values().forEach { dir ->
+                    StickDirPickerRow(leftStick = true, dir = dir, onChanged = { refreshToken.value++ })
+                    SettingsDivider()
+                }
+            }
             SegmentedRow(
                 label = "Right Stick",
                 options = stickOpts,
                 selectedIndex = ControllerMappings.rightStickMode().ordinal,
-                description = "What the right analog stick sends: Analog (default), D-Pad, or Face buttons.",
+                description = "What the right analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
                 onChange = {
                     ControllerMappings.setRightStickMode(ControllerMappings.StickMode.values()[it])
                     refreshToken.value++
                 },
             )
+            SettingsDivider()
+            if (ControllerMappings.rightStickMode() == ControllerMappings.StickMode.CUSTOM) {
+                ControllerMappings.StickDir.values().forEach { dir ->
+                    StickDirPickerRow(leftStick = false, dir = dir, onChanged = { refreshToken.value++ })
+                    SettingsDivider()
+                }
+            }
+            ToggleRow(
+                "D-pad acts as Left Stick",
+                ControllerMappings.dpadAsLeftStick(),
+                description = "Make the physical D-pad drive the left analog stick (full deflection) so it works in games that only read the analog stick. The D-pad stops sending digital presses while this is on.",
+            ) {
+                ControllerMappings.setDpadAsLeftStick(it)
+                refreshToken.value++
+            }
             SettingsDivider()
         }
         ControllerMappings.actions.forEach { action ->
@@ -160,6 +208,59 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             description = "On-screen touch buttons. Never = always hidden (for physical-controls devices — also hides the settings cog so nothing overlaps R1). 1–10s = auto-hide after that long without a touch. Auto = show on touch, hide when you use a controller.",
             valueFormatter = { when (it) { 0 -> "Never"; 11 -> "Auto"; else -> "${it}s" } },
             onChange = { TouchControls.setVisibilityMode(it) },
+        )
+    }
+}
+
+/** One CUSTOM-mode picker row: a stick direction on the left, its bound PS2
+ *  button on the right. Tap (or A) arms capture — the row shows yellow
+ *  "Press a button..." and the next physical controller button pressed is bound
+ *  to this direction (same capture UX as every other binding). D-pad-left clears
+ *  the binding back to its analog default. Shown only when the stick is CUSTOM. */
+@Composable
+private fun StickDirPickerRow(
+    leftStick: Boolean,
+    dir: ControllerMappings.StickDir,
+    onChanged: () -> Unit,
+) {
+    @Suppress("UNUSED_EXPRESSION")
+    ControllerMappings.stickBindTick.value // recompose after a bind/reset
+    val capturing = ControllerMappings.captureStickDir.value == (leftStick to dir)
+    val code = ControllerMappings.customStickCode(leftStick, dir)
+    fun arm() {
+        ControllerMappings.beginStickCapture(leftStick, dir)
+        onChanged()
+    }
+    fun clear() {
+        ControllerMappings.resetStickCode(leftStick, dir)
+        onChanged()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(30.dp)
+            .background(rowAura())
+            .clickable { arm() }
+            .controllerFocusable(
+                controllerId = "stickdir:${if (leftStick) "l" else "r"}:${dir.id}",
+                onConfirm = { arm() },
+                onLeft = { clear() },
+            )
+            .padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "    ${dir.id.replaceFirstChar { it.uppercase() }}",
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            if (capturing) "Press a button..." else ControllerMappings.stickTargetLabel(code),
+            color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
         )
     }
 }

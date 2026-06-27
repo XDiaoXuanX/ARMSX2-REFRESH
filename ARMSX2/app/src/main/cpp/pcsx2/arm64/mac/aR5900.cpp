@@ -23,6 +23,7 @@
 #include "VU.h"
 #include "VUmicro.h"
 #include "vtlb.h"
+#include "AndroidEEOpHist.h"
 
 #include "common/Assertions.h"
 #include "common/Console.h"
@@ -169,6 +170,12 @@ static bool eeRecNeedsReset = false;
 static std::atomic_bool eeRecExitRequested{false};
 static volatile u8 eeRecExitSignal = 0;
 static jmp_buf s_jmp_buf;
+// Landing pad for Cpu->CancelInstruction() raised by an interpreter single-step
+// (intExecuteOneInst) op — e.g. a MIPS trap (TGE/TNE/...) whose condition is met.
+// Distinct from s_jmp_buf: s_jmp_buf EXITS recExecute, this one re-dispatches so EE
+// execution continues. Mirrors the old arm64 backend's m_SetJmp_CancelInstruction
+// and the interpreter's intCancelInstruction (Interpreter.cpp).
+static jmp_buf s_cancel_jmp_buf;
 
 static void recResetRaw();
 static void recGenDispatchers();
@@ -350,6 +357,7 @@ enum : u32
 
 // Defined below (block-compile helpers) — used by recTranslateOp's COP2 inline path.
 static void recEmitInterpInline(u32 op);
+static void recEmitWritePc(u32 pc);
 static bool recTranslateOp(u32 op);
 
 // Macro-mode native COP2 transfer ops (defined after the M2 sync helpers) — used by
@@ -645,6 +653,10 @@ static void recConstApplyNativeEffects(u32 op, RecGprConstState& state)
 				case 0x1B: // DIVU
 					if (funct == 0x18 || funct == 0x19)
 						recConstSetUnknown(state, rd);
+					return;
+				case 0x0f: // SYNC writes no GPR
+				case 0x30: case 0x31: case 0x32:
+				case 0x33: case 0x34: case 0x36: // traps write no GPR
 					return;
 				default:
 					recConstSetUnknown(state, rd);
@@ -1819,6 +1831,10 @@ static void recCacheApplyNativeEffects(u32 op, RecGprCacheState& cache)
 					if (funct == 0x18 || funct == 0x19)
 						recCacheDiscardGuest(cache, rd);
 					return;
+				case 0x0f: // SYNC writes no GPR
+				case 0x30: case 0x31: case 0x32:
+				case 0x33: case 0x34: case 0x36: // traps write no GPR
+					return;
 				default:
 					recCacheDiscardGuest(cache, rd);
 					return;
@@ -2019,6 +2035,69 @@ static bool recTranslateMMI3(u32 sa, u32 rd, u32 rs, u32 rt)
 	}
 }
 
+// --------------------------------------------------------------------------------------
+//  MIPS trap opcodes — native codegen. Skip path = compare + branch-over; only the rare
+//  trap-taken path exits to the interpreter (which raises via trap()->cpuException(0x34)
+//  ->CancelInstruction->longjmp). Reached only from recTranslateOp, i.e. AFTER
+//  recCacheFlushAll, so cpuRegs already holds every GPR. The raise path MUST also commit
+//  cpuRegs.pc = (this op)+4 so trap()->cpuException derives the correct EPC (trap() does
+//  pc-=4; EPC=cpuRegs.pc). The JIT does not advance cpuRegs.pc per straight-line op (only
+//  at block boundaries), unlike intExecuteOneInst, so we write it here.
+// --------------------------------------------------------------------------------------
+#ifndef ARMSX2_NATIVE_EE_TRAP
+#define ARMSX2_NATIVE_EE_TRAP 1
+#endif
+
+// Guest address of the op currently being emitted, stashed by the emit loop so the trap
+// raise path can commit cpuRegs.pc = s_currentEmitPc + 4. Mirrors s_cop2RawCycles. Lives
+// outside the gate so the emit-loop stash always compiles.
+static u32 s_currentEmitPc = 0;
+
+#if ARMSX2_NATIVE_EE_TRAP
+// Emit: if (trap condition) { cpuRegs.pc = pc+4; interpret(op) -> longjmp } else fall
+// through. trap_skip_cond is the INVERSE of the interpreter's trap-if test, so we branch
+// OVER the raise block when the trap is NOT taken — the common path writes nothing.
+// Compare temps: RSCRATCHADDR(x17)=lhs, RXVIXLSCRATCH(x16)=rhs (both caller-saved, dead
+// between ops). recEmitWritePc/recEmitInterpInline also use x17, but run AFTER the Cmp+B.
+static void recEmitTrapReg(u32 op, u32 rs, u32 rt, a64::Condition trap_skip_cond)
+{
+#if ARMSX2_ANDROID_EE_OPHIST
+	AndroidEEOpHist::NoteTrapCompiled();
+#endif
+	armAsm->Ldr(RSCRATCHADDR, a64::MemOperand(RESTATEPTR, EE_GPR_OFFSET(rs)));      // GPR[rs] dword0
+	if (rt == 0)
+		armAsm->Cmp(RSCRATCHADDR, a64::xzr);                                        // GPR[rt]==0
+	else
+	{
+		armAsm->Ldr(RXVIXLSCRATCH, a64::MemOperand(RESTATEPTR, EE_GPR_OFFSET(rt))); // GPR[rt] dword0
+		armAsm->Cmp(RSCRATCHADDR, RXVIXLSCRATCH);
+	}
+	a64::Label skip;
+	armAsm->B(&skip, trap_skip_cond);
+	recEmitWritePc(s_currentEmitPc + 4);  // EPC base: trap()->cpuException reads cpuRegs.pc
+	recEmitInterpInline(op);              // trap taken: handler longjmps; cpuRegs current
+	armAsm->Bind(&skip);
+}
+
+static void recEmitTrapImm(u32 op, u32 rs, s32 imm, a64::Condition trap_skip_cond)
+{
+#if ARMSX2_ANDROID_EE_OPHIST
+	AndroidEEOpHist::NoteTrapCompiled();
+#endif
+	armAsm->Ldr(RSCRATCHADDR, a64::MemOperand(RESTATEPTR, EE_GPR_OFFSET(rs)));      // GPR[rs] dword0
+	// _Imm_ is the 16-bit sign-extended immediate; compare the full s64. The unsigned
+	// forms (TGEIU/TLTIU) compare the same bit pattern as (u64)_Imm_, so the move is
+	// identical — only the branch condition differs.
+	armAsm->Mov(RXVIXLSCRATCH, static_cast<u64>(static_cast<s64>(imm)));
+	armAsm->Cmp(RSCRATCHADDR, RXVIXLSCRATCH);
+	a64::Label skip;
+	armAsm->B(&skip, trap_skip_cond);
+	recEmitWritePc(s_currentEmitPc + 4);
+	recEmitInterpInline(op);
+	armAsm->Bind(&skip);
+}
+#endif
+
 static bool recTranslateOp(u32 op)
 {
 	const u32 opcode = op >> 26;
@@ -2082,6 +2161,21 @@ static bool recTranslateOp(u32 op)
 				case 0x19: armEmitMULTU(rd, rs, rt); return true;
 				case 0x1A: armEmitDIV(rs, rt); return true;
 				case 0x1B: armEmitDIVU(rs, rt); return true;
+				// SYNC (funct 0x0f): a pipeline/memory barrier whose interpreter body
+				// is EMPTY in this emulator (no EE pipeline/cache modelled — see
+				// R5900OpcodeImpl SYNC()). Emit nothing instead of block-terminating
+				// and single-stepping it. By far the dominant EE fallback op in real
+				// games (The Getaway: ~59% of all single-stepped ops were SYNC).
+				case 0x0f: return true;
+#if ARMSX2_NATIVE_EE_TRAP
+				// Traps: branch over the raise block on the INVERSE of the trap-if test.
+				case 0x30: recEmitTrapReg(op, rs, rt, a64::lt); return true; // TGE  (signed >=)
+				case 0x31: recEmitTrapReg(op, rs, rt, a64::lo); return true; // TGEU (unsigned >=)
+				case 0x32: recEmitTrapReg(op, rs, rt, a64::ge); return true; // TLT  (signed <)
+				case 0x33: recEmitTrapReg(op, rs, rt, a64::hs); return true; // TLTU (unsigned <)
+				case 0x34: recEmitTrapReg(op, rs, rt, a64::ne); return true; // TEQ
+				case 0x36: recEmitTrapReg(op, rs, rt, a64::eq); return true; // TNE
+#endif
 				default:   return false;
 			}
 
@@ -2161,6 +2255,25 @@ static bool recTranslateOp(u32 op)
 				default: return false;
 			}
 
+		// REGIMM — rt-field selector. Only the trap-immediates are native here; the
+		// BLTZ/BGEZ/... branches are emitted by the branch path (block-terminating) and
+		// never reach recTranslateOp. Unhandled rt values fall through to false.
+		case 0x01:
+#if ARMSX2_NATIVE_EE_TRAP
+			switch (rt)
+			{
+				case 0x08: recEmitTrapImm(op, rs, imm, a64::lt); return true; // TGEI  (signed >=)
+				case 0x09: recEmitTrapImm(op, rs, imm, a64::lo); return true; // TGEIU (unsigned >=)
+				case 0x0A: recEmitTrapImm(op, rs, imm, a64::ge); return true; // TLTI  (signed <)
+				case 0x0B: recEmitTrapImm(op, rs, imm, a64::hs); return true; // TLTIU (unsigned <)
+				case 0x0C: recEmitTrapImm(op, rs, imm, a64::ne); return true; // TEQI
+				case 0x0E: recEmitTrapImm(op, rs, imm, a64::eq); return true; // TNEI
+				default:   return false;
+			}
+#else
+			return false;
+#endif
+
 		// Immediate arithmetic (Phase 3.1)
 		case 0x08: armEmitADDI(rt, rs, imm); return true;
 		case 0x09: armEmitADDIU(rt, rs, imm); return true;
@@ -2199,6 +2312,15 @@ static bool recTranslateOp(u32 op)
 		case 0x1B: armEmitLDR(rt, rs, imm); return true;
 		case 0x2C: armEmitSDL(rt, rs, imm); return true;
 		case 0x2D: armEmitSDR(rt, rs, imm); return true;
+
+		// CACHE (0x2f): EE data-cache hint/maintenance. It DOES do real work in the
+		// interpreter (Cache.cpp CACHE(): line invalidate/writeback, writes CP0.TagLo)
+		// so it can't be a no-op — but it reads rs, writes no GPR, never touches
+		// cpuRegs.pc, and raises no exception, so inline-interpret it in-block exactly
+		// like the COP0 ops below instead of block-terminating + single-stepping. recTranslateOp
+		// runs after recCacheFlushAll, so cpuRegs holds the current rs for the handler.
+		// 2nd-most-dominant EE fallback op (The Getaway: ~39% of single-stepped ops).
+		case 0x2f: recEmitInterpInline(op); return true;
 
 		// 128-bit quadword load/store (16-byte aligned).
 		case OP_LQ: armEmitLoadQuad(rt, rs, imm); return true;
@@ -2742,7 +2864,13 @@ static void recEmitInterpInline(u32 op)
 {
 	armAsm->Mov(RSCRATCHADDR.W(), op);
 	armAsm->Str(RSCRATCHADDR.W(), a64::MemOperand(RESTATEPTR, EE_CODE_OFFSET));
+#if ARMSX2_ANDROID_EE_OPHIST
+	// Route every in-block interp call through the counting thunk so the INLINE
+	// fallback profile (COP2/VU0 etc.) is captured. It reads cpuRegs.code (set above).
+	armEmitCall(reinterpret_cast<const void*>(&recOphistInlineThunk));
+#else
 	armEmitCall(reinterpret_cast<const void*>(::R5900::GetInstruction(op).interpret));
+#endif
 }
 
 // Compile one straight-line or delay-slot instruction: const-folded/native generator
@@ -3778,6 +3906,7 @@ static void recRecompile(u32 startpc)
 
 			const u32 delay_op = memRead32(pc + 4);
 			raw_cycles += eeOpCycles(delay_op);
+			s_currentEmitPc = pc + 4; // delay-slot op address (for a native trap's raise pc)
 			recEmitOp(delay_op, const_state, cache_state); // delay slot — must not write cpuRegs.pc
 			endpc = pc + 8;
 
@@ -3824,6 +3953,7 @@ static void recRecompile(u32 startpc)
 
 			const u32 delay_op = memRead32(pc + 4);
 			raw_cycles += eeOpCycles(delay_op);
+			s_currentEmitPc = pc + 4; // delay-slot op address (for a native trap's raise pc)
 			recEmitOp(delay_op, const_state, cache_state);
 			recCacheFlushAll(cache_state);
 			recCacheKillAll(cache_state);
@@ -3865,6 +3995,8 @@ static void recRecompile(u32 startpc)
 				raw_cycles = 0;
 		}
 
+		// Stash this op's guest address for the native trap raise path (cpuRegs.pc = pc+4).
+		s_currentEmitPc = pc;
 		// Straight-line op we can codegen? (Generators decode from `op` directly;
 		// they never read cpuRegs.code, so nothing to set here at compile time.)
 		if (recTranslateOpOptimized(op, const_state, cache_state))
@@ -3989,8 +4121,30 @@ static void recExecute()
 	}
 
 	eeRecExecuting = true;
+
+	// Cancel-instruction landing pad. A trap op single-stepped via intExecuteOneInst
+	// calls Cpu->CancelInstruction() -> recCancelInstruction() -> longjmp(s_cancel_jmp_buf).
+	// We land here (NOT the s_jmp_buf exit path), then re-dispatch into the recompiled
+	// code from cpuRegs.pc, which cpuException already set to the exception vector. The
+	// faulting interp op never reached intUpdateCPUCycles, so charge a small fixed cycle
+	// (matching the old backend's +8) to guarantee forward progress and let any due event
+	// fire before re-entry. Honor a pending exit request so Stop/Shutdown still unwinds.
+	if (setjmp(s_cancel_jmp_buf) != 0)
+	{
+		cpuRegs.cycle += 8;
+		if (static_cast<s64>(cpuRegs.cycle - cpuRegs.nextEventCycle) >= 0)
+			_cpuEventTest_Shared();
+		if (eeRecExitRequested.load(std::memory_order_acquire))
+		{
+			eeRecExitRequested.store(false, std::memory_order_release);
+			eeRecExitSignal = 0;
+			eeRecExecuting = false;
+			return;
+		}
+	}
+
 	reinterpret_cast<void (*)()>(reinterpret_cast<uintptr_t>(EnterRecompiledCode))();
-	// EnterRecompiledCode never returns; the only way out is the fastjmp above.
+	// EnterRecompiledCode never returns; the only way out is one of the longjmps above.
 }
 
 static void recSafeExitExecution()
@@ -4004,7 +4158,14 @@ static void recSafeExitExecution()
 
 static void recCancelInstruction()
 {
-	pxFailRel("recCancelInstruction() called, this should never happen!");
+	// Raised when an interpreter single-step op (intExecuteOneInst) aborts the
+	// in-flight guest instruction — the only case is a MIPS trap whose condition is
+	// met (R5900OpcodeImpl.cpp trap() -> cpuException(0x34) -> Cpu->CancelInstruction()).
+	// cpuException has already rewritten cpuRegs.pc to the exception vector; we must
+	// NOT exit recExecute (that would stop the EE), only unwind the in-flight interp
+	// call and re-dispatch from the new PC. This matches the old arm64 backend and the
+	// interpreter's intCancelInstruction, both of which longjmp back into their loop.
+	longjmp(s_cancel_jmp_buf, 1);
 }
 
 static void recClear(u32 addr, u32 size)
