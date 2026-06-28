@@ -245,11 +245,21 @@ class Main: ComponentActivity() {
 
         /** Directory holding the configured BIOS file, used by
          *  NativeApp.initializeOnce to point EmuFolders::Bios at the real
-         *  BIOS location (which tracks the chosen data root). Null when no
-         *  BIOS is configured yet — initializeOnce then falls back to
-         *  <dataRoot>/bios. */
+         *  BIOS location. Null when no BIOS is configured yet —
+         *  initializeOnce then falls back to [internalBiosDir]. */
         fun biosFolderPosix(): String? =
             bios.value?.takeIf { it.isNotEmpty() }?.let { File(it).parent }
+
+        /** App-private BIOS folder, ALWAYS readable by the native core regardless
+         *  of the chosen data root. The BIOS must live here (NOT under a custom /
+         *  SD systemDir): on Android 11+ the native FileSystem APIs can't reliably
+         *  open a BIOS that sits on a removable volume or a SAF-picked folder, so a
+         *  game booted with the data root on SD failed VM init (BIOS load) and
+         *  bounced back to the library. This mirrors the design documented in
+         *  native-lib initialize() ("p_szbiosfolder is always externalFilesDir/bios").
+         *  Memcards / saves / configs still follow the chosen data root. */
+        fun internalBiosDir(context: Context): File =
+            File(context.getExternalFilesDir(null) ?: context.dataDir, "bios")
 
         /** URI-string-independent POSIX resolver. Pulled out of
          *  systemDirPosix so the setup wizard can probe a freshly-picked
@@ -380,6 +390,9 @@ class Main: ComponentActivity() {
                 try {
                     eState.value = EmuState.RUNNING
                     println("@@ANDROID_START_VM@@ kind=game path=${m_szGamefile.take(240)}")
+                    // Local co-op: re-pair controllers each session (first pad = P1,
+                    // next = P2) so player slots are deterministic per boot.
+                    com.armsx2.input.PadRouter.reset()
                     WindowImpl.showLibrary.value = false
                     WindowImpl.overlayVisible.value = false
                     WindowImpl.toolbarVisible.value = false
@@ -422,6 +435,21 @@ class Main: ComponentActivity() {
          *  ConfigStore (MTVU and friends) — currentGame.serial picks the
          *  right override tier; null falls back to global. Resolution
          *  order: per-game JSON overlay → global → hardcoded defaults. */
+        /** Number of distinct physical gamepads/joysticks connected right now
+         *  (excludes virtual devices). Drives the boot-time PS2-port-2 enable for
+         *  local co-op — 2+ pads → connect Player 2's controller at VM init. */
+        private fun connectedGamepadCount(): Int {
+            var n = 0
+            for (id in InputDevice.getDeviceIds()) {
+                val dev = InputDevice.getDevice(id) ?: continue
+                if (dev.isVirtual) continue
+                val s = dev.sources
+                if ((s and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+                    (s and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) n++
+            }
+            return n
+        }
+
         private fun applyRendererPrefs() {
             // Resolve per-game (∘ global) settings up front so the renderer backend
             // and internal resolution come from THIS title's tier, not a stale
@@ -447,6 +475,30 @@ class Main: ComponentActivity() {
                 else -> NativeApp.renderAuto()
             }
             resolved.applyTo()
+
+            // Neutralize the NATIVE pad analog deadzone before the VM loads [Pad1].
+            // A stale [Pad1]/Deadzone in an existing config (from the old, non-saving
+            // deadzone slider) imposed a huge ~0.45 fake deadzone on BOTH physical and
+            // on-screen sticks (they share PadDualshock2::Set). The app-side "Stick
+            // Deadzone" (ControllerMappings.stickDeadzone, re-normalized in
+            // shapeStickMag) is the single authority now, so keep the native radial
+            // deadzone off so it can't re-deaden the already-shaped input. AxisScale
+            // (1.33, helps small sticks reach full deflection) is left untouched.
+            runCatching {
+                NativeApp.setSetting("Pad1", "Deadzone", "float", "0")
+                NativeApp.setSetting("Pad2", "Deadzone", "float", "0")
+                // Local co-op: enable PS2 port 2 at BOOT (here, before runVMThread →
+                // Pad::LoadConfig) when a second controller is already connected —
+                // NOT by hot-plugging it mid-game, which rebuilt the live pad list and
+                // crashed. Single controller → "None" (port 2 off; zero change for
+                // solo play). So: connect BOTH controllers before launching the game.
+                val twoPads = connectedGamepadCount() >= 2
+                NativeApp.setSetting("Pad2", "Type", "string", if (twoPads) "DualShock2" else "None")
+                if (twoPads) {
+                    NativeApp.setSetting("Pad2", "AxisScale", "float", "1.33")
+                    NativeApp.setSetting("Pad2", "ButtonDeadzone", "float", "0")
+                }
+            }
 
             // Settings.applyTo() above writes the persisted FrameLimitEnable
             // into the BASE settings layer; override it here with the
@@ -533,6 +585,7 @@ class Main: ComponentActivity() {
                 try {
                     eState.value = EmuState.RUNNING
                     println("@@ANDROID_START_VM@@ kind=bios path=<empty>")
+                    com.armsx2.input.PadRouter.reset()
                     applyRendererPrefs()
                     NativeApp.runVMThread(m_szGamefile)
                 } finally {
@@ -924,14 +977,16 @@ class Main: ComponentActivity() {
         copyAssetAll(applicationContext, "bios")
         copyAssetAll(applicationContext, "resources")
 
-        // Move the configured BIOS under the active data root so it tracks a
-        // custom system folder instead of staying app-private (older builds
-        // pinned BIOS to externalFilesDir/bios). No-op when no BIOS is set or
-        // it's already there; on copy failure we leave the pref untouched, and
-        // biosFolderPosix still points emucore at the old (working) location.
+        // Keep the configured BIOS in app-private internal storage (NOT under a
+        // custom/SD data root). The native core can't reliably open a BIOS off a
+        // removable/SAF volume on Android 11+, so a data-root-on-SD setup failed VM
+        // init and bounced back to the library. This also MIGRATES any BIOS an older
+        // build moved onto the SD data root back to internal. No-op when no BIOS is
+        // set or it's already internal; on copy failure we leave the pref untouched
+        // so biosFolderPosix still points emucore at the old (working) location.
         bios.value?.takeIf { it.isNotEmpty() }?.let { current ->
             val src = File(current)
-            val target = File(File(assetCopyRoot(applicationContext), "bios").apply { mkdirs() }, src.name)
+            val target = File(internalBiosDir(applicationContext).apply { mkdirs() }, src.name)
             if (!sameFilePath(target, src)) {
                 val present = (target.exists() && target.length() > 0L) ||
                     copyFileViaTemp(src, target)
@@ -995,7 +1050,7 @@ class Main: ComponentActivity() {
         }
     }
 
-    fun sendKeyAction(p_action: KeyEventType, p_keycode_in: Int) {
+    fun sendKeyAction(p_action: KeyEventType, p_keycode_in: Int, port: Int = 0) {
         // Any physical gamepad key event implies the user is on a
         // controller — latch the on-screen touch controls hidden until a
         // screen press flips them back on. Idempotent.
@@ -1022,14 +1077,18 @@ class Main: ComponentActivity() {
                 // buttons while the modifier is held; 0 (full press) otherwise.
                 pad_force = com.armsx2.ui.touch.TouchControls.pressureRangeFor(p_keycode)
             }
-            NativeApp.setPadButton(p_keycode, pad_force, true)
+            NativeApp.setPadButtonForPort(port, p_keycode, pad_force, true)
         } else if (p_action == KeyEventType.KeyUp || p_action == KeyEventType.Unknown) {
-            NativeApp.setPadButton(p_keycode, 0, false)
+            NativeApp.setPadButtonForPort(port, p_keycode, 0, false)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Local co-op: PS2 port 2 is enabled at GAME BOOT (applyRendererPrefs) when a
+        // 2nd controller is already connected — NOT hot-plugged mid-game, which crashed
+        // by rebuilding the live pad list. So PadRouter only ROUTES P2 input; it must
+        // not trigger a runtime Pad::LoadConfig. (onPlayer2Joined left unset = no-op.)
         // Swallow back presses unconditionally. Compose BackHandlers (the
         // in-game overlay's submenu drill-down, the library's eventual
         // back-to-game escape, etc.) register at higher priority and
@@ -1044,6 +1103,8 @@ class Main: ComponentActivity() {
         prefs = applicationContext.getSharedPreferences("ARMSX2", MODE_PRIVATE)
         com.armsx2.CoverArtStyle.load()
         com.armsx2.LibraryTitles.load()
+        com.armsx2.LibraryView.load()
+        com.armsx2.ui.UiScale.load()
         setupComplete.value = prefs.getBoolean("setupComplete", false)
         systemDir.value = prefs.getString("systemDir", null)
         bios.value = prefs.getString("bios", null)
@@ -1286,9 +1347,13 @@ class Main: ComponentActivity() {
                                 // Note: the physical menu button is handled in
                                 // Main.dispatchKeyEvent (so it can catch BACK /
                                 // back-paddle keys); it never reaches here.
-                                val target = ControllerMappings.targetForPhysical(event.key.nativeKeyCode)
+                                // Local co-op: route by the originating device — first
+                                // controller = P1 (port 0), next = P2 (port 1) — and
+                                // resolve the bind against THAT player's mapping.
+                                val port = com.armsx2.input.PadRouter.portForDevice(event.nativeKeyEvent.deviceId)
+                                val target = ControllerMappings.targetForPhysical(event.key.nativeKeyCode, port)
                                     ?: return@onKeyEvent false
-                                sendKeyAction(event.type, target)
+                                sendKeyAction(event.type, target, port)
                                 true
                             })
                     }
@@ -1321,7 +1386,7 @@ class Main: ComponentActivity() {
                                 // The tests still run automatically on first composition
                                 // (above); their results are now available via the bug
                                 // toolbar button instead of taking up the main screen.
-                                com.armsx2.ui.GamesList.GamesRow()
+                                com.armsx2.ui.ScaledUi { com.armsx2.ui.GamesList.GamesRow() }
                             }
                         }
                     }
@@ -1401,6 +1466,8 @@ class Main: ComponentActivity() {
         // settings tabs). Any direction steps the control list; A activates; B closes.
         if (com.armsx2.ui.MemoryCardManager.visible.value) {
             val nav = com.armsx2.ui.settings.SettingsControllerNav
+            if (event.action == KeyEvent.ACTION_DOWN)
+                android.util.Log.d("ARMSX2_MCNAV", "key kc=$kc (${KeyEvent.keyCodeToString(kc)}) repeat=${event.repeatCount}")
             when (kc) {
                 KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BACK -> {
                     if (event.action == KeyEvent.ACTION_DOWN)
@@ -1413,14 +1480,24 @@ class Main: ComponentActivity() {
                         nav.confirm()
                     return true
                 }
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT -> {
+                KeyEvent.KEYCODE_DPAD_UP -> {
                     if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
-                        nav.move(-1)
+                        nav.moveSpatial(0, -1)
                     return true
                 }
-                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
                     if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
-                        nav.move(1)
+                        nav.moveSpatial(0, 1)
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
+                        nav.moveSpatial(-1, 0)
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
+                        nav.moveSpatial(1, 0)
                     return true
                 }
                 else -> return super.dispatchKeyEvent(event)
@@ -1769,29 +1846,40 @@ class Main: ComponentActivity() {
             return true
         }
         if (eState.value == EmuState.RUNNING) {
+            // Only true gamepad/joystick motion drives the PS2 pads. A DualSense's
+            // touchpad/mouse node also emits generic motion (pointer AXIS_X/Y); reading
+            // it as stick input injects garbage AND (via PadRouter) lets a non-pad node
+            // grab a player slot — which pushed the real 2nd pad onto Player 1.
+            if (!ev.isFromSource(InputDevice.SOURCE_JOYSTICK) &&
+                !ev.isFromSource(InputDevice.SOURCE_GAMEPAD)) {
+                return super.dispatchGenericMotionEvent(ev)
+            }
             // SOURCE_TOUCHSCREEN motion events go through dispatchTouchEvent,
             // not here — generic motion is gamepad / mouse / stylus. So any
             // event reaching this method means a controller (or similar
             // pointing device) is being used; latch touch controls off.
             com.armsx2.ui.touch.TouchControls.onControllerInputDetected()
+            // Local co-op: which PS2 port this physical device drives (P1=0 / P2=1).
+            // Stick mode + CUSTOM binds are read per-player; emits route to `port`.
+            val port = com.armsx2.input.PadRouter.portForDevice(ev.deviceId)
             // Analog sticks → analog (default) OR remapped to the D-pad / face
             // buttons (per ControllerMappings.{left,right}StickMode) — useful for
             // fighting games on analog-centric pads (e.g. left stick = D-pad).
-            dispatchStick(ev, ControllerMappings.leftStickMode(),
+            dispatchStick(ev, ControllerMappings.leftStickMode(port),
                 MotionEvent.AXIS_X, MotionEvent.AXIS_Y,
                 aXPos = 111, aXNeg = 113, aYPos = 112, aYNeg = 110, // L right/left, down/up
-                leftStick = true)
-            dispatchStick(ev, ControllerMappings.rightStickMode(),
+                leftStick = true, port = port)
+            dispatchStick(ev, ControllerMappings.rightStickMode(port),
                 MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ,
                 aXPos = 121, aXNeg = 123, aYPos = 122, aYNeg = 120, // R right/left, down/up
-                leftStick = false)
+                leftStick = false, port = port)
             // D-pad: the physical HAT *and* any stick remapped to D-pad drive the
             // same four PAD buttons. Combine every source and write each direction
             // once — otherwise the centered HAT released the stick-as-D-pad press
             // on the very same motion event (last write wins), so a stick set to
             // D-pad never registered while face-button mapping (different codes)
             // worked fine.
-            dispatchDpadCombined(ev)
+            dispatchDpadCombined(ev, port)
             // Analog triggers (L2/R2). Xbox / DualShock / most modern pads
             // report these as 0..1 motion-axis values, not Key.ButtonL2/R2
             // key events, so the onKeyEvent path above never sees them.
@@ -1800,9 +1888,9 @@ class Main: ComponentActivity() {
             // instead — take the max so we handle whichever the device
             // actually emits without double-driving when both are present.
             sendTrigger(ev, MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE,
-                KeyEvent.KEYCODE_BUTTON_L2)
+                KeyEvent.KEYCODE_BUTTON_L2, port)
             sendTrigger(ev, MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS,
-                KeyEvent.KEYCODE_BUTTON_R2)
+                KeyEvent.KEYCODE_BUTTON_R2, port)
             return true
         }
         return super.dispatchGenericMotionEvent(ev)
@@ -1830,7 +1918,11 @@ class Main: ComponentActivity() {
     }
 
     private fun fireNavMove(dx: Int, dy: Int) {
-        if (WindowImpl.overlayVisible.value) {
+        if (com.armsx2.ui.MemoryCardManager.visible.value) {
+            // Memcard dialog: 2D spatial nav (Slot 1 / Slot 2 / Delete across, cards
+            // down). Driven by the hold-repeat job so a held direction keeps moving.
+            com.armsx2.ui.settings.SettingsControllerNav.moveSpatial(dx, dy)
+        } else if (WindowImpl.overlayVisible.value) {
             // Fall back to synthetic D-pad (Compose focus) for overlay screens
             // the manual model doesn't handle (e.g. the save-state slot grid).
             if (!InGameOverlay.handleControllerMove(dx, dy)) {
@@ -1933,22 +2025,28 @@ class Main: ComponentActivity() {
         val dirY = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_Y))
             .let { if (it != 0) it else stickDy }
 
-        // Up/down: move between settings, with hold-to-repeat for long lists.
-        if (dirY == 0) {
-            if (overlayAxisY != 0) stopNavRepeat()
-            overlayAxisY = 0
-        } else if (dirY != overlayAxisY) {
-            overlayAxisY = dirY
-            startNavRepeat(0, dirY)
-        }
-
-        // Left/right: adjust the focused setting, one step per press (edge-
-        // triggered; re-armed when the input returns to centre).
-        if (dirX == 0) {
-            overlayAxisX = 0
-        } else if (dirX != overlayAxisX) {
-            overlayAxisX = dirX
-            InGameOverlay.handleControllerMove(dirX, 0)
+        // Vertical = move between settings; horizontal = adjust the focused setting
+        // (slider / segment). BOTH hold-to-repeat now — slider tweaks were previously
+        // one-step-per-press, painful on long sliders (deadzone/sensitivity/etc.).
+        // One repeat job at a time, so pick the dominant axis (vertical wins a tie);
+        // returning to centre stops it. Toggle onLeft/onRight are idempotent (set
+        // once then no-op), so repeating a held direction on a toggle is safe.
+        when {
+            dirY != 0 -> {
+                if (dirY != overlayAxisY || overlayAxisX != 0) startNavRepeat(0, dirY)
+                overlayAxisY = dirY
+                overlayAxisX = 0
+            }
+            dirX != 0 -> {
+                if (dirX != overlayAxisX || overlayAxisY != 0) startNavRepeat(dirX, 0)
+                overlayAxisX = dirX
+                overlayAxisY = 0
+            }
+            else -> {
+                if (overlayAxisX != 0 || overlayAxisY != 0) stopNavRepeat()
+                overlayAxisX = 0
+                overlayAxisY = 0
+            }
         }
         return true
     }
@@ -1969,13 +2067,27 @@ class Main: ComponentActivity() {
             .let { if (it != 0) it else stickDx }
         val dirY = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_Y))
             .let { if (it != 0) it else stickDy }
-        if (dirY != memcardAxisY) {
-            memcardAxisY = dirY
-            if (dirY != 0) com.armsx2.ui.settings.SettingsControllerNav.move(dirY)
-        }
-        if (dirX != memcardAxisX) {
-            memcardAxisX = dirX
-            if (dirX != 0) com.armsx2.ui.settings.SettingsControllerNav.move(dirX)
+        android.util.Log.d("ARMSX2_MCNAV",
+            "motion hatX=${ev.getAxisValue(MotionEvent.AXIS_HAT_X)} hatY=${ev.getAxisValue(MotionEvent.AXIS_HAT_Y)} " +
+                "stickX=${ev.getAxisValue(MotionEvent.AXIS_X)} stickY=${ev.getAxisValue(MotionEvent.AXIS_Y)} -> dirX=$dirX dirY=$dirY")
+        // Hold-to-repeat 2D nav (one repeat job; vertical wins a diagonal tie),
+        // mirroring the overlay so the card grid navigates freely in every direction.
+        when {
+            dirY != 0 -> {
+                if (dirY != memcardAxisY || memcardAxisX != 0) startNavRepeat(0, dirY)
+                memcardAxisY = dirY
+                memcardAxisX = 0
+            }
+            dirX != 0 -> {
+                if (dirX != memcardAxisX || memcardAxisY != 0) startNavRepeat(dirX, 0)
+                memcardAxisX = dirX
+                memcardAxisY = 0
+            }
+            else -> {
+                if (memcardAxisX != 0 || memcardAxisY != 0) stopNavRepeat()
+                memcardAxisX = 0
+                memcardAxisY = 0
+            }
         }
     }
 
@@ -2077,12 +2189,32 @@ class Main: ComponentActivity() {
         return downHandled || upHandled
     }
 
-    private fun sendAxis(event: MotionEvent, axis: Int, posCode: Int, negCode: Int) {
+    /** Apply the user's stick sensitivity (linear output scale) + acceleration
+     *  (exponential response curve) to a post-deadzone magnitude in [0,1]. accel 0
+     *  = linear; higher = finer control near center, faster toward full tilt. Only
+     *  shapes real analog output (native passthrough + CUSTOM analog targets). */
+    private fun shapeStickMag(m: Float): Float {
+        val dz = ControllerMappings.stickDeadzone()
+        if (m <= dz) return 0f
+        // Re-normalize past the deadzone so output ramps smoothly from 0 instead of
+        // jumping to `dz` at the edge (the "dead then sudden acceleration" feel the
+        // small handheld sticks suffer). Then apply the acceleration curve +
+        // sensitivity scale.
+        val t = (if (dz < 1f) (m - dz) / (1f - dz) else 0f).coerceIn(0f, 1f)
+        val accel = ControllerMappings.stickAcceleration()
+        val curved =
+            if (accel > 0f) Math.pow(t.toDouble(), (1f + accel).toDouble()).toFloat()
+            else t
+        return (curved * ControllerMappings.stickSensitivity()).coerceIn(0f, 1f)
+    }
+
+    private fun sendAxis(event: MotionEvent, axis: Int, posCode: Int, negCode: Int, port: Int) {
         val v = event.getAxisValue(axis)
-        val posVal = if (v > STICK_DEAD) v else 0f
-        val negVal = if (v < -STICK_DEAD) -v else 0f
-        NativeApp.setPadButton(posCode, (posVal * 32767).toInt(), posVal > 0f)
-        NativeApp.setPadButton(negCode, (negVal * 32767).toInt(), negVal > 0f)
+        // Deadzone is applied (and re-normalized) inside shapeStickMag now.
+        val posVal = if (v > 0f) shapeStickMag(v) else 0f
+        val negVal = if (v < 0f) shapeStickMag(-v) else 0f
+        NativeApp.setPadButtonForPort(port, posCode, (posVal * 32767).toInt(), posVal > 0f)
+        NativeApp.setPadButtonForPort(port, negCode, (negVal * 32767).toInt(), negVal > 0f)
     }
 
     /** Like sendAxis but drives one analog direction-pair from whichever of two
@@ -2090,13 +2222,16 @@ class Main: ComponentActivity() {
      *  axis) into the left stick for "D-pad as Left Stick" without a separate
      *  writer releasing the stick on the next event. The HAT reads ±1 so a d-pad
      *  press becomes full deflection. */
-    private fun sendAxisMax(event: MotionEvent, axisA: Int, axisB: Int, posCode: Int, negCode: Int) {
+    private fun sendAxisMax(event: MotionEvent, axisA: Int, axisB: Int, posCode: Int, negCode: Int, port: Int) {
         val a = event.getAxisValue(axisA)
         val b = event.getAxisValue(axisB)
-        val pos = maxOf(if (a > STICK_DEAD) a else 0f, if (b > STICK_DEAD) b else 0f)
-        val neg = maxOf(if (a < -STICK_DEAD) -a else 0f, if (b < -STICK_DEAD) -b else 0f)
-        NativeApp.setPadButton(posCode, (pos * 32767).toInt(), pos > 0f)
-        NativeApp.setPadButton(negCode, (neg * 32767).toInt(), neg > 0f)
+        // The real stick (axisA) gets the user's deadzone/sensitivity/acceleration
+        // shaping; the D-pad HAT (axisB, ±1) stays full so the D-pad keeps full
+        // deflection in "D-pad as Left Stick" mode.
+        val pos = maxOf(if (a > 0f) shapeStickMag(a) else 0f, if (b > STICK_DEAD) b else 0f)
+        val neg = maxOf(if (a < 0f) shapeStickMag(-a) else 0f, if (b < -STICK_DEAD) -b else 0f)
+        NativeApp.setPadButtonForPort(port, posCode, (pos * 32767).toInt(), pos > 0f)
+        NativeApp.setPadButtonForPort(port, negCode, (neg * 32767).toInt(), neg > 0f)
     }
 
     /** Route one physical stick's two axes to the PS2 pad per [mode]: native analog
@@ -2106,7 +2241,7 @@ class Main: ComponentActivity() {
         event: MotionEvent, mode: ControllerMappings.StickMode,
         axisX: Int, axisY: Int,
         aXPos: Int, aXNeg: Int, aYPos: Int, aYNeg: Int,
-        leftStick: Boolean,
+        leftStick: Boolean, port: Int,
     ) {
         when (mode) {
             ControllerMappings.StickMode.ANALOG -> {
@@ -2115,31 +2250,31 @@ class Main: ComponentActivity() {
                     // D-pad drives analog movement. Combining into ONE writer (max
                     // deflection per axis) avoids the resting stick releasing the
                     // D-pad's press — the HAT is gated out of dispatchDpadCombined.
-                    sendAxisMax(event, axisX, MotionEvent.AXIS_HAT_X, aXPos, aXNeg)
-                    sendAxisMax(event, axisY, MotionEvent.AXIS_HAT_Y, aYPos, aYNeg)
+                    sendAxisMax(event, axisX, MotionEvent.AXIS_HAT_X, aXPos, aXNeg, port)
+                    sendAxisMax(event, axisY, MotionEvent.AXIS_HAT_Y, aYPos, aYNeg, port)
                 } else {
-                    sendAxis(event, axisX, aXPos, aXNeg)
-                    sendAxis(event, axisY, aYPos, aYNeg)
+                    sendAxis(event, axisX, aXPos, aXNeg, port)
+                    sendAxis(event, axisY, aYPos, aYNeg, port)
                 }
             }
             ControllerMappings.StickMode.FACE -> {
-                sendAxisDigital(event, axisX, posCode = 97, negCode = 99)  // Circle / Square (right/left)
-                sendAxisDigital(event, axisY, posCode = 96, negCode = 100) // Cross / Triangle (down/up)
+                sendAxisDigital(event, axisX, posCode = 97, negCode = 99, port = port)  // Circle / Square (right/left)
+                sendAxisDigital(event, axisY, posCode = 96, negCode = 100, port = port) // Cross / Triangle (down/up)
             }
             ControllerMappings.StickMode.CUSTOM -> {
-                // Each direction is bound to any PS2 button. D-pad targets (19-22)
-                // are owned by dispatchDpadCombined() (avoids the release race);
+                // Each direction is bound to any PS2 button (per-player). D-pad targets
+                // (19-22) are owned by dispatchDpadCombined() (avoids the release race);
                 // emitCustom keeps analog targets proportional, others thresholded.
                 val vx = event.getAxisValue(axisX)
                 val vy = event.getAxisValue(axisY)
-                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.RIGHT),
-                    if (vx > 0f) vx else 0f)
-                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.LEFT),
-                    if (vx < 0f) -vx else 0f)
-                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.DOWN),
-                    if (vy > 0f) vy else 0f)
-                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.UP),
-                    if (vy < 0f) -vy else 0f)
+                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.RIGHT, port),
+                    if (vx > 0f) vx else 0f, port)
+                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.LEFT, port),
+                    if (vx < 0f) -vx else 0f, port)
+                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.DOWN, port),
+                    if (vy > 0f) vy else 0f, port)
+                emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.UP, port),
+                    if (vy < 0f) -vy else 0f, port)
             }
         }
     }
@@ -2147,35 +2282,37 @@ class Main: ComponentActivity() {
     /** Emit one CUSTOM stick-direction binding given its 0..1 deflection [mag]
      *  toward that direction. D-pad codes (19-22) are skipped — dispatchDpadCombined
      *  owns them; analog codes (110-123) stay proportional; others are thresholded. */
-    private fun emitCustom(code: Int, mag: Float) {
+    private fun emitCustom(code: Int, mag: Float, port: Int) {
         if (code in 19..22) return
         if (code in 110..123) {
-            val m = if (mag > STICK_DEAD) mag else 0f
-            NativeApp.setPadButton(code, (m * 32767).toInt(), m > 0f)
+            val m = shapeStickMag(mag)
+            NativeApp.setPadButtonForPort(port, code, (m * 32767).toInt(), m > 0f)
         } else {
-            NativeApp.setPadButton(code, 32767, mag > STICK_DIGITAL_THRESHOLD)
+            NativeApp.setPadButtonForPort(port, code, 32767, mag > STICK_DIGITAL_THRESHOLD)
         }
     }
 
     /** Stick-as-button: press [posCode] / [negCode] once the axis passes the digital
      *  threshold. setPadButton is a state set, so re-sending the same state is a no-op. */
-    private fun sendAxisDigital(event: MotionEvent, axis: Int, posCode: Int, negCode: Int) {
+    private fun sendAxisDigital(event: MotionEvent, axis: Int, posCode: Int, negCode: Int, port: Int) {
         val v = event.getAxisValue(axis)
-        NativeApp.setPadButton(posCode, 32767, v > STICK_DIGITAL_THRESHOLD)
-        NativeApp.setPadButton(negCode, 32767, v < -STICK_DIGITAL_THRESHOLD)
+        NativeApp.setPadButtonForPort(port, posCode, 32767, v > STICK_DIGITAL_THRESHOLD)
+        NativeApp.setPadButtonForPort(port, negCode, 32767, v < -STICK_DIGITAL_THRESHOLD)
     }
 
     // D-pad codes (19-22) THIS function last pressed, so it releases only its own
     // presses. Owns the D-pad from ALL non-KeyEvent sources: the physical HAT, a
     // stick in DPAD mode, and any CUSTOM stick direction bound to a D-pad code.
-    private val dpadOwnHeld = HashSet<Int>()
+    // PER-PORT (index = player) so P1 and P2 D-pad presses can't release each other.
+    private val dpadOwnHeld = Array(2) { HashSet<Int>() }
 
-    /** True when any CUSTOM-mode stick has a direction bound to a D-pad code. */
-    private fun customTargetsDpad(): Boolean {
+    /** True when any CUSTOM-mode stick has a direction bound to a D-pad code, for
+     *  the given player. */
+    private fun customTargetsDpad(port: Int): Boolean {
         for (isLeft in booleanArrayOf(true, false)) {
-            if (ControllerMappings.stickModeFor(isLeft) != ControllerMappings.StickMode.CUSTOM) continue
+            if (ControllerMappings.stickModeFor(isLeft, port) != ControllerMappings.StickMode.CUSTOM) continue
             for (dir in ControllerMappings.StickDir.values())
-                if (ControllerMappings.customStickCode(isLeft, dir) in 19..22) return true
+                if (ControllerMappings.customStickCode(isLeft, dir, port) in 19..22) return true
         }
         return false
     }
@@ -2186,7 +2323,8 @@ class Main: ComponentActivity() {
      *  (the old approach) released a held direction whenever the stick re-centered
      *  or another stick emitted an event; tracking our own presses avoids that and
      *  never clobbers a physical D-pad arriving as KeyEvents. */
-    private fun dispatchDpadCombined(ev: MotionEvent) {
+    private fun dispatchDpadCombined(ev: MotionEvent, port: Int) {
+        val held = dpadOwnHeld[port]
         // When the D-pad drives the left stick, the HAT is folded into the stick
         // in dispatchStick — ignore it here so it doesn't ALSO press the d-pad.
         val dpadAsStick = ControllerMappings.dpadAsLeftStick()
@@ -2201,10 +2339,10 @@ class Main: ComponentActivity() {
         val rightDpad = false
         // Nothing we own could be active → release what we hold and bail, so we
         // never touch the D-pad bits a KeyEvent-style physical D-pad drives.
-        if (!hatActive && !leftDpad && !rightDpad && !customTargetsDpad()) {
-            if (dpadOwnHeld.isNotEmpty()) {
-                dpadOwnHeld.forEach { NativeApp.setPadButton(it, 0, false) }
-                dpadOwnHeld.clear()
+        if (!hatActive && !leftDpad && !rightDpad && !customTargetsDpad(port)) {
+            if (held.isNotEmpty()) {
+                held.forEach { NativeApp.setPadButtonForPort(port, it, 0, false) }
+                held.clear()
             }
             return
         }
@@ -2226,12 +2364,12 @@ class Main: ComponentActivity() {
 
         // Fold CUSTOM directions that target a D-pad code so they share this owner.
         fun foldCustom(isLeft: Boolean, axisX: Int, axisY: Int) {
-            if (ControllerMappings.stickModeFor(isLeft) != ControllerMappings.StickMode.CUSTOM) return
+            if (ControllerMappings.stickModeFor(isLeft, port) != ControllerMappings.StickMode.CUSTOM) return
             val x = ev.getAxisValue(axisX)
             val y = ev.getAxisValue(axisY)
             fun mark(dir: ControllerMappings.StickDir, active: Boolean) {
                 if (!active) return
-                when (ControllerMappings.customStickCode(isLeft, dir)) {
+                when (ControllerMappings.customStickCode(isLeft, dir, port)) {
                     22 -> right = true
                     21 -> left = true
                     20 -> down = true
@@ -2249,10 +2387,10 @@ class Main: ComponentActivity() {
         // Write only on change so a resting stick's motion stream can't re-release
         // a direction the physical D-pad is also holding.
         fun apply(code: Int, on: Boolean) {
-            val was = dpadOwnHeld.contains(code)
+            val was = held.contains(code)
             if (on == was) return
-            NativeApp.setPadButton(code, if (on) 32767 else 0, on)
-            if (on) dpadOwnHeld.add(code) else dpadOwnHeld.remove(code)
+            NativeApp.setPadButtonForPort(port, code, if (on) 32767 else 0, on)
+            if (on) held.add(code) else held.remove(code)
         }
         apply(22, right) // D-pad right
         apply(21, left)  // D-pad left
@@ -2260,10 +2398,10 @@ class Main: ComponentActivity() {
         apply(19, up)    // D-pad up
     }
 
-    private fun sendTrigger(event: MotionEvent, axisA: Int, axisB: Int, code: Int) {
+    private fun sendTrigger(event: MotionEvent, axisA: Int, axisB: Int, code: Int, port: Int) {
         val v = maxOf(event.getAxisValue(axisA), event.getAxisValue(axisB))
         val clamped = if (v > STICK_DEAD) v.coerceAtMost(1f) else 0f
-        NativeApp.setPadButton(code, (clamped * 32767).toInt(), clamped > 0f)
+        NativeApp.setPadButtonForPort(port, code, (clamped * 32767).toInt(), clamped > 0f)
     }
 
     override fun onPause() {

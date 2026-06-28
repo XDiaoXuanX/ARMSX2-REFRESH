@@ -29,6 +29,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,12 +37,16 @@ import com.armsx2.config.Settings
 import com.armsx2.input.ControllerMappings
 import com.armsx2.ui.Colors
 import com.armsx2.ui.touch.TouchControls
+import kr.co.iefriends.pcsx2.NativeApp
 
 @Composable
 fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
     val scroll = remember { ScrollState(0) }
     ControllerAutoScroll(scroll)
     val capture = remember { mutableStateOf<ControllerMappings.Action?>(null) }
+    // Local co-op: which player's mapping this tab is editing (0 = P1, 1 = P2).
+    val editPlayer = remember { mutableStateOf(0) }
+    val ctx = LocalContext.current
     val refreshToken = remember { mutableStateOf(0) }
     val focusRequester = remember { FocusRequester() }
 
@@ -81,9 +86,9 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                     val ncode = event.key.nativeKeyCode
                     if (ncode == android.view.KeyEvent.KEYCODE_UNKNOWN)
                         return@onPreviewKeyEvent true
-                    val ps2 = ControllerMappings.stickCodeForPhysical(ncode)
+                    val ps2 = ControllerMappings.stickCodeForPhysical(ncode, editPlayer.value)
                     if (ps2 != null) {
-                        ControllerMappings.setCustomStickCode(sc.first, sc.second, ps2)
+                        ControllerMappings.setCustomStickCode(sc.first, sc.second, ps2, editPlayer.value)
                         ControllerMappings.endStickCapture()
                         refreshToken.value++
                     }
@@ -99,7 +104,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 val nativeKeyCode = event.key.nativeKeyCode
                 if (nativeKeyCode == android.view.KeyEvent.KEYCODE_UNKNOWN)
                     return@onPreviewKeyEvent true
-                ControllerMappings.bind(action, nativeKeyCode)
+                ControllerMappings.bind(action, nativeKeyCode, editPlayer.value)
                 capture.value = null
                 refreshToken.value++
                 true
@@ -115,6 +120,61 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         SettingsDivider()
         @Suppress("UNUSED_EXPRESSION")
         refreshToken.value
+        // Also recompose when the mappings change externally (e.g. the global
+        // "Reset to defaults" calls ControllerMappings.resetTunables, which bumps this)
+        // so the feel sliders / stick modes refresh without re-opening the tab.
+        @Suppress("UNUSED_EXPRESSION")
+        ControllerMappings.stickBindTick.value
+        // Local co-op: pick which player's buttons / stick mode you're editing. P2 is
+        // the second controller to press a button in-game (auto-assigned). Stick
+        // feel (deadzone / sensitivity / acceleration) and the D-pad-as-stick toggle
+        // below are shared by both players.
+        SegmentedRow(
+            label = "Editing",
+            options = listOf("Player 1", "Player 2"),
+            selectedIndex = editPlayer.value,
+            description = "Configure Player 1 or Player 2's button mapping. Player 2 = the 2nd controller that joins in-game.",
+            onChange = {
+                editPlayer.value = it
+                capture.value = null
+                ControllerMappings.captureStickDir.value = null
+                refreshToken.value++
+            },
+        )
+        // Buzz the selected player's controller and report whether Android can drive
+        // its rumble — separates a routing problem from a pad whose haptics simply
+        // aren't exposed to Android (common for DualSense/DS4 over Bluetooth).
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(30.dp)
+                .background(rowAura())
+                .clickable {
+                    NativeApp.testRumble(editPlayer.value)
+                    android.widget.Toast.makeText(
+                        ctx, NativeApp.rumbleStatusForPort(editPlayer.value),
+                        android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                }
+                .controllerFocusable(
+                    controllerId = "pad-test-rumble",
+                    onConfirm = {
+                        NativeApp.testRumble(editPlayer.value)
+                        android.widget.Toast.makeText(
+                            ctx, NativeApp.rumbleStatusForPort(editPlayer.value),
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    },
+                )
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                if (editPlayer.value == 0) "Test rumble — Player 1" else "Test rumble — Player 2",
+                color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            )
+        }
+        SettingsDivider()
         // Analog stick remapping — make a physical stick act as the D-pad or the
         // face buttons (great for fighting games on analog-centric controllers).
         run {
@@ -122,34 +182,34 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             SegmentedRow(
                 label = "Left Stick",
                 options = stickOpts,
-                selectedIndex = ControllerMappings.leftStickMode().ordinal,
+                selectedIndex = ControllerMappings.leftStickMode(editPlayer.value).ordinal,
                 description = "What the left analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
                 onChange = {
-                    ControllerMappings.setLeftStickMode(ControllerMappings.StickMode.values()[it])
+                    ControllerMappings.setLeftStickMode(ControllerMappings.StickMode.values()[it], editPlayer.value)
                     refreshToken.value++
                 },
             )
             SettingsDivider()
-            if (ControllerMappings.leftStickMode() == ControllerMappings.StickMode.CUSTOM) {
+            if (ControllerMappings.leftStickMode(editPlayer.value) == ControllerMappings.StickMode.CUSTOM) {
                 ControllerMappings.StickDir.values().forEach { dir ->
-                    StickDirPickerRow(leftStick = true, dir = dir, onChanged = { refreshToken.value++ })
+                    StickDirPickerRow(leftStick = true, dir = dir, player = editPlayer.value, onChanged = { refreshToken.value++ })
                     SettingsDivider()
                 }
             }
             SegmentedRow(
                 label = "Right Stick",
                 options = stickOpts,
-                selectedIndex = ControllerMappings.rightStickMode().ordinal,
+                selectedIndex = ControllerMappings.rightStickMode(editPlayer.value).ordinal,
                 description = "What the right analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
                 onChange = {
-                    ControllerMappings.setRightStickMode(ControllerMappings.StickMode.values()[it])
+                    ControllerMappings.setRightStickMode(ControllerMappings.StickMode.values()[it], editPlayer.value)
                     refreshToken.value++
                 },
             )
             SettingsDivider()
-            if (ControllerMappings.rightStickMode() == ControllerMappings.StickMode.CUSTOM) {
+            if (ControllerMappings.rightStickMode(editPlayer.value) == ControllerMappings.StickMode.CUSTOM) {
                 ControllerMappings.StickDir.values().forEach { dir ->
-                    StickDirPickerRow(leftStick = false, dir = dir, onChanged = { refreshToken.value++ })
+                    StickDirPickerRow(leftStick = false, dir = dir, player = editPlayer.value, onChanged = { refreshToken.value++ })
                     SettingsDivider()
                 }
             }
@@ -162,9 +222,39 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 refreshToken.value++
             }
             SettingsDivider()
+            IntSliderRow(
+                label = "Stick Deadzone",
+                value = (ControllerMappings.stickDeadzone() * 100f).toInt(), // 0.0..0.4 -> 0..40
+                min = 0,
+                max = (ControllerMappings.STICK_DZ_MAX * 100f).toInt(),
+                description = "Fraction of physical analog travel ignored near center. Lower = stick responds sooner (handheld sticks have little range); 0 = none. Movement re-normalizes past it, so no jump.",
+                valueFormatter = { if (it == 0) "Off" else "${it}%" },
+                onChange = { ControllerMappings.setStickDeadzone(it / 100f); refreshToken.value++ },
+            )
+            SettingsDivider()
+            IntSliderRow(
+                label = "Stick Sensitivity",
+                value = (ControllerMappings.stickSensitivity() * 20f).toInt(), // 0.5..2.0 -> 10..40
+                min = 10,
+                max = 40,
+                description = "Linear scale on the physical analog sticks (native Analog + Custom analog directions). Under 100% = finer/slower aim, over 100% = faster.",
+                valueFormatter = { "${it * 5}%" },
+                onChange = { ControllerMappings.setStickSensitivity(it / 20f); refreshToken.value++ },
+            )
+            SettingsDivider()
+            IntSliderRow(
+                label = "Stick Acceleration",
+                value = (ControllerMappings.stickAcceleration() * 10f).toInt(), // 0.0..2.0 -> 0..20
+                min = 0,
+                max = 20,
+                description = "Non-linear response curve: small tilts stay precise for aiming, full tilt ramps up to full speed. 0 = linear (off); higher = more curve.",
+                valueFormatter = { if (it == 0) "Off (linear)" else "+%.1f".format(it / 10f) },
+                onChange = { ControllerMappings.setStickAcceleration(it / 10f); refreshToken.value++ },
+            )
+            SettingsDivider()
         }
         ControllerMappings.actions.forEach { action ->
-            val physical = ControllerMappings.physicalFor(action)
+            val physical = ControllerMappings.physicalFor(action, editPlayer.value)
             PadBindingRow(
                 action = action,
                 physical = physical,
@@ -179,14 +269,14 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 .height(30.dp)
                 .background(rowAura())
                 .clickable {
-                    ControllerMappings.reset()
+                    ControllerMappings.reset(editPlayer.value)
                     capture.value = null
                     refreshToken.value++
                 }
                 .controllerFocusable(
                     controllerId = "pad-reset",
                     onConfirm = {
-                        ControllerMappings.reset()
+                        ControllerMappings.reset(editPlayer.value)
                         capture.value = null
                         refreshToken.value++
                     },
@@ -194,7 +284,10 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 .padding(horizontal = 6.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
-            Text("Reset Controller Mappings", color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text(
+                if (editPlayer.value == 0) "Reset Player 1 Mappings" else "Reset Player 2 Mappings",
+                color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            )
         }
 
         // Controller hotkeys now live in their own dedicated "Hotkeys" tab
@@ -221,18 +314,19 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
 private fun StickDirPickerRow(
     leftStick: Boolean,
     dir: ControllerMappings.StickDir,
+    player: Int,
     onChanged: () -> Unit,
 ) {
     @Suppress("UNUSED_EXPRESSION")
     ControllerMappings.stickBindTick.value // recompose after a bind/reset
     val capturing = ControllerMappings.captureStickDir.value == (leftStick to dir)
-    val code = ControllerMappings.customStickCode(leftStick, dir)
+    val code = ControllerMappings.customStickCode(leftStick, dir, player)
     fun arm() {
         ControllerMappings.beginStickCapture(leftStick, dir)
         onChanged()
     }
     fun clear() {
-        ControllerMappings.resetStickCode(leftStick, dir)
+        ControllerMappings.resetStickCode(leftStick, dir, player)
         onChanged()
     }
     Row(

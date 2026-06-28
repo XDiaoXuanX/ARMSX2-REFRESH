@@ -1397,7 +1397,7 @@ void InputManager::SetUSBVibrationIntensity(u32 port, float large_or_single_moto
 // vibrator. The s_pad_vibration_array path below is dead on Android: SDL (the
 // only vibration-capable input source) fails to initialize, so no motor is
 // ever bound and the loop does nothing.
-namespace Native { void onPadRumble(int largeMotor, int smallMotor); }
+namespace Native { void onPadRumble(int pad, int largeMotor, int smallMotor); }
 #endif
 
 void InputManager::SetPadVibrationIntensity(u32 pad_index, float large_or_single_motor_intensity, float small_motor_intensity)
@@ -1414,6 +1414,7 @@ void InputManager::SetPadVibrationIntensity(u32 pad_index, float large_or_single
 			s_android_last_large[i] = large_or_single_motor_intensity;
 			s_android_last_small[i] = small_motor_intensity;
 			Native::onPadRumble(
+				static_cast<int>(i), // PS2 port / unified slot (0 = P1, 1 = P2)
 				static_cast<int>(large_or_single_motor_intensity * 255.0f),
 				static_cast<int>(small_motor_intensity * 255.0f));
 		}

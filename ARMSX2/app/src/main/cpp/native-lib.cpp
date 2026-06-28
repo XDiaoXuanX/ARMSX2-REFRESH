@@ -324,7 +324,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
         s_NativeApp_class = static_cast<jclass>(env->NewGlobalRef(local));
         env->DeleteLocalRef(local);
         s_vmSetPaused_mid = env->GetStaticMethodID(s_NativeApp_class, "vmSetPaused", "(Z)V");
-        s_onPadRumble_mid = env->GetStaticMethodID(s_NativeApp_class, "onPadRumble", "(II)V");
+        s_onPadRumble_mid = env->GetStaticMethodID(s_NativeApp_class, "onPadRumble", "(III)V");
     }
 
     // Bind the JNI-backed HTTP downloader's class + method IDs while we
@@ -635,9 +635,15 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setPadVibration(JNIEnv *env, jclass clazz,
 }
 
 
-extern "C" JNIEXPORT void JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_setPadButton(JNIEnv *env, jclass clazz,
-                                                  jint p_key, jint p_range, jboolean p_keyPressed) {
+// Serializes pad input (applyPadButton, on the Android input thread) against the
+// co-op hot-plug rebuild (enablePad2's Pad::LoadConfig, on a background thread),
+// which reassigns s_controllers[] (make_unique). ScopedVMPause only parks the
+// CPU/MTGS/MTVU threads, NOT the input thread, so without this a P2-join could
+// use-after-free the controller being replaced. Uncontended on the input thread
+// (all input is serial on the UI thread) except for the brief enablePad2 window.
+static std::mutex s_pad_mutex;
+
+static void applyPadButton(u32 port, jint p_key, jint p_range, jboolean p_keyPressed) {
     PadDualshock2::Inputs _key;
     switch (p_key) {
         case 19: _key = PadDualshock2::Inputs::PAD_UP; break;
@@ -677,7 +683,23 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setPadButton(JNIEnv *env, jclass clazz,
     const float state = p_keyPressed
         ? ((p_range > 0) ? (p_range / 32767.0f) : 1.0f)
         : 0.0f;
-    Pad::SetControllerState(0, static_cast<u32>(_key), state);
+    std::lock_guard<std::mutex> lk(s_pad_mutex);
+    Pad::SetControllerState(port, static_cast<u32>(_key), state);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setPadButton(JNIEnv *env, jclass clazz,
+                                                  jint p_key, jint p_range, jboolean p_keyPressed) {
+    applyPadButton(0, p_key, p_range, p_keyPressed);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setPadButtonForPort(JNIEnv *env, jclass clazz,
+                                                         jint p_port, jint p_key, jint p_range,
+                                                         jboolean p_keyPressed) {
+    // Local co-op: route to PS2 controller port 0 (P1) or 1 (P2). SetControllerState
+    // ignores ports >= NUM_CONTROLLER_PORTS; a negative/unset port falls back to P1.
+    applyPadButton(p_port < 0 ? 0u : static_cast<u32>(p_port), p_key, p_range, p_keyPressed);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -3030,7 +3052,7 @@ void Native::vmSetPaused(bool paused) {
     if (attached) s_jvm->DetachCurrentThread();
 }
 
-void Native::onPadRumble(int largeMotor, int smallMotor) {
+void Native::onPadRumble(int pad, int largeMotor, int smallMotor) {
     if (!s_jvm || !s_NativeApp_class || !s_onPadRumble_mid) return;
 
     JNIEnv* env = nullptr;
@@ -3044,7 +3066,8 @@ void Native::onPadRumble(int largeMotor, int smallMotor) {
     }
 
     env->CallStaticVoidMethod(s_NativeApp_class, s_onPadRumble_mid,
-                              static_cast<jint>(largeMotor), static_cast<jint>(smallMotor));
+                              static_cast<jint>(pad), static_cast<jint>(largeMotor),
+                              static_cast<jint>(smallMotor));
 
     if (attached) s_jvm->DetachCurrentThread();
 }

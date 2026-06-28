@@ -253,6 +253,12 @@ public class NativeApp {
 
 	public static native void setPadVibration(boolean isonoff);
 	public static native void setPadButton(int index, int range, boolean iskeypressed);
+	/** Local co-op: like setPadButton but routes to PS2 controller port 0 (Player 1)
+	 *  or 1 (Player 2). The plain setPadButton above stays port-0 for touch controls. */
+	public static native void setPadButtonForPort(int port, int index, int range, boolean iskeypressed);
+	/** Local co-op: hot-plug a 2nd DualShock2 into PS2 port 2 when a second physical
+	 *  controller joins. Idempotent; briefly parks the VM to rebuild the pad list. */
+	public static native void enablePad2();
 	public static native void resetKeyStatus();
 
 	// ---- Controller rumble (BT/USB gamepads via Android InputDevice) ----
@@ -264,18 +270,26 @@ public class NativeApp {
 	// zero. Long enough to cover sustained rumble between intensity changes.
 	private static final int RUMBLE_MS = 3000;
 
-	/** Called from native (IOP thread) when PS2 pad motor intensity changes.
-	 *  largeMotor/smallMotor are 0..255. Vibrates the active controller — no-op
-	 *  when no gamepad is active or it has no vibrator. */
-	public static void onPadRumble(int largeMotor, int smallMotor) {
+	/** Called from native (IOP thread) when PS2 pad motor intensity changes for
+	 *  [pad] (unified slot: 0 = Player 1, 1 = Player 2). largeMotor/smallMotor are
+	 *  0..255. Local co-op: routes the rumble to THAT player's controller. Falls
+	 *  back to the last-used gamepad when the port isn't claimed yet (single-player,
+	 *  or before first input) — solo play is unchanged. No-op with no vibrator. */
+	public static void onPadRumble(int pad, int largeMotor, int smallMotor) {
 		if (!sRumbleEnabled) return;
-		final int devId = sRumbleDeviceId;
+		int devId = com.armsx2.input.PadRouter.INSTANCE.deviceIdForPort(pad);
+		if (devId < 0) devId = sRumbleDeviceId;
 		if (devId < 0) return;
+		float low = Math.max(0f, Math.min(1f, largeMotor / 255f));   // low-frequency / large
+		float high = Math.max(0f, Math.min(1f, smallMotor / 255f));  // high-frequency / small
+		vibrateDevice(devId, low, high, RUMBLE_MS);
+	}
+
+	/** Drive [devId]'s vibrator(s) with the PS2 large/high motor intensities for [ms]. */
+	private static void vibrateDevice(int devId, float low, float high, int ms) {
 		try {
 			InputDevice dev = InputDevice.getDevice(devId);
 			if (dev == null) return;
-			float low = Math.max(0f, Math.min(1f, largeMotor / 255f));   // low-frequency / large
-			float high = Math.max(0f, Math.min(1f, smallMotor / 255f));  // high-frequency / small
 			// Single combined motor can't reproduce both PS2 actuators, so blend
 			// them the way AetherSX2/NetherSX2 do (org.libsdl.app
 			// SDLControllerManager): 0.6*large + 0.4*small. The PS2 small motor is
@@ -288,19 +302,23 @@ public class NativeApp {
 				VibratorManager vm = dev.getVibratorManager();
 				int[] ids = vm.getVibratorIds();
 				if (ids.length >= 2) {
-					rumbleOne(vm.getVibrator(ids[0]), low);
-					rumbleOne(vm.getVibrator(ids[1]), high);
+					rumbleOne(vm.getVibrator(ids[0]), low, ms);
+					rumbleOne(vm.getVibrator(ids[1]), high, ms);
 				} else if (ids.length == 1) {
-					rumbleOne(vm.getVibrator(ids[0]), combined);
+					rumbleOne(vm.getVibrator(ids[0]), combined, ms);
+				} else {
+					// Some pads (e.g. certain DualShock/DualSense BT modes) expose 0
+					// vibrators to VibratorManager but still drive via the legacy API.
+					rumbleOne(dev.getVibrator(), combined, ms);
 				}
 			} else {
-				rumbleOne(dev.getVibrator(), combined);
+				rumbleOne(dev.getVibrator(), combined, ms);
 			}
 		} catch (Throwable ignored) {
 		}
 	}
 
-	private static void rumbleOne(Vibrator v, float intensity) {
+	private static void rumbleOne(Vibrator v, float intensity, int ms) {
 		if (v == null || !v.hasVibrator()) return;
 		if (intensity <= 0f) {
 			try { v.cancel(); } catch (Throwable ignored) {}
@@ -310,10 +328,63 @@ public class NativeApp {
 		if (amp < 1) amp = 1;
 		if (amp > 255) amp = 255;
 		try {
-			v.vibrate(VibrationEffect.createOneShot(RUMBLE_MS, amp));
+			v.vibrate(VibrationEffect.createOneShot(ms, amp));
 		} catch (Throwable t) {
-			try { v.vibrate(RUMBLE_MS); } catch (Throwable ignored) {}
+			try { v.vibrate(ms); } catch (Throwable ignored) {}
 		}
+	}
+
+	/** Index (0-based) of the [index]th connected physical gamepad, or -1. Used as a
+	 *  fallback so the rumble test works even before a port has been claimed in-game. */
+	private static int nthGamepadDeviceId(int index) {
+		int n = 0;
+		for (int id : InputDevice.getDeviceIds()) {
+			InputDevice d = InputDevice.getDevice(id);
+			if (d == null) continue;
+			int src = d.getSources();
+			boolean pad = (src & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+					|| (src & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+			if (!pad) continue;
+			if (n == index) return id;
+			n++;
+		}
+		return -1;
+	}
+
+	/** Strongly buzz the controller mapped to [port] (0 = P1, 1 = P2) for ~500ms.
+	 *  Falls back to the Nth gamepad when no port is claimed yet (tested outside a game). */
+	public static void testRumble(int port) {
+		int devId = com.armsx2.input.PadRouter.INSTANCE.deviceIdForPort(port);
+		if (devId < 0) devId = nthGamepadDeviceId(port);
+		if (devId < 0) return;
+		vibrateDevice(devId, 0.9f, 0.9f, 500);
+	}
+
+	/** One-line report of [port]'s controller and whether Android exposes any vibrator
+	 *  for it (new VibratorManager + legacy API). Lets the Pad tab tell the user whether
+	 *  a missing rumble is a routing issue or the pad just isn't drivable by Android. */
+	public static String rumbleStatusForPort(int port) {
+		int devId = com.armsx2.input.PadRouter.INSTANCE.deviceIdForPort(port);
+		boolean mapped = devId >= 0;
+		if (devId < 0) devId = nthGamepadDeviceId(port);
+		if (devId < 0) return "Player " + (port + 1) + ": no controller found";
+		InputDevice d = InputDevice.getDevice(devId);
+		String name = (d != null && d.getName() != null) ? d.getName() : ("device " + devId);
+		int vmCount = 0;
+		boolean legacy = false;
+		try {
+			Vibrator lv = (d != null) ? d.getVibrator() : null;
+			legacy = lv != null && lv.hasVibrator();
+		} catch (Throwable ignored) {}
+		if (Build.VERSION.SDK_INT >= 31 && d != null) {
+			try { vmCount = d.getVibratorManager().getVibratorIds().length; } catch (Throwable ignored) {}
+		}
+		boolean hasRumble = vmCount > 0 || legacy;
+		int motors = Math.max(vmCount, legacy ? 1 : 0);
+		return "Player " + (port + 1) + ": " + name
+				+ (mapped ? "" : " (not active in-game yet)")
+				+ (hasRumble ? " — rumble OK (" + motors + " motor" + (motors == 1 ? "" : "s") + ")"
+						: " — NO rumble exposed by Android");
 	}
 
 	public static native void setAspectRatio(int type);

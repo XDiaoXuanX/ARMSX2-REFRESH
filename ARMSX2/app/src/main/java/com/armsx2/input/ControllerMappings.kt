@@ -49,6 +49,16 @@ object ControllerMappings {
         CUSTOM("custom", "Custom"),
     }
 
+    // ---- Per-player bindings (local co-op) ---------------------------------
+    // P1 (0) keeps the existing prefs keys byte-for-byte (empty prefix), so
+    // single-player users see ZERO change; P2 (1) namespaces under "p2.". Only
+    // WHICH physical button maps to WHICH PS2 button is per-player (button binds,
+    // stick mode, custom stick codes). Controller FEEL (sensitivity / accel /
+    // deadzone / d-pad-as-left-stick) and SYSTEM hotkeys stay global.
+    const val P1 = 0
+    const val P2 = 1
+    private fun playerPrefix(player: Int) = if (player == 0) "" else "p${player + 1}."
+
     private const val KEY_LSTICK = "pad.lstick.mode"
     private const val KEY_RSTICK = "pad.rstick.mode"
 
@@ -57,12 +67,15 @@ object ControllerMappings {
         return StickMode.values().firstOrNull { it.id == id } ?: StickMode.ANALOG
     }
 
-    fun leftStickMode(): StickMode = stickModeFor(KEY_LSTICK)
-    fun rightStickMode(): StickMode = stickModeFor(KEY_RSTICK)
-    fun setLeftStickMode(m: StickMode) = Main.prefs.edit().putString(KEY_LSTICK, m.id).apply()
-    fun setRightStickMode(m: StickMode) = Main.prefs.edit().putString(KEY_RSTICK, m.id).apply()
+    fun leftStickMode(player: Int = 0): StickMode = stickModeFor(playerPrefix(player) + KEY_LSTICK)
+    fun rightStickMode(player: Int = 0): StickMode = stickModeFor(playerPrefix(player) + KEY_RSTICK)
+    fun setLeftStickMode(m: StickMode, player: Int = 0) =
+        Main.prefs.edit().putString(playerPrefix(player) + KEY_LSTICK, m.id).apply()
+    fun setRightStickMode(m: StickMode, player: Int = 0) =
+        Main.prefs.edit().putString(playerPrefix(player) + KEY_RSTICK, m.id).apply()
     /** Mode for the left (true) or right (false) stick — used by the dispatcher. */
-    fun stickModeFor(left: Boolean): StickMode = if (left) leftStickMode() else rightStickMode()
+    fun stickModeFor(left: Boolean, player: Int = 0): StickMode =
+        if (left) leftStickMode(player) else rightStickMode(player)
 
     // Make the physical D-pad drive the LEFT analog stick (full deflection) so it
     // works in games that only read the analog stick. While on, the D-pad no
@@ -70,6 +83,58 @@ object ControllerMappings {
     private const val KEY_DPAD_AS_LSTICK = "pad.dpadAsLeftStick"
     fun dpadAsLeftStick(): Boolean = Main.prefs.getBoolean(KEY_DPAD_AS_LSTICK, false)
     fun setDpadAsLeftStick(on: Boolean) = Main.prefs.edit().putBoolean(KEY_DPAD_AS_LSTICK, on).apply()
+
+    // ---- Analog stick response shaping (physical sticks → PS2 analog) ----
+    // Sensitivity = a linear output scale. Acceleration = an exponential response
+    // curve applied to the post-deadzone magnitude (0 = linear; higher = finer
+    // control near center, ramping to full speed at full tilt). Global controller
+    // feel, persisted in Main.prefs; cached so the hot motion path avoids a lookup.
+    private const val KEY_STICK_SENS = "pad.stick.sensitivity"
+    private const val KEY_STICK_ACCEL = "pad.stick.acceleration"
+    const val STICK_SENS_MIN = 0.5f
+    const val STICK_SENS_MAX = 2.0f
+    const val STICK_ACCEL_MAX = 2.0f
+    @Volatile private var sStickSens = Float.NaN
+    @Volatile private var sStickAccel = Float.NaN
+    fun stickSensitivity(): Float {
+        if (sStickSens.isNaN())
+            sStickSens = Main.prefs.getFloat(KEY_STICK_SENS, 1.0f).coerceIn(STICK_SENS_MIN, STICK_SENS_MAX)
+        return sStickSens
+    }
+    fun setStickSensitivity(v: Float) {
+        val c = v.coerceIn(STICK_SENS_MIN, STICK_SENS_MAX)
+        sStickSens = c
+        Main.prefs.edit().putFloat(KEY_STICK_SENS, c).apply()
+    }
+    fun stickAcceleration(): Float {
+        if (sStickAccel.isNaN())
+            sStickAccel = Main.prefs.getFloat(KEY_STICK_ACCEL, 0.0f).coerceIn(0f, STICK_ACCEL_MAX)
+        return sStickAccel
+    }
+    fun setStickAcceleration(v: Float) {
+        val c = v.coerceIn(0f, STICK_ACCEL_MAX)
+        sStickAccel = c
+        Main.prefs.edit().putFloat(KEY_STICK_ACCEL, c).apply()
+    }
+
+    // App-side analog stick deadzone (fraction of travel ignored). Kept small by
+    // default and user-adjustable down to 0 — handheld "switch" sticks have tiny
+    // range, so a big deadzone wastes most of it. Output is re-normalized past the
+    // deadzone (see Main.shapeStickMag) so movement ramps smoothly from 0 instead
+    // of jumping. Pairs with forcing the NATIVE pad deadzone to 0.
+    private const val KEY_STICK_DZ = "pad.stick.deadzone"
+    const val STICK_DZ_MAX = 0.40f
+    @Volatile private var sStickDz = Float.NaN
+    fun stickDeadzone(): Float {
+        if (sStickDz.isNaN())
+            sStickDz = Main.prefs.getFloat(KEY_STICK_DZ, 0.05f).coerceIn(0f, STICK_DZ_MAX)
+        return sStickDz
+    }
+    fun setStickDeadzone(v: Float) {
+        val c = v.coerceIn(0f, STICK_DZ_MAX)
+        sStickDz = c
+        Main.prefs.edit().putFloat(KEY_STICK_DZ, c).apply()
+    }
 
     // ---- Custom per-direction stick→button binding (StickMode.CUSTOM) ----
 
@@ -105,12 +170,12 @@ object ControllerMappings {
         !left && dir == StickDir.LEFT -> 123
         else -> 121 // right stick, RIGHT
     }
-    private fun customKey(left: Boolean, dir: StickDir) =
-        "pad.${if (left) "lstick" else "rstick"}.${dir.id}.code"
-    fun customStickCode(left: Boolean, dir: StickDir): Int =
-        Main.prefs.getInt(customKey(left, dir), defaultCustomCode(left, dir))
-    fun setCustomStickCode(left: Boolean, dir: StickDir, code: Int) =
-        Main.prefs.edit().putInt(customKey(left, dir), code).apply()
+    private fun customKey(left: Boolean, dir: StickDir, player: Int = 0) =
+        playerPrefix(player) + "pad.${if (left) "lstick" else "rstick"}.${dir.id}.code"
+    fun customStickCode(left: Boolean, dir: StickDir, player: Int = 0): Int =
+        Main.prefs.getInt(customKey(left, dir, player), defaultCustomCode(left, dir))
+    fun setCustomStickCode(left: Boolean, dir: StickDir, code: Int, player: Int = 0) =
+        Main.prefs.edit().putInt(customKey(left, dir, player), code).apply()
 
     /** Active CUSTOM stick-direction capture target, or null. (left, dir). When
      *  non-null the Pad tab is waiting for a physical button to bind to this
@@ -125,20 +190,21 @@ object ControllerMappings {
      *  or null if that physical button isn't bound to any pad Action. Same
      *  physical->target lookup the gameplay path uses, e.g. physical-Cross -> 96.
      *  Reusing it means "stick Up = Cross" needs no new table. */
-    fun stickCodeForPhysical(physicalKeyCode: Int): Int? = targetForPhysical(physicalKeyCode)
+    fun stickCodeForPhysical(physicalKeyCode: Int, player: Int = 0): Int? =
+        targetForPhysical(physicalKeyCode, player)
 
     fun beginStickCapture(left: Boolean, dir: StickDir) { captureStickDir.value = left to dir }
     fun endStickCapture() { captureStickDir.value = null; stickBindTick.value++ }
 
     /** Clear a direction back to its analog default (the Reset affordance). */
-    fun resetStickCode(left: Boolean, dir: StickDir) {
-        Main.prefs.edit().remove(customKey(left, dir)).apply(); stickBindTick.value++
+    fun resetStickCode(left: Boolean, dir: StickDir, player: Int = 0) {
+        Main.prefs.edit().remove(customKey(left, dir, player)).apply(); stickBindTick.value++
     }
 
     private const val KEY_PREFIX = "pad.map."
 
-    fun physicalFor(action: Action): Int =
-        Main.prefs.getInt(KEY_PREFIX + action.id, action.defaultPhysicalKeyCode)
+    fun physicalFor(action: Action, player: Int = 0): Int =
+        Main.prefs.getInt(playerPrefix(player) + KEY_PREFIX + action.id, action.defaultPhysicalKeyCode)
 
     fun labelForKey(keyCode: Int): String = when (keyCode) {
         KeyEvent.KEYCODE_UNKNOWN -> "Not set"
@@ -161,18 +227,38 @@ object ControllerMappings {
         else -> KeyEvent.keyCodeToString(keyCode).removePrefix("KEYCODE_")
     }
 
-    fun bind(action: Action, physicalKeyCode: Int) {
-        Main.prefs.edit().putInt(KEY_PREFIX + action.id, physicalKeyCode).apply()
+    fun bind(action: Action, physicalKeyCode: Int, player: Int = 0) {
+        Main.prefs.edit().putInt(playerPrefix(player) + KEY_PREFIX + action.id, physicalKeyCode).apply()
     }
 
-    fun reset() {
+    fun reset(player: Int = 0) {
         val edit = Main.prefs.edit()
-        actions.forEach { edit.remove(KEY_PREFIX + it.id) }
+        actions.forEach { edit.remove(playerPrefix(player) + KEY_PREFIX + it.id) }
         edit.apply()
     }
 
-    fun targetForPhysical(physicalKeyCode: Int): Int? =
-        actions.firstOrNull { physicalFor(it) == physicalKeyCode }?.targetKeyCode
+    /** Reset the pad TUNABLES to defaults for the global "Reset to defaults" — stick
+     *  feel (deadzone/sensitivity/acceleration), D-pad-as-left-stick, stick modes and
+     *  CUSTOM stick-direction codes, for BOTH players. Does NOT touch the button binds
+     *  (those have their own per-player Reset). Bumps stickBindTick so the Pad tab
+     *  recomposes. (The button-bind sliders live outside the Settings object, which is
+     *  why the Settings reset alone didn't clear them.) */
+    fun resetTunables() {
+        val edit = Main.prefs.edit()
+        edit.remove(KEY_STICK_SENS).remove(KEY_STICK_ACCEL).remove(KEY_STICK_DZ).remove(KEY_DPAD_AS_LSTICK)
+        sStickSens = Float.NaN; sStickAccel = Float.NaN; sStickDz = Float.NaN
+        for (p in intArrayOf(P1, P2)) {
+            edit.remove(playerPrefix(p) + KEY_LSTICK).remove(playerPrefix(p) + KEY_RSTICK)
+            for (left in booleanArrayOf(true, false))
+                for (dir in StickDir.values())
+                    edit.remove(customKey(left, dir, p))
+        }
+        edit.apply()
+        stickBindTick.value++
+    }
+
+    fun targetForPhysical(physicalKeyCode: Int, player: Int = 0): Int? =
+        actions.firstOrNull { physicalFor(it, player) == physicalKeyCode }?.targetKeyCode
 
     // ---- System hotkeys (menu / quick save / quick load) -----------------
     // Physical buttons bound to app actions, NOT forwarded to the PS2. Handled in
@@ -231,6 +317,18 @@ object ControllerMappings {
             .putInt(h.prefKey, KeyEvent.KEYCODE_UNKNOWN)
             .putInt(h.prefKey + MOD_SUFFIX, KeyEvent.KEYCODE_UNKNOWN)
             .apply()
+    }
+
+    /** Clear ALL system hotkey bindings (the global "Reset to defaults"). Bumps
+     *  hotkeyBindTick so the Hotkeys tab recomposes. */
+    fun clearAllHotkeys() {
+        val edit = Main.prefs.edit()
+        SysHotkey.values().forEach {
+            edit.putInt(it.prefKey, KeyEvent.KEYCODE_UNKNOWN)
+                .putInt(it.prefKey + MOD_SUFFIX, KeyEvent.KEYCODE_UNKNOWN)
+        }
+        edit.apply()
+        hotkeyBindTick.value++
     }
 
     /** Human-readable binding, e.g. "Select + R1" or "L1", or "" if unbound. */
