@@ -61,6 +61,12 @@ object MemoryCardManager {
     val visible = mutableStateOf(false)
     private val files = mutableStateListOf<File>()
     private val status = mutableStateOf<String?>(null)
+    // Which card file is bound to each slot, so the list can mark the active
+    // cards. Read from the persisted global config; updated on assign.
+    private val slot1Filename = mutableStateOf("")
+    private val slot2Filename = mutableStateOf("")
+    private val slot1Enabled = mutableStateOf(false)
+    private val slot2Enabled = mutableStateOf(false)
 
     @Composable
     fun Render() {
@@ -305,10 +311,18 @@ object MemoryCardManager {
                             .padding(8.dp),
                     ) {
                         files.forEach { file ->
+                            val inSlot1 = slot1Enabled.value && file.name.equals(slot1Filename.value, ignoreCase = true)
+                            val inSlot2 = slot2Enabled.value && file.name.equals(slot2Filename.value, ignoreCase = true)
+                            val active = inSlot1 || inSlot2
                             Row(
                                 Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 5.dp),
+                                    .then(
+                                        if (active)
+                                            Modifier.background(Color(0xFF14361F), RoundedCornerShape(6.dp))
+                                        else Modifier
+                                    )
+                                    .padding(vertical = 5.dp, horizontal = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
@@ -319,6 +333,20 @@ object MemoryCardManager {
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f),
                                 )
+                                if (active) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        when {
+                                            inSlot1 && inSlot2 -> "● SLOTS 1 & 2"
+                                            inSlot1 -> "● SLOT 1"
+                                            else -> "● SLOT 2"
+                                        },
+                                        color = Color(0xFF6FCF7F),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                    )
+                                }
                                 Spacer(Modifier.width(8.dp))
                                 Text(
                                     if (file.isDirectory) "Folder" else readableSize(file.length()),
@@ -334,7 +362,7 @@ object MemoryCardManager {
                                         .height(32.dp)
                                         .controllerFocusable("mc:slot1:${file.name}", onConfirm = { assignSlot(context, 1, file) }),
                                 ) {
-                                    Text("Slot 1", fontSize = 11.sp)
+                                    Text(if (inSlot1) "✓ Slot 1" else "Slot 1", fontSize = 11.sp)
                                 }
                                 Spacer(Modifier.width(6.dp))
                                 Button(
@@ -345,7 +373,7 @@ object MemoryCardManager {
                                         .height(32.dp)
                                         .controllerFocusable("mc:slot2:${file.name}", onConfirm = { assignSlot(context, 2, file) }),
                                 ) {
-                                    Text("Slot 2", fontSize = 11.sp)
+                                    Text(if (inSlot2) "✓ Slot 2" else "Slot 2", fontSize = 11.sp)
                                 }
                             }
                         }
@@ -370,6 +398,16 @@ object MemoryCardManager {
             ?.filter { it.isFile || it.isDirectory }
             ?.sortedWith(compareBy<File> { !it.name.endsWith(".ps2", ignoreCase = true) }.thenBy { it.name.lowercase() })
             ?.let { files.addAll(it) }
+        readSlotState()
+    }
+
+    /** Refresh the cached per-slot bindings shown as the "active" markers. */
+    private fun readSlotState() {
+        val g = ConfigStore.loadGlobal()
+        slot1Filename.value = g.memoryCardSlot1Filename
+        slot2Filename.value = g.memoryCardSlot2Filename
+        slot1Enabled.value = g.memoryCardSlot1Enabled
+        slot2Enabled.value = g.memoryCardSlot2Enabled
     }
 
     private fun importSlot1(context: Context, uri: Uri) {
@@ -442,6 +480,7 @@ object MemoryCardManager {
             NativeApp.setSetting("MemoryCards", "Slot${slot}_Enable", "bool", "true")
             NativeApp.commitSettings()
             persistSlot(slot, file.name)
+            readSlotState()
             status.value = "${file.name} assigned to Slot $slot."
             Toast.makeText(context, status.value, Toast.LENGTH_SHORT).show()
             return true
@@ -464,6 +503,7 @@ object MemoryCardManager {
         NativeApp.setSetting("MemoryCards", "Slot2_Enable", "bool", "true")
         NativeApp.commitSettings()
         persistDefaultSlots()
+        readSlotState()
     }
 
     private fun persistSlot(slot: Int, filename: String) {

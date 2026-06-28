@@ -85,5 +85,11 @@ fun AudioTab(state: MutableState<Settings>) {
             valueFormatter = { "$it%" },
             onChange = { apply(s.copy(audioFastForwardVolume = it)) },
         )
+        SettingsDivider()
+        ToggleRow(
+            "SPU2 SIMD audio (experimental)",
+            s.spu2NeonReverb,
+            description = "NEON fast path for reverb audio processing — frees up CPU, which can help performance on CPU-limited devices. Off (default) uses the standard path with unchanged audio. Reboot the game to switch.",
+        ) { apply(s.copy(spu2NeonReverb = it)) }
     }
 }

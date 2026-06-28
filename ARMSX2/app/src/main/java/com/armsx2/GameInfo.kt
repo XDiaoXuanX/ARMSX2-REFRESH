@@ -1,7 +1,9 @@
 package com.armsx2
 
+import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.mutableStateOf
+import java.io.File
 
 /**
  * Box-art style for the library: 2D flat scans (the "default" mirror, JPG) or
@@ -95,6 +97,94 @@ data class GameInfo(
         val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')
         return name?.let { FilenameParser.versionTokenOf(it) } ?: serial
     }
+}
+
+/**
+ * User-supplied cover overrides for games the online repo can't match — homebrew,
+ * ELF ports, obscure dumps with no serial. Stored as image files under
+ * `<dataRoot>/covers/custom/`. A cover is matched case-insensitively (png / jpg /
+ * jpeg / webp) by the game's serial, its ROM filename, OR its displayed title — so
+ * dropping in a file named after the game just works, and the in-app picker writes
+ * to the same folder. A custom cover always wins over the online repo cover.
+ */
+object CustomCovers {
+    /** Bumped on set/remove so cover tiles re-resolve. */
+    val version = mutableStateOf(0)
+
+    // Main.assetCopyRoot() can flip between the chosen system dir and the
+    // app-private fallback depending on a transient write-probe — so covers got
+    // stored under one root and looked up under another ("sometimes there,
+    // sometimes not"). Cache the covers root on first resolve so set + load always
+    // agree, and share this exact cache with GamesList.coversDir (remote covers).
+    @Volatile
+    private var cachedCoversRoot: File? = null
+    fun coversRoot(context: Context): File =
+        cachedCoversRoot ?: File(Main.assetCopyRoot(context), "covers").also { cachedCoversRoot = it }
+
+    private fun dir(context: Context): File = File(coversRoot(context), "custom")
+
+    private fun filenameStem(game: GameInfo): String? =
+        game.uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')
+            ?.substringBeforeLast('.')?.trim()?.takeIf { it.isNotEmpty() }
+
+    /** Names the user might give the cover file, highest priority first. */
+    private fun keys(game: GameInfo): List<String> = buildList {
+        game.serial?.takeIf { it.isNotBlank() }?.let { add(it) }
+        filenameStem(game)?.let { add(it) }
+        game.title.takeIf { it.isNotBlank() }?.let { add(it) }
+    }
+
+    /** Load all custom covers as lowercased-stem -> File, in ONE directory
+     *  listing. The library preloads this once (and refreshes on [version]) so
+     *  cover tiles can resolve synchronously instead of each doing its own I/O
+     *  during a scroll — which raced and mis-assigned covers across games. */
+    fun loadAll(context: Context): Map<String, File> {
+        val files = dir(context).listFiles()?.filter { it.isFile && it.length() > 0L } ?: return emptyMap()
+        if (files.isEmpty()) return emptyMap()
+        val byStem = HashMap<String, File>(files.size)
+        for (f in files) byStem.putIfAbsent(f.nameWithoutExtension.lowercase(), f)
+        return byStem
+    }
+
+    /** Resolve [game]'s cover against a preloaded [loadAll] map. No I/O.
+     *  Look-up keys are run through the same [sanitize] the writer uses, so a
+     *  title containing : / \ etc. (which [targetFor] wrote as '_') still
+     *  resolves; sanitize is a no-op for clean keys. */
+    fun matchIn(map: Map<String, File>, game: GameInfo): File? {
+        if (map.isEmpty()) return null
+        for (k in keys(game)) map[sanitize(k).lowercase()]?.let { return it }
+        return null
+    }
+
+    /** An existing custom cover for [game], or null. Single-game convenience
+     *  (does its own listing) — used off the scroll path. */
+    fun fileFor(context: Context, game: GameInfo): File? = matchIn(loadAll(context), game)
+
+    /** Path the in-app picker writes to (serial if present, else ROM filename). */
+    private fun targetFor(context: Context, game: GameInfo): File {
+        val key = game.serial?.takeIf { it.isNotBlank() }
+            ?: filenameStem(game) ?: game.title.ifBlank { "cover" }
+        return File(dir(context), sanitize(key) + ".png")
+    }
+
+    /** Copy [source] in as [game]'s cover, replacing any prior one. */
+    fun set(context: Context, game: GameInfo, source: Uri): Boolean = runCatching {
+        remove(context, game)
+        val target = targetFor(context, game)
+        target.parentFile?.mkdirs()
+        context.contentResolver.openInputStream(source)?.use { ins ->
+            target.outputStream().use { outs -> ins.copyTo(outs) }
+        }
+        (target.isFile && target.length() > 0L).also { if (it) version.value++ }
+    }.getOrDefault(false)
+
+    fun remove(context: Context, game: GameInfo): Boolean {
+        val f = fileFor(context, game) ?: return false
+        return f.delete().also { if (it) version.value++ }
+    }
+
+    private fun sanitize(s: String): String =
+        s.replace(Regex("""[/\\:*?"<>|\n\r\t]"""), "_").trim().ifEmpty { "cover" }
 }
 
 /** Map a PS1/PS2 serial prefix to a region label. */

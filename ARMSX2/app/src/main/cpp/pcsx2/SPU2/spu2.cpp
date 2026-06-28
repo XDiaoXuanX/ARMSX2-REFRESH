@@ -12,7 +12,12 @@
 #include "R3000A.h"
 #include "VMManager.h"
 
+#include "common/Console.h"
 #include "common/Error.h"
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include "SPU2/spu2_neon.h"
+#endif
 
 const StereoOut32 StereoOut32::Empty(0, 0);
 
@@ -256,6 +261,18 @@ void SPU2::InternalReset(bool psxmode)
 	spu2Mix = MULTI_ISA_SELECT(spu2Mix);
 	ReverbDownsample = MULTI_ISA_SELECT(ReverbDownsample);
 	ReverbUpsample = MULTI_ISA_SELECT(ReverbUpsample);
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+	// Optional NEON reverb FIR (opt-in, default off). Overrides the Multi-ISA
+	// scalar reverb resamplers assigned just above. Read fresh on every reset so
+	// toggling the "SPU2 SIMD audio" setting + rebooting the game switches
+	// backends. When off, the scalar reference (current default) is used.
+	if (Host::GetBaseBoolSettingValue("SPU2", "NeonReverbSIMD", false))
+	{
+		SPU2::RegisterNEONBackend();
+		Console.WriteLn("SPU2: NEON reverb SIMD backend enabled");
+	}
+#endif
 
 	s_current_chunk_pos = 0;
 	s_psxmode = psxmode;

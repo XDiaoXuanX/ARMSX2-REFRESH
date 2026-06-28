@@ -30,7 +30,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import com.armsx2.Main
-import com.armsx2.config.LiveGsApplyQueue
 import com.armsx2.config.Settings
 import com.armsx2.ui.Colors
 import com.armsx2.ui.InGameOverlay
@@ -89,10 +88,10 @@ fun RendererTab(state: MutableState<Settings>) {
     ) {
         // Graphics API (OpenGL / Vulkan) + Vulkan custom-driver picker. Ported
         // from the removed first-run setup renderer page into settings.
-        RendererBackendSection()
+        RendererBackendSection(state)
         SettingsDivider()
         val upscaleIndex = UPSCALE_OPTIONS
-            .indexOfFirst { abs(it.value - Main.upscale.value) < 0.01f }
+            .indexOfFirst { abs(it.value - s.upscaleFloat) < 0.01f }
             .takeIf { it >= 0 } ?: 0
         SegmentedGridRow(
             label = "Upscale",
@@ -102,11 +101,9 @@ fun RendererTab(state: MutableState<Settings>) {
             description = "Internal resolution. Higher values are sharper but can expose game-specific bloom or alignment artifacts.",
             onChange = { index ->
                 val mult = UPSCALE_OPTIONS[index].value
-                if (abs(Main.upscale.value - mult) >= 0.01f) {
-                    Main.upscale.value = mult
-                    Main.prefs.edit().putFloat("upscaleFloat", mult).apply()
-                    LiveGsApplyQueue.applyUpscale(mult)
-                }
+                // Persist scope-aware (per-game when the overlay scope is Game);
+                // the live GS apply happens in InGameOverlay's settings delta.
+                if (abs(s.upscaleFloat - mult) >= 0.01f) apply(s.copy(upscaleFloat = mult))
             },
         )
         SettingsDivider()

@@ -95,6 +95,10 @@ data class Settings(
     val audioOutputLatencyMs: Int = 20,
     /** SPU2/Output/FastForwardVolume — output volume % while fast-forwarding. */
     val audioFastForwardVolume: Int = 100,
+    /** SPU2/NeonReverbSIMD — opt-in NEON reverb FIR on ARM64. Frees CPU on
+     *  CPU-bound devices; default off uses the scalar reference (unchanged
+     *  audio). Applied on the next game boot/reset. */
+    val spu2NeonReverb: Boolean = false,
 
     // ---- EmuCore — patches / cheats ----
     /** EmuCore/EnablePatches — game-compatibility patches (default on). */
@@ -204,6 +208,14 @@ data class Settings(
     /** EmuCore/GS/AspectRatio:
      *  0 Stretch · 1 Auto 4:3/3:2 · 2 4:3 · 3 16:9 · 4 10:7. */
     val aspectRatio: Int = 1,
+    /** Host graphics API: "auto" / "opengl" / "vulkan" / "software". Applied via
+     *  the renderer JNI helpers on (re)launch; per-game so each title can pick its
+     *  own backend. Seeded from the legacy global "renderer" pref on first load. */
+    val renderer: String = "auto",
+    /** Internal resolution multiplier (0.25..5.0; 1.0 = native). Applied live via
+     *  the GS upscale helper; per-game so each title keeps its own. Seeded from the
+     *  legacy global "upscaleFloat" pref on first load. */
+    val upscaleFloat: Float = 1.0f,
     /** EmuCore/GS/deinterlace_mode — GSInterlaceMode:
      *  0 Auto · 1 Off · 2/3 Weave · 4/5 Bob · 6/7 Blend · 8/9 Adaptive. */
     val deinterlaceMode: Int = 0,
@@ -491,6 +503,9 @@ data class Settings(
         put("SPU2/Output", "BufferMS", "int", audioBufferMs.coerceIn(10, 200).toString())
         put("SPU2/Output", "OutputLatencyMS", "int", audioOutputLatencyMs.coerceIn(5, 200).toString())
         put("SPU2/Output", "FastForwardVolume", "int", audioFastForwardVolume.coerceIn(0, 200).toString())
+        // Opt-in NEON reverb FIR (ARM64). Read by SPU2::InternalReset on the
+        // next game boot; default off = scalar reference (unchanged audio).
+        put("SPU2", "NeonReverbSIMD", "bool", spu2NeonReverb.toString())
         // Patches / cheats (EmuCore). Reloaded by ApplySettings →
         // CheckForPatchConfigChanges; widescreen/no-interlacing take effect on
         // the next boot for most games.
@@ -835,6 +850,9 @@ data class Settings(
         put("audioBufferMs", audioBufferMs)
         put("audioOutputLatencyMs", audioOutputLatencyMs)
         put("audioFastForwardVolume", audioFastForwardVolume)
+        put("spu2NeonReverb", spu2NeonReverb)
+        put("renderer", renderer)
+        put("upscaleFloat", upscaleFloat.toDouble())
         put("enablePatches", enablePatches)
         put("enableCheats", enableCheats)
         put("enableWideScreenPatches", enableWideScreenPatches)
@@ -1012,6 +1030,9 @@ data class Settings(
                 audioBufferMs = json.optInt("audioBufferMs", def.audioBufferMs),
                 audioOutputLatencyMs = json.optInt("audioOutputLatencyMs", def.audioOutputLatencyMs),
                 audioFastForwardVolume = json.optInt("audioFastForwardVolume", def.audioFastForwardVolume),
+                spu2NeonReverb = json.optBoolean("spu2NeonReverb", def.spu2NeonReverb),
+                renderer = json.optString("renderer", def.renderer),
+                upscaleFloat = json.optDouble("upscaleFloat", def.upscaleFloat.toDouble()).toFloat(),
                 enablePatches = json.optBoolean("enablePatches", def.enablePatches),
                 enableCheats = json.optBoolean("enableCheats", def.enableCheats),
                 enableWideScreenPatches = json.optBoolean("enableWideScreenPatches", def.enableWideScreenPatches),
@@ -1192,6 +1213,9 @@ data class Settings(
             if (current.audioBufferMs != base.audioBufferMs) j.put("audioBufferMs", current.audioBufferMs)
             if (current.audioOutputLatencyMs != base.audioOutputLatencyMs) j.put("audioOutputLatencyMs", current.audioOutputLatencyMs)
             if (current.audioFastForwardVolume != base.audioFastForwardVolume) j.put("audioFastForwardVolume", current.audioFastForwardVolume)
+            if (current.spu2NeonReverb != base.spu2NeonReverb) j.put("spu2NeonReverb", current.spu2NeonReverb)
+            if (current.renderer != base.renderer) j.put("renderer", current.renderer)
+            if (current.upscaleFloat != base.upscaleFloat) j.put("upscaleFloat", current.upscaleFloat.toDouble())
             if (current.enablePatches != base.enablePatches) j.put("enablePatches", current.enablePatches)
             if (current.enableCheats != base.enableCheats) j.put("enableCheats", current.enableCheats)
             if (current.enableWideScreenPatches != base.enableWideScreenPatches) j.put("enableWideScreenPatches", current.enableWideScreenPatches)
@@ -1358,6 +1382,9 @@ data class Settings(
             audioBufferMs = if (overrides.has("audioBufferMs")) overrides.getInt("audioBufferMs") else base.audioBufferMs,
             audioOutputLatencyMs = if (overrides.has("audioOutputLatencyMs")) overrides.getInt("audioOutputLatencyMs") else base.audioOutputLatencyMs,
             audioFastForwardVolume = if (overrides.has("audioFastForwardVolume")) overrides.getInt("audioFastForwardVolume") else base.audioFastForwardVolume,
+            spu2NeonReverb = if (overrides.has("spu2NeonReverb")) overrides.getBoolean("spu2NeonReverb") else base.spu2NeonReverb,
+            renderer = if (overrides.has("renderer")) overrides.getString("renderer") else base.renderer,
+            upscaleFloat = if (overrides.has("upscaleFloat")) overrides.getDouble("upscaleFloat").toFloat() else base.upscaleFloat,
             enablePatches = if (overrides.has("enablePatches")) overrides.getBoolean("enablePatches") else base.enablePatches,
             enableCheats = if (overrides.has("enableCheats")) overrides.getBoolean("enableCheats") else base.enableCheats,
             enableWideScreenPatches = if (overrides.has("enableWideScreenPatches")) overrides.getBoolean("enableWideScreenPatches") else base.enableWideScreenPatches,

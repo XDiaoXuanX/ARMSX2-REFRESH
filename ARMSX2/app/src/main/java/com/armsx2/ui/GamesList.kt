@@ -64,8 +64,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -87,6 +90,7 @@ import com.armsx2.R
 import com.armsx2.EmuState
 import com.armsx2.FilenameParser
 import com.armsx2.CoverArtStyle
+import com.armsx2.CustomCovers
 import com.armsx2.GameInfo
 import com.armsx2.LibraryTitles
 import com.armsx2.GamePlatform
@@ -142,6 +146,10 @@ object GamesList {
     private val recentLoaded = mutableStateOf(false)
     private val customBackgroundPath = mutableStateOf<String?>(null)
     private val customBackgroundLoaded = mutableStateOf(false)
+    // Preloaded custom-cover index (lowercased stem -> file), refreshed on
+    // CustomCovers.version. Cover tiles look this up synchronously instead of each
+    // doing its own dir listing mid-scroll (which raced and mis-assigned covers).
+    private val customCoverMap = mutableStateOf<Map<String, File>>(emptyMap())
     private val controllerSelectedUri = mutableStateOf<String?>(null)
     private data class ControllerGameRow(
         val rowId: Int,
@@ -307,6 +315,14 @@ object GamesList {
                 customBackgroundLoaded.value = true
                 loadCustomBackground(context)
             }
+        }
+
+        // Preload the custom-cover index off the main thread; refresh when a cover
+        // is added/removed (CustomCovers.version bump). Cover tiles read this map
+        // synchronously, so they don't each list the dir mid-scroll (which raced
+        // and mis-assigned covers across games).
+        LaunchedEffect(CustomCovers.version.value) {
+            customCoverMap.value = withContext(Dispatchers.IO) { CustomCovers.loadAll(context) }
         }
 
         // Stable cache key — order-independent join of all configured dirs.
@@ -710,8 +726,13 @@ object GamesList {
         // controller highlight and the confirm action all stay in sync. Built
         // here in composition so the closures capture the live launchers/context;
         // published to the nav model via SideEffect.
-        val toolbarActions: List<Pair<String, () -> Unit>> = buildList {
-            add("Scan" to {
+        val toolbarExpanded = remember { mutableStateOf(false) }
+
+        // (icon, caption, action). The first four are always visible; the rest fold
+        // behind the "⋮ More" toggle. Each caption renders UNDER its icon. Controller
+        // nav sees a flat list that grows/shrinks when the toggle flips.
+        val toolbarActions: List<Triple<String, String, () -> Unit>> = buildList {
+            add(Triple(LibIcons.SEARCH, "Scan") {
                 when {
                     romsDirs.isEmpty() ->
                         Toast.makeText(context, "Choose a game folder first", Toast.LENGTH_SHORT).show()
@@ -724,73 +745,139 @@ object GamesList {
                     }
                 }
             })
-            add("BIOS" to {
+            add(Triple(LibIcons.CPU, "BIOS") {
                 WindowImpl.showLibrary.value = false
                 Main.startBios()
             })
-            add("ELF" to { bootElfLauncher.launch(arrayOf("*/*")) })
-            add("Wall" to { wallLauncher.launch(arrayOf("image/*")) })
-            add((if (CoverArtStyle.use3d.value) "Art: 3D" else "Art: 2D") to {
-                CoverArtStyle.set(!CoverArtStyle.use3d.value)
+            add(Triple(LibIcons.SD_CARD, "Cards") { MemoryCardManager.visible.value = true })
+            add(Triple(
+                if (CoverArtStyle.use3d.value) LibIcons.BOX else LibIcons.PHOTO,
+                if (CoverArtStyle.use3d.value) "Cover 3D" else "Cover 2D",
+            ) { CoverArtStyle.set(!CoverArtStyle.use3d.value) })
+            add(Triple(LibIcons.DOTS, if (toolbarExpanded.value) "Less" else "More") {
+                toolbarExpanded.value = !toolbarExpanded.value
             })
-            if (customBackgroundPath.value != null) {
-                add("Reset" to { resetCustomBackground(context) })
+            if (toolbarExpanded.value) {
+                add(Triple(LibIcons.FILE_CODE, "ELF") { bootElfLauncher.launch(arrayOf("*/*")) })
+                add(Triple(LibIcons.WALLPAPER, "Background") { wallLauncher.launch(arrayOf("image/*")) })
+                if (customBackgroundPath.value != null) {
+                    add(Triple(LibIcons.REFRESH, "Reset BG") { resetCustomBackground(context) })
+                }
+                add(Triple(LibIcons.TOOL, "Setup") {
+                    SetupImpl.resetForReentry()
+                    Main.reopenSetup()
+                })
             }
-            add("Cards" to { MemoryCardManager.visible.value = true })
-            add("Setup" to {
-                SetupImpl.resetForReentry()
-                Main.reopenSetup()
-            })
         }
-        SideEffect { controllerToolbarActions = toolbarActions }
+        SideEffect { controllerToolbarActions = toolbarActions.map { it.second to it.third } }
         val toolbarFocusIndex =
             if (controllerZone.value == Zone.TOOLBAR) controllerToolbarIndex.value else -1
 
         Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             SectionHeader(
                 text = title,
                 modifier = Modifier.weight(1f),
             )
-            toolbarActions.forEachIndexed { idx, (label, action) ->
-                ActionChip(label = label, highlighted = idx == toolbarFocusIndex, onClick = action)
+            toolbarActions.forEachIndexed { idx, (icon, label, action) ->
+                IconActionChip(
+                    iconPath = icon,
+                    label = label,
+                    highlighted = idx == toolbarFocusIndex,
+                    onClick = action,
+                )
             }
         }
     }
 
+    /** Tabler-style outline icon (MIT, github.com/tabler/tabler-icons) drawn from
+     *  its 24x24 SVG path data. Stroked to match the app's hand-drawn glyphs — no
+     *  icon-font / Material-icons dependency, so the (un-minified) APK stays lean. */
     @Composable
-    private fun ActionChip(label: String, highlighted: Boolean = false, onClick: () -> Unit) {
+    private fun TablerIcon(pathData: String, modifier: Modifier = Modifier, tint: Color = Color.White) {
+        val path = remember(pathData) {
+            try {
+                PathParser().parsePathString(pathData).toPath()
+            } catch (_: Exception) {
+                Path()
+            }
+        }
+        Canvas(modifier) {
+            val unit = size.minDimension / 24f
+            scale(unit, unit, pivot = Offset.Zero) {
+                drawPath(
+                    path,
+                    color = tint,
+                    style = Stroke(width = 2f, cap = StrokeCap.Round, join = StrokeJoin.Round),
+                )
+            }
+        }
+    }
+
+    /** Toolbar button: a Tabler icon with a short caption underneath (KamFretoZ's
+     *  request — clearer than a single side label). Tap runs the action; the
+     *  controller-focus glow sits on the icon pill. */
+    @Composable
+    private fun IconActionChip(
+        iconPath: String,
+        label: String,
+        highlighted: Boolean,
+        onClick: () -> Unit,
+    ) {
         val glow = Color(0xFF3DA5FF)
-        Box(
+        Column(
             Modifier
-                .height(34.dp)
-                .then(
-                    if (highlighted)
-                        Modifier.shadow(10.dp, RoundedCornerShape(17.dp), ambientColor = glow, spotColor = glow)
-                    else Modifier
-                )
-                .clip(RoundedCornerShape(17.dp))
-                .background(Color.White.copy(alpha = if (highlighted) 0.20f else 0.10f))
-                .border(
-                    1.dp,
-                    if (highlighted) glow else Color.White.copy(alpha = 0.18f),
-                    RoundedCornerShape(17.dp),
-                )
+                .clip(RoundedCornerShape(10.dp))
                 .clickable(onClick = onClick)
-                .padding(horizontal = 12.dp),
-            contentAlignment = Alignment.Center,
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            Box(
+                Modifier
+                    .height(34.dp)
+                    .widthIn(min = 44.dp)
+                    .then(
+                        if (highlighted)
+                            Modifier.shadow(10.dp, RoundedCornerShape(17.dp), ambientColor = glow, spotColor = glow)
+                        else Modifier
+                    )
+                    .clip(RoundedCornerShape(17.dp))
+                    .background(Color.White.copy(alpha = if (highlighted) 0.20f else 0.10f))
+                    .border(
+                        1.dp,
+                        if (highlighted) glow else Color.White.copy(alpha = 0.18f),
+                        RoundedCornerShape(17.dp),
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                TablerIcon(iconPath, Modifier.size(20.dp), Color.White)
+            }
+            Spacer(Modifier.height(3.dp))
             Text(
                 label,
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
+                color = if (highlighted) Color.White else Color.White.copy(alpha = 0.75f),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
                 maxLines = 1,
             )
         }
+    }
+
+    /** Outline icon path data (24x24 viewBox), from Tabler Icons (MIT). */
+    private object LibIcons {
+        const val SEARCH = "M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0 M21 21l-6 -6"
+        const val CPU = "M5 6a1 1 0 0 1 1 -1h12a1 1 0 0 1 1 1v12a1 1 0 0 1 -1 1h-12a1 1 0 0 1 -1 -1l0 -12 M9 9h6v6h-6l0 -6 M3 10h2 M3 14h2 M10 3v2 M14 3v2 M21 10h-2 M21 14h-2 M14 21v-2 M10 21v-2"
+        const val SD_CARD = "M7 21h10a2 2 0 0 0 2 -2v-14a2 2 0 0 0 -2 -2h-6.172a2 2 0 0 0 -1.414 .586l-3.828 3.828a2 2 0 0 0 -.586 1.414v10.172a2 2 0 0 0 2 2 M13 6v2 M16 6v2 M10 7v1"
+        const val BOX = "M12 3l8 4.5l0 9l-8 4.5l-8 -4.5l0 -9l8 -4.5 M12 12l8 -4.5 M12 12l0 9 M12 12l-8 -4.5"
+        const val PHOTO = "M15 8h.01 M3 6a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12 M3 16l5 -5c.928 -.893 2.072 -.893 3 0l5 5 M14 14l1 -1c.928 -.893 2.072 -.893 3 0l3 3"
+        const val WALLPAPER = "M8 6h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-12 M4 18a2 2 0 1 0 4 0a2 2 0 1 0 -4 0 M8 18v-12a2 2 0 1 0 -4 0v12"
+        const val DOTS = "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0 M11 19a1 1 0 1 0 2 0a1 1 0 1 0 -2 0 M11 5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"
+        const val FILE_CODE = "M14 3v4a1 1 0 0 0 1 1h4 M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2 M10 13l-1 2l1 2 M14 13l1 2l-1 2"
+        const val REFRESH = "M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4 M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"
+        const val TOOL = "M7 10h3v-3l-3.5 -3.5a6 6 0 0 1 8 8l6 6a2 2 0 0 1 -3 3l-6 -6a6 6 0 0 1 -8 -8l3.5 3.5"
     }
 
     @Composable
@@ -1827,8 +1914,27 @@ object GamesList {
                 .background(Color(0xFF1B1A1A).copy(alpha = 0.3f)),
             contentAlignment = Alignment.Center,
         ) {
+            // A user-set custom cover wins over the online repo — and is the only
+            // cover source for serial-less games (homebrew, ELF ports). Resolved
+            // SYNCHRONOUSLY from the preloaded index (customCoverMap), so cover
+            // tiles don't each do their own dir listing during a scroll.
+            val custom = remember(game.uri, customCoverMap.value) {
+                CustomCovers.matchIn(customCoverMap.value, game)
+            }
             val coverUrl = game.coverUrl
-            if (coverUrl != null) {
+            if (custom != null) {
+                val scale = when (game.platform) {
+                    GamePlatform.PS2 -> ContentScale.Crop
+                    GamePlatform.PS1 -> ContentScale.Fit
+                }
+                AsyncImage(
+                    model = ImageRequest.Builder(context).data(custom).crossfade(true).build(),
+                    contentDescription = "${game.title} cover",
+                    contentScale = scale,
+                    alignment = Alignment.Center,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else if (coverUrl != null) {
                 val use3d = CoverArtStyle.use3d.value // re-key cache on style change
                 val coverFile = remember(game.serial, game.platform, use3d) { coverFileFor(context, game) }
                 // Resolve the local cover entirely off the main thread — the
@@ -1889,12 +1995,12 @@ object GamesList {
         }
     }
 
-    // The data root is fixed for the session after setup, and Main.assetCopyRoot
-    // can do a write-probe / JNI call — far too costly to run per cover tile during
-    // a scroll. Cache the covers dir so coverFileFor stays cheap (no composition I/O).
-    @Volatile private var cachedCoversDir: File? = null
-    private fun coversDir(context: Context): File =
-        cachedCoversDir ?: File(Main.assetCopyRoot(context), "covers").also { cachedCoversDir = it }
+    // Covers dir. Delegates to CustomCovers.coversRoot so remote AND custom covers
+    // resolve to the SAME cached root — Main.assetCopyRoot can flip between the
+    // system dir and the app-private fallback on a transient write-probe, and a
+    // per-call resolve made custom covers land in a different dir than they were
+    // saved to. One shared cache keeps them consistent (and off the per-tile path).
+    private fun coversDir(context: Context): File = CustomCovers.coversRoot(context)
 
     private fun coverFileFor(context: Context, game: GameInfo): File? {
         val serial = game.serial ?: return null

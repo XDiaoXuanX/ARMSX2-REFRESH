@@ -185,6 +185,7 @@ object ControllerMappings {
         CYCLE_SLOT("pad.cycleslot.keycode", "Cycle Save Slot"),
         TEXTURE_DUMP("pad.texdump.keycode", "Toggle Texture Dumping"),
         FAST_FORWARD("pad.fastforward.keycode", "Fast Forward (hold)"),
+        FAST_FORWARD_TOGGLE("pad.fastforwardtoggle.keycode", "Fast Forward (toggle)"),
         RES_UP("pad.resup.keycode", "Increase Resolution"),
         RES_DOWN("pad.resdown.keycode", "Decrease Resolution"),
         ACHIEVEMENTS("pad.achievements.keycode", "Open Achievements"),

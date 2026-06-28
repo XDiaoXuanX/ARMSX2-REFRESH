@@ -583,6 +583,14 @@ object SetupImpl {
             .putString("renderer", pick)
             .putString("customDriverId", driverId.orEmpty())
             .apply()
+        // Renderer now lives in the Settings tier (resolved by applyRendererPrefs).
+        // Mirror the wizard pick into the global config so it's honored, not just
+        // left in the legacy pref the one-time migration may have already passed.
+        runCatching {
+            com.armsx2.config.ConfigStore.saveGlobal(
+                com.armsx2.config.ConfigStore.loadGlobal().copy(renderer = pick)
+            )
+        }
         return pick
     }
 

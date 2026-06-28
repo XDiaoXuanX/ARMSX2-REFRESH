@@ -62,7 +62,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.Dp
@@ -86,6 +88,9 @@ import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.armsx2.EmuState
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.armsx2.CustomCovers
 import com.armsx2.GameInfo
 import com.armsx2.Main
 import com.armsx2.PlayTime
@@ -353,6 +358,9 @@ object InGameOverlay {
         if (previous.frameLimitEnable != updated.frameLimitEnable) {
             NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", updated.frameLimitEnable.toString())
             NativeApp.speedhackLimitermode(if (updated.frameLimitEnable) 0 else 3)
+            // This limiter write supersedes a latched fast-forward toggle; clear it so
+            // the next FF-toggle press starts fresh instead of reading a stale "on".
+            Main.fastForwardToggleActive = false
         }
 
         // Speed Limit % (emulation speed → NominalScalar) and Frame Rate Control (GS
@@ -415,6 +423,15 @@ object InGameOverlay {
             }
             NativeApp.setSetting("EmuCore/GS", "AspectRatio", "string", name)
             NativeApp.setAspectRatio(ratio)
+        }
+
+        // Internal resolution (upscale) applies live to the GS via the queue — no
+        // VM park. The renderer BACKEND (OpenGL/Vulkan/Software) is restart-only,
+        // applied by Main.applyRendererPrefs on the next launch, so nothing live
+        // to do for it here.
+        if (previous.upscaleFloat != updated.upscaleFloat) {
+            Main.upscale.value = updated.upscaleFloat
+            com.armsx2.config.LiveGsApplyQueue.applyUpscale(updated.upscaleFloat)
         }
 
         if (previous.loadTextureReplacements != updated.loadTextureReplacements)
@@ -1115,31 +1132,50 @@ object InGameOverlay {
                     .padding(20.dp),
                 horizontalAlignment = Alignment.End,
             ) {
-                // Resume + close, side by side. The ✕ already resumes the game
-                // (closeAndResume), but users read it as "exit" and assume the game
-                // is frozen — so we put an obvious green ▶ Resume right next to it.
-                // Both do the same safe thing: leave the menu and resume.
+                // Top-right controls. The green ▶ only appears when configuring a
+                // game's settings via long-press (settingsOnly + a previewGame, no
+                // game running yet): there it BOOTS that game with the settings just
+                // edited. While actually in-game it's hidden — resuming is the red
+                // ✕'s job, so a second "play" button would be redundant. The ✕ is
+                // red and always resumes/closes the overlay.
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(Color(0xFF2E7D32).copy(alpha = 0.92f))
-                            .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(20.dp))
-                            .clickable { closeAndResume() },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("▶", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    if (settingsOnly.value && previewGame.value != null) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(Color(0xFF2E7D32).copy(alpha = 0.92f))
+                                .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(20.dp))
+                                .clickable {
+                                    val g = previewGame.value
+                                    closeKeepingState()
+                                    if (g != null) {
+                                        // Mirror the library card's launch path: hide the
+                                        // library so the new game's surface shows, and hand
+                                        // file:// (all-files) games a bare /storage path — the
+                                        // SAF FD bridge is only for content:// URIs, so a raw
+                                        // "file://…" arg fails to open.
+                                        WindowImpl.showLibrary.value = false
+                                        val arg = if (g.uri.scheme == "file")
+                                            (g.uri.path ?: g.uri.toString())
+                                        else g.uri.toString()
+                                        Main.launchGame(arg, g)
+                                    }
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("▶", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                     Box(
                         modifier = Modifier
                             .size(40.dp)
                             .clip(RoundedCornerShape(20.dp))
-                            .background(Color.White.copy(alpha = 0.12f))
-                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(20.dp))
+                            .background(Color(0xFFC62828).copy(alpha = 0.92f))
+                            .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(20.dp))
                             .clickable { closeAndResume() },
                         contentAlignment = Alignment.Center,
                     ) {
@@ -1630,12 +1666,85 @@ object InGameOverlay {
             InfoCopyRow("Region", game?.region)
             InfoCopyRow("Type", game?.extension?.takeIf { it.isNotEmpty() })
             InfoCopyRow("Path", game?.uri?.toString())
+            if (game != null) {
+                Spacer(Modifier.height(4.dp))
+                CustomCoverControls(game)
+            }
             Spacer(Modifier.height(8.dp))
             Text(
                 "Tap a row to copy it to the clipboard.",
                 color = Color.White.copy(alpha = 0.5f),
                 fontSize = 11.sp,
             )
+        }
+    }
+
+    /** Lets the user pick a local image as this game's cover — the only way to
+     *  give a cover to serial-less games (homebrew, ELF ports) the online repo
+     *  can't match. Writes via [CustomCovers]; the library shelf picks it up. */
+    @Composable
+    private fun CustomCoverControls(game: GameInfo) {
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+        val hasCustom = remember(game.uri, CustomCovers.version.value) { mutableStateOf(false) }
+        LaunchedEffect(game.uri, CustomCovers.version.value) {
+            hasCustom.value = withContext(Dispatchers.IO) { CustomCovers.fileFor(context, game) != null }
+        }
+        val picker = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument(),
+        ) { uri ->
+            if (uri != null) {
+                // The copy streams a possibly-multi-MB image over the SAF FD bridge,
+                // so do it off the main thread (matches the read side); the version
+                // bump inside set() re-resolves the shelf + this panel.
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) { CustomCovers.set(context, game, uri) }
+                    android.widget.Toast.makeText(
+                        context,
+                        if (ok) "Custom cover set" else "Couldn't set cover",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+        }
+        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp, horizontal = 4.dp)) {
+            Text("Cover", color = Colors.pasx2_blue, fontSize = 11.sp)
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CoverPill(if (hasCustom.value) "Change cover" else "Set custom cover") {
+                    picker.launch(arrayOf("image/*"))
+                }
+                if (hasCustom.value) {
+                    CoverPill("Remove") {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { CustomCovers.remove(context, game) }
+                            android.widget.Toast.makeText(
+                                context, "Custom cover removed", android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Use your own image for this game's cover — handy for homebrew or discs with no serial.",
+                color = Color.White.copy(alpha = 0.5f),
+                fontSize = 11.sp,
+            )
+        }
+    }
+
+    @Composable
+    private fun CoverPill(label: String, onClick: () -> Unit) {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(Colors.pasx2_blue.copy(alpha = 0.20f))
+                .border(1.dp, Colors.pasx2_blue.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
         }
     }
 

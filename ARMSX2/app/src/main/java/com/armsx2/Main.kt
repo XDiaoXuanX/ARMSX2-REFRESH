@@ -142,6 +142,11 @@ class Main: ComponentActivity() {
         var instance : Main? = null
         lateinit var prefs: SharedPreferences
         val setupComplete = mutableStateOf(false)
+        // Set at launch when a restored-but-unusable setup is detected (Auto Backup
+        // brought back prefs incl. setupComplete, but the ROMs folder permission
+        // didn't survive the reinstall). Drives a one-time explanatory toast; the
+        // wizard is re-shown so the user can re-grant folder access.
+        val setupRecoveryNeeded = mutableStateOf(false)
         val setupEditorVisible = mutableStateOf(false)
         val nativeReady = mutableStateOf(false)
         // Tree URI of the user-picked PCSX2 system folder (where bios/,
@@ -300,6 +305,11 @@ class Main: ComponentActivity() {
         // to slot 0.
         val currentSaveSlot = mutableStateOf(0)
 
+        // Latched state for the "Fast Forward (toggle)" hotkey: each press flips
+        // between Turbo and Nominal limiter mode (vs. the hold variant which is
+        // momentary). Reset to false whenever a game starts.
+        @Volatile var fastForwardToggleActive = false
+
         // Cached metadata for the currently-running game. Populated when
         // GamesList taps a card (so we have title, serial, compatibility,
         // extension and the cover URL ready), cleared when the user
@@ -413,6 +423,12 @@ class Main: ComponentActivity() {
          *  right override tier; null falls back to global. Resolution
          *  order: per-game JSON overlay → global → hardcoded defaults. */
         private fun applyRendererPrefs() {
+            // Resolve per-game (∘ global) settings up front so the renderer backend
+            // and internal resolution come from THIS title's tier, not a stale
+            // global value. Sync the session state the Renderer UI reads, too.
+            val resolved = com.armsx2.config.ConfigStore.resolveForGame(currentGame.value?.serial)
+            upscale.value = resolved.upscaleFloat
+            renderer.value = resolved.renderer
             NativeApp.renderUpscalemultiplier(upscale.value)
             // Pin custom Vulkan driver (if any) BEFORE the renderer write —
             // the renderer JNI may trigger MTGS::ApplySettings which can
@@ -430,9 +446,7 @@ class Main: ComponentActivity() {
                 "software" -> NativeApp.renderSoftware()
                 else -> NativeApp.renderAuto()
             }
-            com.armsx2.config.ConfigStore
-                .resolveForGame(currentGame.value?.serial)
-                .applyTo()
+            resolved.applyTo()
 
             // Settings.applyTo() above writes the persisted FrameLimitEnable
             // into the BASE settings layer; override it here with the
@@ -446,22 +460,6 @@ class Main: ComponentActivity() {
             val limit = com.armsx2.ui.InGameOverlay.frameLimitOn.value
             NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", limit.toString())
             NativeApp.speedhackLimitermode(if (limit) 0 else 3)
-        }
-
-        private fun readUpscalePref(): Float {
-            val all = prefs.all
-            fun coerce(raw: Any?): Float? = when (raw) {
-                is Float -> raw
-                is Double -> raw.toFloat()
-                is Int -> raw.toFloat()
-                is Long -> raw.toFloat()
-                is String -> raw.toFloatOrNull()
-                else -> null
-            }?.coerceIn(1.0f, 5.0f)
-
-            return coerce(all["upscaleFloat"])
-                ?: coerce(all["upscale"])
-                ?: 1.0f
         }
 
         /**
@@ -594,6 +592,8 @@ class Main: ComponentActivity() {
         }
 
         fun stop(saveAutosave: Boolean = false, restartAfterStop: Boolean = false) {
+            // Drop any latched fast-forward toggle; the next game boots at normal speed.
+            fastForwardToggleActive = false
             val nativeActive = runCatching { NativeApp.hasActiveVM() }.getOrDefault(false)
             val shouldStop = synchronized(vmLifecycleLock) {
                 if (restartAfterStop)
@@ -702,6 +702,49 @@ class Main: ComponentActivity() {
          *  copied to. This prefers a custom systemDir only when it resolves to
          *  a writable POSIX path; otherwise it falls back to app-private
          *  storage. Game folders are separate and accessed through SAF. */
+        /** True if at least one configured ROMs folder is actually reachable right
+         *  now. content:// folders need a live persisted SAF read permission;
+         *  file:// (all-files build) needs the path readable. Android Auto Backup
+         *  restores the folder URIs but NOT their permissions, so after a reinstall
+         *  or device-restore the saved folders can be present yet unreadable — this
+         *  is how launch detects that and re-runs setup instead of stranding the
+         *  user in an empty, perpetually-scanning library. */
+        fun romsAccessible(context: Context, romsDirs: List<String>): Boolean {
+            if (romsDirs.isEmpty()) return false
+            // content://: still hold the EXACT persisted SAF read grant (string-prefix
+            // matching is unsafe — "…ROMs" prefixes "…ROMs2"). The all-files build can
+            // ALSO reach a content:// folder by resolving it to a POSIX path under
+            // MANAGE_EXTERNAL_STORAGE, so honor that too (checking the grant itself, not
+            // raw canRead, so a temporarily-unmounted SD isn't misread as lost access).
+            val persisted = runCatching { context.contentResolver.persistedUriPermissions }
+                .getOrDefault(emptyList())
+                .filter { it.isReadPermission }
+                .map { it.uri.toString() }
+                .toHashSet()
+            val allFiles = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+                android.os.Environment.isExternalStorageManager()
+            // R+ scoped storage: a /storage path is only TRULY readable with all-files.
+            // File.canRead() FALSE-POSITIVES there — it returns true for a path whose
+            // contents scoped storage then refuses to list — which silently defeated this
+            // whole check after an Auto Backup restore (folder URI restored, permission not,
+            // yet canRead said "fine" → no recovery → empty library). So on R+ trust the
+            // all-files grant and never canRead; canRead is only meaningful on pre-R legacy.
+            fun posixReadable(path: String?): Boolean {
+                if (path == null) return false
+                if (allFiles) return true
+                return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R &&
+                    runCatching { File(path).canRead() }.getOrDefault(false)
+            }
+            return romsDirs.any { raw ->
+                when {
+                    raw.startsWith("content:") ->
+                        raw in persisted || (allFiles && resolveTreeUriToPosix(raw) != null)
+                    raw.startsWith("file:") -> posixReadable(Uri.parse(raw).path)
+                    else -> posixReadable(raw)
+                }
+            }
+        }
+
         fun assetCopyRoot(context: Context): String {
             val custom = systemDirPosix()
             return custom?.takeIf { validateSystemDirWritable(it) }
@@ -1022,8 +1065,24 @@ class Main: ComponentActivity() {
                 if (legacy != null) listOf(legacy) else emptyList()
             }
         }
-        renderer.value = prefs.getString("renderer", "auto") ?: "auto"
-        upscale.value = readUpscalePref()
+        // Setup recovery. Auto Backup can restore our prefs (incl. setupComplete + the
+        // ROMs URIs) on reinstall, but SAF/all-files PERMISSIONS are never backed up — so
+        // a restored setup can point at a folder we can no longer read, which would strand
+        // the user in an empty library with the wizard skipped. If no configured ROMs
+        // folder is actually reachable, drop setupComplete for this session so the wizard
+        // re-runs (and re-requests the permission); finishSetup re-arms it.
+        if (setupComplete.value && !romsAccessible(this, romsDirs.value)) {
+            setupComplete.value = false
+            setupRecoveryNeeded.value = true
+        }
+        // Renderer + upscale now live in the Settings tier (global ∘ per-game);
+        // ConfigStore.loadGlobal() also one-time-seeds them from the legacy
+        // "renderer"/"upscaleFloat" prefs. Read the global baseline for the
+        // pre-launch UI; applyRendererPrefs re-resolves per-game at boot.
+        com.armsx2.config.ConfigStore.loadGlobal().let { g0 ->
+            renderer.value = g0.renderer
+            upscale.value = g0.upscaleFloat
+        }
         customDriverId.value = prefs.getString("customDriverId", null)?.takeIf { it.isNotEmpty() }
         surface.value = SurfaceCallbacks(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -1074,6 +1133,20 @@ class Main: ComponentActivity() {
             androidx.compose.runtime.LaunchedEffect(setupComplete.value) {
                 if (setupComplete.value) {
                     kickoffEmucoreInit()
+                }
+            }
+
+            // One-time notice when setup was re-shown because a restored config
+            // pointed at a folder we can no longer read (see the recovery check in
+            // onCreate). Explains why the wizard reappeared.
+            androidx.compose.runtime.LaunchedEffect(setupRecoveryNeeded.value) {
+                if (setupRecoveryNeeded.value) {
+                    android.widget.Toast.makeText(
+                        applicationContext,
+                        "Couldn't open your saved game folder — this can happen after reinstalling or restoring a backup. Please re-select it.",
+                        android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                    setupRecoveryNeeded.value = false
                 }
             }
 
@@ -1575,10 +1648,32 @@ class Main: ComponentActivity() {
                     return true
                 }
                 ControllerMappings.SysHotkey.FAST_FORWARD -> {
-                    // Hold to fast-forward (Turbo), release to return to normal.
+                    // Hold to fast-forward (Turbo), release to return to the user's
+                    // current limiter mode (Nominal if frame-limit is on, else Unlimited)
+                    // — not blindly Nominal, which would re-enable a disabled limiter.
                     if (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP) {
-                        if (event.repeatCount == 0)
-                            runCatching { NativeApp.speedhackLimitermode(if (down) 1 else 0) }
+                        if (event.repeatCount == 0) {
+                            // Holding FF supersedes any latched FF-toggle.
+                            if (down) Main.fastForwardToggleActive = false
+                            runCatching { NativeApp.speedhackLimitermode(if (down) 1 else baseLimiterMode()) }
+                        }
+                    }
+                    return true
+                }
+                ControllerMappings.SysHotkey.FAST_FORWARD_TOGGLE -> {
+                    // Press once to lock fast-forward (Turbo) on, press again to return
+                    // to the user's current limiter mode — no need to hold during long
+                    // grinds. Restoring the real base mode keeps it in sync with the
+                    // frame-limit toggle instead of forcing Nominal.
+                    if (down && event.repeatCount == 0) {
+                        Main.fastForwardToggleActive = !Main.fastForwardToggleActive
+                        val on = Main.fastForwardToggleActive
+                        runCatching { NativeApp.speedhackLimitermode(if (on) 1 else baseLimiterMode()) }
+                        android.widget.Toast.makeText(
+                            this,
+                            if (on) "Fast Forward ON" else "Fast Forward OFF",
+                            android.widget.Toast.LENGTH_SHORT,
+                        ).show()
                     }
                     return true
                 }
@@ -1619,19 +1714,36 @@ class Main: ComponentActivity() {
     }
 
     /** Cycle the active quick save/load slot 0→9→0 with a brief on-screen note. */
+    /** The limiter mode that fast-forward should fall back to when it ends:
+     *  Nominal (0) when the frame limiter is on, Unlimited (3) when the user has
+     *  turned it off. Mirrors the frame-limit toggle so the two stay in sync. */
+    private fun baseLimiterMode(): Int =
+        if (com.armsx2.ui.InGameOverlay.frameLimitOn.value) 0 else 3
+
     private fun cycleSaveSlot() {
         val next = (Main.currentSaveSlot.value + 1) % 10
         Main.currentSaveSlot.value = next
         android.widget.Toast.makeText(this, "Save slot $next", android.widget.Toast.LENGTH_SHORT).show()
     }
 
-    /** Step the internal resolution multiplier up/down (1x..5x), apply live. */
+    /** Step the internal resolution multiplier up/down (1x..5x), apply live, and
+     *  persist to the running game's tier — per-game when it has a serial — so it
+     *  survives a reboot without bleeding into other titles. */
     private fun stepResolution(dir: Int) {
         val next = (Main.upscale.value.toInt() + dir).coerceIn(1, 5)
         val nf = next.toFloat()
         Main.upscale.value = nf
         runCatching { NativeApp.renderUpscalemultiplier(nf) }
-        runCatching { Main.prefs.edit().putFloat("upscaleFloat", nf).apply() }
+        runCatching {
+            val serial = Main.currentGame.value?.serial?.takeIf { it.isNotBlank() }
+            val resolved = com.armsx2.config.ConfigStore.resolveForGame(serial)
+            com.armsx2.config.ConfigStore.save(
+                if (serial != null) com.armsx2.config.SettingsScope.Game
+                else com.armsx2.config.SettingsScope.Global,
+                serial,
+                resolved.copy(upscaleFloat = nf),
+            )
+        }
         android.widget.Toast.makeText(this, "Resolution ${next}x", android.widget.Toast.LENGTH_SHORT).show()
     }
 
