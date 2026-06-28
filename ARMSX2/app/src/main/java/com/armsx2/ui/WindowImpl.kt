@@ -56,7 +56,7 @@ object WindowImpl {
                         // shows through behind the library — covers and
                         // text inside the cards stay fully opaque.
                         Box(Modifier.fillMaxSize().background(Color(0xFF101010).copy(alpha = 0.5f))) {
-                            GamesList.GamesRow()
+                            ScaledUi { GamesList.GamesRow() }
                             // Top-right close button. Only relevant in this
                             // overlay path (when stopped, GamesList is the
                             // primary screen and there's nothing to "close
@@ -87,10 +87,10 @@ object WindowImpl {
                     // In-game overlay paints last so it's on top of both
                     // the surface and any library showing underneath.
                     if (overlayVisible.value) {
-                        InGameOverlay.Render()
+                        ScaledUi { InGameOverlay.Render() }
                     }
                     if (MemoryCardManager.visible.value) {
-                        MemoryCardManager.Render()
+                        ScaledUi { MemoryCardManager.Render() }
                     }
                 }
                 // The stopped-state library now owns its navigation chrome.

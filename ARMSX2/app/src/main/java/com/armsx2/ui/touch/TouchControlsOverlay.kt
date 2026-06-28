@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.armsx2.EmuState
 import com.armsx2.Main
+import com.armsx2.input.ControllerMappings
 import com.armsx2.R
 import com.armsx2.ui.Colors
 import com.armsx2.ui.InGameOverlay
@@ -840,13 +841,18 @@ private data class StickEmit(
     fun any() = xPos != 0 || xNeg != 0 || yPos != 0 || yNeg != 0
 }
 
-private const val STICK_DEAD = 0.10f
+/** Apply the shared, user-configurable analog deadzone and re-normalize past it so
+ *  the on-screen stick responds from low values without a jump — matching the
+ *  physical-stick path (Main.shapeStickMag). */
+private fun shapeTouchAxis(m: Float): Float {
+    val dz = ControllerMappings.stickDeadzone()
+    if (m <= dz) return 0f
+    return (if (dz < 1f) (m - dz) / (1f - dz) else 0f).coerceIn(0f, 1f)
+}
 
 private fun computeStickEmit(nx: Float, ny: Float): StickEmit {
-    val absX = abs(nx)
-    val absY = abs(ny)
-    val scaleX = if (absX > STICK_DEAD) (absX * 32767f).toInt() else 0
-    val scaleY = if (absY > STICK_DEAD) (absY * 32767f).toInt() else 0
+    val scaleX = (shapeTouchAxis(abs(nx)) * 32767f).toInt()
+    val scaleY = (shapeTouchAxis(abs(ny)) * 32767f).toInt()
     return StickEmit(
         xPos = if (nx > 0) scaleX else 0,
         xNeg = if (nx < 0) scaleX else 0,
