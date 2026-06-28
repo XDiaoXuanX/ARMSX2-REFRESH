@@ -496,6 +496,16 @@ fun PatchesTab(state: MutableState<Settings>) {
             ToggleRow("Cheats (PNACH)", s.enableCheats) { apply(s.copy(enableCheats = it)) }
         }
         SettingsDivider()
+        ToggleRow("HostFS (host: filesystem)", s.hostFs) { apply(s.copy(hostFs = it)) }
+        Text(
+            "Lets the game read files from the host: namespace — needed for some ELF / homebrew " +
+                "and game mods (e.g. modded Persona 3 FES, paired with a per-game ELF/disc path). " +
+                "Applies on the next game boot. Leave OFF for normal play.",
+            color = Color(0xFFB0B0B0),
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
+        )
+        SettingsDivider()
 
         // ---- PNACH importer ----
         Text(
