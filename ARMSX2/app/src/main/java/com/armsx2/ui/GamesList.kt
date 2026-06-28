@@ -93,6 +93,7 @@ import com.armsx2.CoverArtStyle
 import com.armsx2.CustomCovers
 import com.armsx2.GameInfo
 import com.armsx2.LibraryTitles
+import com.armsx2.LibraryView
 import com.armsx2.GamePlatform
 import com.armsx2.Main
 import kr.co.iefriends.pcsx2.NativeApp
@@ -178,7 +179,7 @@ object GamesList {
     // and the gear (bottom). On small screens the old help text was tall enough
     // to push the gear off-screen, so it now lives behind the info button as its
     // own screen. 0 = info, 1 = titles toggle, 2 = gear.
-    private val railSelection = mutableStateOf(2)
+    private val railSelection = mutableStateOf(3)
     private val infoDialogOpen = mutableStateOf(false)
     // Toolbar actions, published from HeaderRow composition so they capture the
     // live ActivityResult launchers / context. Label + click action, in order.
@@ -208,9 +209,9 @@ object GamesList {
                 return true
             }
             Zone.RAIL -> {
-                // Info (top) + titles toggle (middle) + gear (bottom) live on the
-                // rail. Up/down move between them; right returns to the grid.
-                if (dy != 0) railSelection.value = (railSelection.value + if (dy < 0) -1 else 1).coerceIn(0, 2)
+                // Info (top) + titles toggle + list/shelf toggle + gear (bottom)
+                // live on the rail. Up/down move between them; right returns to grid.
+                if (dy != 0) railSelection.value = (railSelection.value + if (dy < 0) -1 else 1).coerceIn(0, 3)
                 if (dx > 0) controllerZone.value = Zone.GRID
                 return true
             }
@@ -222,7 +223,7 @@ object GamesList {
             // No games yet — up reaches the toolbar, left reaches the gear, so
             // the controller can scan / open setup on a fresh install.
             if (dy < 0) controllerZone.value = Zone.TOOLBAR
-            else if (dx < 0) { railSelection.value = 2; controllerZone.value = Zone.RAIL }
+            else if (dx < 0) { railSelection.value = 3; controllerZone.value = Zone.RAIL }
             return true
         }
 
@@ -238,7 +239,7 @@ object GamesList {
         } else if (dx != 0) {
             if (dx < 0 && current.columnIndex == 0) {
                 // Left off the first cover of any shelf → the gear on the rail.
-                railSelection.value = 2
+                railSelection.value = 3
                 controllerZone.value = Zone.RAIL
                 return true
             }
@@ -258,6 +259,7 @@ object GamesList {
                 when (railSelection.value) {
                     0 -> infoDialogOpen.value = true
                     1 -> LibraryTitles.set(!LibraryTitles.show.value)
+                    2 -> LibraryView.toggleListMode()
                     else -> InGameOverlay.openGlobalSettings()
                 }
             Zone.GRID -> {
@@ -467,15 +469,35 @@ object GamesList {
         modifier: Modifier = Modifier,
     ) {
         // Fit-per-row: size each shelf to the covers that actually fit the screen
-        // width, so games wrap onto MORE shelves and the user only scrolls DOWN —
-        // no horizontal scroll (the "scroll right forever" complaint). Uses the
-        // larger of the two shelf cover widths so neither shelf overflows.
+        // width, so games wrap onto MORE shelves and the user only scrolls DOWN.
+        // A manual column count (LibraryView.columns) overrides the auto fit and
+        // drives cover size; list view collapses to one game per row (names only).
         val screenWidthDp = LocalConfiguration.current.screenWidthDp
+        val screenHeightDp = LocalConfiguration.current.screenHeightDp
+        val listMode = LibraryView.listMode.value
+        val userCols = LibraryView.columns.value
+        val userRows = LibraryView.rows.value
         val coverPlusGapDp = (if (landscape) 92 else 98) + 28
         val navRailDp = if (landscape) 88 else 0
         val availDp = (screenWidthDp - navRailDp - 52).coerceAtLeast(coverPlusGapDp)
-        val perRow = ((availDp + 28) / coverPlusGapDp).coerceAtLeast(1)
-        val currentShelfGames = recentUris
+        val autoPerRow = ((availDp + 28) / coverPlusGapDp).coerceAtLeast(1)
+        val perRow = when {
+            listMode -> 1
+            userCols > 0 -> userCols
+            else -> autoPerRow
+        }
+        // Manual grid → derive cover width to fit `perRow` across, optionally capped
+        // so `userRows` rows fit the screen height (CoverArt aspect = 0.7 = w/h).
+        val customCoverW: Dp? = if (!listMode && (userCols > 0 || userRows > 0)) {
+            val byCol = (availDp - 28 * (perRow - 1)).toFloat() / perRow
+            val byRow = if (userRows > 0) {
+                val chrome = if (landscape) 150 else 180
+                val availH = (screenHeightDp - chrome).coerceAtLeast(160).toFloat()
+                (availH / userRows) * 0.7f
+            } else Float.MAX_VALUE
+            minOf(byCol, byRow).coerceIn(48f, 220f).dp
+        } else null
+        val currentShelfGames = if (listMode) emptyList() else recentUris
             .mapNotNull { uri -> games.firstOrNull { it.uri.toString() == uri } }
             .take(perRow)
             .ifEmpty { games.take(perRow) }
@@ -484,7 +506,7 @@ object GamesList {
             if (currentShelfGames.isNotEmpty()) add(currentShelfGames)
             addAll(libraryRows)
         }
-        val firstLibraryRowItem = if (currentShelfGames.isNotEmpty()) 3 else 2
+        val firstLibraryRowItem = if (currentShelfGames.isNotEmpty()) 3 else 1
         val controllerRowsForUi = buildList {
             if (currentShelfGames.isNotEmpty()) add(ControllerGameRow(0, currentShelfGames, 1))
             libraryRows.forEachIndexed { index, row ->
@@ -628,20 +650,22 @@ object GamesList {
                     )
                 }
                 item(key = "__current_shelf__") {
+                        val recentCoverW = customCoverW ?: (if (landscape) 92.dp else 98.dp)
+                        val titlesExtra = if (LibraryTitles.show.value) 44.dp else 0.dp
+                        val recentShelfH = if (customCoverW != null)
+                            ((recentCoverW.value / 0.7f) + 84f).dp + titlesExtra
+                        else (if (landscape) 220.dp else 194.dp) + titlesExtra
                         GameShelf(
                             games = currentShelfGames,
                             label = null,
                             rowId = 0,
                             listItemIndex = 1,
-                            coverWidth = if (landscape) 92.dp else 98.dp,
+                            coverWidth = recentCoverW,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 // Grow the shelf when titles are on so the 2-line
                                 // label + version tag below the cover isn't clipped.
-                                .height(
-                                    (if (landscape) 220.dp else 194.dp) +
-                                        if (LibraryTitles.show.value) 44.dp else 0.dp,
-                                ),
+                                .height(recentShelfH),
                     )
                 }
             } else {
@@ -656,28 +680,40 @@ object GamesList {
             }
 
             if (games.isNotEmpty()) {
-                item(key = "__library_title__") {
-                    SectionHeader("Library")
+                // Only label the "Library" section when a "Recently Played" shelf sits
+                // above it; otherwise the top HeaderRow already reads "Library" (avoids
+                // the doubled heading in list view / no-recent libraries).
+                if (currentShelfGames.isNotEmpty()) {
+                    item(key = "__library_title__") {
+                        SectionHeader("Library")
+                    }
                 }
                 lazyItemsIndexed(libraryRows, key = { _, row ->
                     row.joinToString("|") { it.uri.toString() }
                 }) { rowIndex, row ->
-                    val label = shelfLabelFor(row)
-                    GameShelf(
-                        games = row,
-                        label = label,
-                        rowId = rowIndex + 1,
-                        listItemIndex = firstLibraryRowItem + rowIndex,
-                        coverWidth = if (landscape) 86.dp else 98.dp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            // Grow the shelf when titles are on so the 2-line
-                            // label + version tag below the cover isn't clipped.
-                            .height(
-                                (if (landscape) 204.dp else 230.dp) +
-                                    if (LibraryTitles.show.value) 44.dp else 0.dp,
-                            ),
-                    )
+                    if (listMode) {
+                        // List view: one full-width name row per game (perRow == 1).
+                        ListGameRow(game = row.first(), rowId = rowIndex + 1)
+                    } else {
+                        val label = shelfLabelFor(row)
+                        val libCoverW = customCoverW ?: (if (landscape) 86.dp else 98.dp)
+                        val titlesExtra = if (LibraryTitles.show.value) 44.dp else 0.dp
+                        val libShelfH = if (customCoverW != null)
+                            ((libCoverW.value / 0.7f) + 84f).dp + titlesExtra
+                        else (if (landscape) 204.dp else 230.dp) + titlesExtra
+                        GameShelf(
+                            games = row,
+                            label = label,
+                            rowId = rowIndex + 1,
+                            listItemIndex = firstLibraryRowItem + rowIndex,
+                            coverWidth = libCoverW,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                // Grow the shelf when titles are on so the 2-line
+                                // label + version tag below the cover isn't clipped.
+                                .height(libShelfH),
+                        )
+                    }
                 }
             }
             }
@@ -762,6 +798,17 @@ object GamesList {
                 add(Triple(LibIcons.WALLPAPER, "Background") { wallLauncher.launch(arrayOf("image/*")) })
                 if (customBackgroundPath.value != null) {
                     add(Triple(LibIcons.REFRESH, "Reset BG") { resetCustomBackground(context) })
+                }
+                // Cover-grid size (shelf view only): cycle columns / rows; cover size
+                // adjusts to fit. Captions show the live value (Auto = auto-fit).
+                // Rows control only (covers auto-fit the width). The Columns control
+                // was removed — fewer columns zoomed covers up, which hurt on small
+                // screens; Rows (cover height / how many fit vertically) is the useful knob.
+                if (!LibraryView.listMode.value) {
+                    add(Triple(
+                        LibIcons.LAYOUT_ROWS,
+                        "Rows " + (if (LibraryView.rows.value == 0) "Auto" else LibraryView.rows.value.toString()),
+                    ) { LibraryView.cycleRows() })
                 }
                 add(Triple(LibIcons.TOOL, "Setup") {
                     SetupImpl.resetForReentry()
@@ -878,6 +925,8 @@ object GamesList {
         const val FILE_CODE = "M14 3v4a1 1 0 0 0 1 1h4 M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2 M10 13l-1 2l1 2 M14 13l1 2l-1 2"
         const val REFRESH = "M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4 M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"
         const val TOOL = "M7 10h3v-3l-3.5 -3.5a6 6 0 0 1 8 8l6 6a2 2 0 0 1 -3 3l-6 -6a6 6 0 0 1 -8 -8l3.5 3.5"
+        const val LAYOUT_COLUMNS = "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-14a1 1 0 0 1 1 -1 M12 4v16"
+        const val LAYOUT_ROWS = "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-14a1 1 0 0 1 1 -1 M4 12h16"
     }
 
     @Composable
@@ -907,13 +956,16 @@ object GamesList {
                     TitlesToggleButton(
                         highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 1,
                     )
+                    ListViewToggleButton(
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 2,
+                    )
                 }
                 Box(Modifier.offset(y = 12.dp)) {
                     NavButton(
                         NavKind.Settings,
                         null,
                         active = false,
-                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 2,
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 3,
                     ) { InGameOverlay.openGlobalSettings() }
                 }
             }
@@ -942,12 +994,15 @@ object GamesList {
                     TitlesToggleButton(
                         highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 1,
                     )
+                    ListViewToggleButton(
+                        highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 2,
+                    )
                 }
                 NavButton(
                     NavKind.Settings,
                     null,
                     active = false,
-                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 2,
+                    highlighted = controllerZone.value == Zone.RAIL && railSelection.value == 3,
                 ) { InGameOverlay.openGlobalSettings() }
             }
         }
@@ -1064,6 +1119,37 @@ object GamesList {
                 "Aa",
                 color = if (on || highlighted) Color.White else Color.White.copy(alpha = 0.55f),
                 fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+
+    /** Rail button under "Aa": toggle between the cover SHELF view and the compact
+     *  LIST (names-only) view. Filled when list view is active. Long-press cycles
+     *  the shelf grid columns (cover size) for quick tuning without a menu. */
+    @Composable
+    private fun ListViewToggleButton(highlighted: Boolean = false) {
+        val listOn = LibraryView.listMode.value
+        val glow = Color(0xFF3DA5FF)
+        Box(
+            Modifier
+                .size(42.dp)
+                .then(
+                    if (highlighted)
+                        Modifier.shadow(10.dp, CircleShape, ambientColor = glow, spotColor = glow)
+                    else Modifier
+                )
+                .clip(CircleShape)
+                .background(if (listOn || highlighted) glow.copy(alpha = 0.30f) else Color.White.copy(alpha = 0.10f))
+                .then(if (listOn || highlighted) Modifier.border(1.dp, glow, CircleShape) else Modifier)
+                .clickable { LibraryView.toggleListMode() },
+            contentAlignment = Alignment.Center,
+        ) {
+            // ☰ = list view active; ▦ = cover shelf view active.
+            Text(
+                if (listOn) "☰" else "▦",
+                color = if (listOn || highlighted) Color.White else Color.White.copy(alpha = 0.55f),
+                fontSize = 17.sp,
                 fontWeight = FontWeight.Bold,
             )
         }
@@ -1392,6 +1478,62 @@ object GamesList {
                 modifier = modifier.padding(top = 42.dp),
                 textAlign = TextAlign.Center,
             )
+        }
+    }
+
+    @OptIn(ExperimentalFoundationApi::class)
+    /** A single full-width name row for the compact LIST view (no cover art) —
+     *  built for fast finding on small screens. Shares the grid controller-nav
+     *  model (perRow == 1, so each list row is its own controller row at column 0)
+     *  and the same tap-to-launch / long-press-for-settings gestures as a card. */
+    @Composable
+    private fun ListGameRow(game: GameInfo, rowId: Int) {
+        var rowFocused by remember { mutableStateOf(false) }
+        val glowBlue = Color(0xFF3DA5FF)
+        val selectedUri = controllerSelectedUri.value
+        val gridFocused = controllerZone.value == Zone.GRID
+        val highlighted = rowFocused ||
+            (gridFocused && selectedUri == game.uri.toString() && controllerCellSelected(rowId, 0))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(46.dp)
+                .onFocusChanged {
+                    rowFocused = it.isFocused
+                    if (it.isFocused) selectControllerCell(rowId, 0, game.uri.toString())
+                }
+                .clip(RoundedCornerShape(6.dp))
+                .background(if (highlighted) glowBlue.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.04f))
+                .then(if (highlighted) Modifier.border(2.dp, glowBlue, RoundedCornerShape(6.dp)) else Modifier)
+                .combinedClickable(
+                    onClick = { launchGame(game) },
+                    onLongClick = { InGameOverlay.openGameSettings(game) },
+                )
+                .padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            game.regionFlag?.let { flag ->
+                Text(flag, fontSize = 16.sp, maxLines = 1, modifier = Modifier.padding(end = 10.dp))
+            }
+            Text(
+                game.title,
+                color = Color.White.copy(alpha = if (highlighted) 1f else 0.88f),
+                fontFamily = TitleFont,
+                fontSize = 18.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            game.versionTag?.let { tag ->
+                Text(
+                    tag,
+                    color = Color.White.copy(alpha = 0.4f),
+                    fontFamily = TitleFont,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
         }
     }
 

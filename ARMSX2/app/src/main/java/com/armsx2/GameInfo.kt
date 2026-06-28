@@ -38,6 +38,56 @@ object LibraryTitles {
 }
 
 /**
+ * Library view options: switch between the cover SHELF view and a compact LIST
+ * view (game names only) for fast finding on small screens, plus a manual grid
+ * size (columns + rows) that drives cover size in shelf view. 0 = Auto.
+ * Persisted in Main.prefs; observed by GamesList so changes recompose the grid.
+ */
+object LibraryView {
+    private const val KEY_LIST = "library.listMode"
+    private const val KEY_COLS = "library.gridColumns"
+    private const val KEY_ROWS = "library.gridRows"
+    const val MAX_COLS = 6
+    const val MAX_ROWS = 5
+    /** true = compact name list; false = cover shelves. */
+    val listMode = mutableStateOf(false)
+    /** Covers per row in shelf view; 0 = auto-fit to screen width. */
+    val columns = mutableStateOf(0)
+    /** Target visible rows in shelf view (caps cover height); 0 = auto. */
+    val rows = mutableStateOf(0)
+    fun load() {
+        listMode.value = Main.prefs.getBoolean(KEY_LIST, false)
+        columns.value = Main.prefs.getInt(KEY_COLS, 0).coerceIn(0, MAX_COLS)
+        rows.value = Main.prefs.getInt(KEY_ROWS, 0).coerceIn(0, MAX_ROWS)
+    }
+    fun setListMode(v: Boolean) {
+        listMode.value = v
+        Main.prefs.edit().putBoolean(KEY_LIST, v).apply()
+    }
+    fun toggleListMode() = setListMode(!listMode.value)
+    /** Cycle columns Auto→2→3→…→MAX→Auto (shelf view cover size). */
+    fun cycleColumns() {
+        val next = when {
+            columns.value <= 0 -> 2
+            columns.value >= MAX_COLS -> 0
+            else -> columns.value + 1
+        }
+        columns.value = next
+        Main.prefs.edit().putInt(KEY_COLS, next).apply()
+    }
+    /** Cycle rows Auto→2→3→…→MAX→Auto (caps cover height). */
+    fun cycleRows() {
+        val next = when {
+            rows.value <= 0 -> 2
+            rows.value >= MAX_ROWS -> 0
+            else -> rows.value + 1
+        }
+        rows.value = next
+        Main.prefs.edit().putInt(KEY_ROWS, next).apply()
+    }
+}
+
+/**
  * One row in the games-list screen. Today the title/serial come from
  * filename parsing — game titles like "Final Fantasy X (USA) [SLUS-20312]"
  * are common dump conventions. compatibility is left at 0 (no stars filled)
