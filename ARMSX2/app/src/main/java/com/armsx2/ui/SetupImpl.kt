@@ -20,7 +20,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -175,6 +178,19 @@ object SetupImpl {
      *  which display backend to host the software frame on. */
     private val selectedRenderer = mutableStateOf<String?>(null)
 
+    // -------- Optional "Recommended Settings" step (first-run only) --------
+    // Shown as an OVERLAY after the core System/BIOS/ROMs setup completes on first
+    // run, before finishSetup — so it can NEVER re-block first-run (it's after the
+    // gate and fully skippable). PCSX2-wizard-style display/perf onboarding; choices
+    // default to the current global config and are written to global on "Finish".
+    private val showRecommended = mutableStateOf(false)
+    private val recAspect = mutableStateOf(1)        // 0 Stretch, 1 Auto, 2 4:3, 3 16:9, 4 10:7
+    private val recUpscale = mutableStateOf(1)       // internal-resolution multiplier 1..5
+    private val recAntiBlur = mutableStateOf(true)
+    private val recWidescreen = mutableStateOf(false)
+    private val recDeinterlaceOff = mutableStateOf(false) // false = Automatic, true = Off
+    private val recPerfFast = mutableStateOf(false)  // false = Optimal (safe), true = Fast
+
     // -------- Custom Vulkan driver state --------
     /** Active driver id (matches `CustomDriver.InstalledDriver.id`). null
      *  = system / default Vulkan loader. Mirrored from / to `Main.customDriverId`
@@ -220,11 +236,13 @@ object SetupImpl {
 
         val bios = scannedBioses.getOrNull(idx) ?: return null
 
-        // Write under the active data root so the BIOS lives alongside
-        // memcards/saves/configs instead of being pinned to app-private.
-        // assetCopyRoot accepts only a custom systemDir that resolves to a
-        // writable native path, and falls back to externalFilesDir otherwise.
-        val biosDir = File(Main.assetCopyRoot(context), "bios").apply { mkdirs() }
+        // Write to app-private internal storage, NOT the chosen data root. The
+        // native core can't reliably open a BIOS off a removable/SAF volume on
+        // Android 11+ (a data-root-on-SD setup then failed VM init and bounced
+        // back to the library), so the BIOS is decoupled from DataRoot and pinned
+        // internal — matching native-lib initialize()'s documented expectation.
+        // Memcards/saves/configs still follow the data root.
+        val biosDir = Main.internalBiosDir(context).apply { mkdirs() }
         val outFile = File(biosDir, bios.displayName)
 
         // Same-content fast-path: when the user re-entered setup and the
@@ -594,6 +612,43 @@ object SetupImpl {
         return pick
     }
 
+    /** Pre-fill the Recommended Settings choices from the current global config so
+     *  the overlay shows the existing values (and "Skip" is a true no-op). */
+    private fun loadRecommendedFromGlobal() {
+        val g = com.armsx2.config.ConfigStore.loadGlobal()
+        // Seed the renderer tile from the current config (default Vulkan if it's
+        // auto/software) so the wizard shows a concrete OpenGL/Vulkan choice.
+        if (selectedRenderer.value == null)
+            selectedRenderer.value = if (g.renderer == "opengl") "opengl" else "vulkan"
+        recAspect.value = g.aspectRatio.coerceIn(0, 4)
+        recUpscale.value = g.upscaleFloat.toInt().coerceIn(1, 5)
+        recAntiBlur.value = g.antiBlur
+        recWidescreen.value = g.enableWideScreenPatches
+        recDeinterlaceOff.value = g.deinterlaceMode == 1 // 0 = Auto, 1 = Off
+        recPerfFast.value = g.eeCycleSkip >= 2 || g.fastCDVD
+    }
+
+    /** Write the Recommended Settings choices to the GLOBAL config tier. */
+    private fun finishRecommendedStep() {
+        runCatching {
+            val g = com.armsx2.config.ConfigStore.loadGlobal()
+            com.armsx2.config.ConfigStore.saveGlobal(
+                g.copy(
+                    aspectRatio = recAspect.value.coerceIn(0, 4),
+                    upscaleFloat = recUpscale.value.coerceIn(1, 5).toFloat(),
+                    antiBlur = recAntiBlur.value,
+                    enableWideScreenPatches = recWidescreen.value,
+                    deinterlaceMode = if (recDeinterlaceOff.value) 1 else 0,
+                    // Performance preset: Optimal (safe) vs Fast (aggressive) — mirrors
+                    // the in-game PerformanceTab Optimal/Fast snapshots.
+                    eeCycleRate = 0,
+                    eeCycleSkip = if (recPerfFast.value) 2 else 0,
+                    fastCDVD = recPerfFast.value,
+                )
+            )
+        }
+    }
+
     /** Reusable PS2-blue button colors. */
     @Composable
     private fun ps2Colors() = ButtonDefaults.buttonColors(
@@ -779,9 +834,43 @@ object SetupImpl {
                 storageRestartPending.value = true
                 return
             }
+            // First run only: offer the optional Recommended Settings step before
+            // finishing. It's an overlay with its own Skip / Finish, so it can NEVER
+            // block first-run. Re-entry (Settings cog) finishes straight away as before.
+            if (!Main.setupComplete.value) {
+                loadRecommendedFromGlobal()
+                showRecommended.value = true
+                return
+            }
             Main.finishSetup()
             allowPrev.value = false
             allowNext.value = false
+        }
+
+        fun finishRecommendedAndComplete(apply: Boolean) {
+            if (apply) {
+                finishRendererStep() // persist the OpenGL/Vulkan + driver pick
+                finishRecommendedStep()
+            }
+            showRecommended.value = false
+            allowPrev.value = false
+            allowNext.value = false
+            // First-run with a NON-internal data root (SD card / custom folder): bind it
+            // via a COLD RESTART rather than the in-process init. native initialize() pins
+            // EmuFolders::DataRoot once per process; pinning an SD/custom root in-process on
+            // a fresh setup leaves games unable to boot — they bounce straight back to the
+            // library. (Switching the root LATER already worked precisely because that path
+            // cold-restarts; this mirrors it for first run.) Internal (systemDir == null)
+            // binds fine in-process and needs no restart. Commit synchronously first because
+            // restartApp's Runtime.exit() skips pending async SharedPreferences applies — and
+            // ConfigStore shares Main.prefs, so this one commit also flushes the chosen root,
+            // BIOS path, and any Recommended-Settings picks.
+            if (Main.systemDir.value != null) {
+                Main.prefs.edit().putBoolean("setupComplete", true).commit()
+                Main.restartApp(context)
+                return
+            }
+            Main.finishSetup()
         }
 
         Box(
@@ -803,7 +892,12 @@ object SetupImpl {
                     )
                 }
                 else -> {
-                    if (showBiosChooser.value) {
+                    if (showRecommended.value) {
+                        SetupRecommendedOverlay(
+                            onSkip = { finishRecommendedAndComplete(apply = false) },
+                            onFinish = { finishRecommendedAndComplete(apply = true) },
+                        )
+                    } else if (showBiosChooser.value) {
                         BiosChooserOverlay(
                             onBack = {
                                 showBiosChooser.value = false
@@ -1829,6 +1923,92 @@ object SetupImpl {
             if (selectedRenderer.value == "vulkan") {
                 Spacer(Modifier.height(20.dp))
                 GpuDriverSection()
+            }
+        }
+    }
+
+    /** Optional first-run "Recommended Settings" page (PCSX2-wizard style). Shown as
+     *  an overlay AFTER the core setup completes, so it can't block first-run; every
+     *  choice has a sensible default and the whole step is skippable. */
+    @Composable
+    private fun SetupRecommendedOverlay(onSkip: () -> Unit, onFinish: () -> Unit) {
+        // The GPU driver browser takes over the whole page when open (same as the
+        // renderer page does), so a custom Vulkan driver can be installed here.
+        if (showDriverBrowser.value) {
+            DriverBrowserSheet()
+            return
+        }
+        val blue = Color(0xFF1E6FE0)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp),
+        ) {
+            Text("Recommended Settings", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "Optional — set these now or change them anytime in Settings.",
+                color = Color(0xFFAAAAAA),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 2.dp, bottom = 14.dp),
+            )
+            RecChoiceRow("Renderer", listOf("OpenGL", "Vulkan"), if (selectedRenderer.value == "vulkan") 1 else 0, blue) {
+                selectedRenderer.value = if (it == 1) "vulkan" else "opengl"
+            }
+            if (selectedRenderer.value == "vulkan") {
+                Spacer(Modifier.height(2.dp))
+                GpuDriverSection()
+                Spacer(Modifier.height(12.dp))
+            }
+            RecChoiceRow("Aspect Ratio", listOf("Stretch", "Auto", "4:3", "16:9", "10:7"), recAspect.value, blue) { recAspect.value = it }
+            RecChoiceRow("Internal Resolution", listOf("1x", "2x", "3x", "4x", "5x"), recUpscale.value - 1, blue) { recUpscale.value = it + 1 }
+            RecChoiceRow("Anti-Blur", listOf("Off", "On"), if (recAntiBlur.value) 1 else 0, blue) { recAntiBlur.value = it == 1 }
+            RecChoiceRow("Widescreen Patches", listOf("Off", "On"), if (recWidescreen.value) 1 else 0, blue) { recWidescreen.value = it == 1 }
+            RecChoiceRow("Deinterlacing", listOf("Auto", "Off"), if (recDeinterlaceOff.value) 1 else 0, blue) { recDeinterlaceOff.value = it == 1 }
+            RecChoiceRow("Performance", listOf("Optimal", "Fast"), if (recPerfFast.value) 1 else 0, blue) { recPerfFast.value = it == 1 }
+            Spacer(Modifier.height(20.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onSkip,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2A2A2A), contentColor = Color.White),
+                    shape = RoundedCornerShape(8.dp),
+                ) { Text("Skip") }
+                Button(
+                    onClick = onFinish,
+                    colors = ButtonDefaults.buttonColors(containerColor = blue, contentColor = Color.White),
+                    shape = RoundedCornerShape(8.dp),
+                ) { Text("Apply & Finish") }
+            }
+            Spacer(Modifier.height(14.dp))
+        }
+    }
+
+    @Composable
+    private fun RecChoiceRow(
+        label: String,
+        options: List<String>,
+        selected: Int,
+        accent: Color,
+        onSelect: (Int) -> Unit,
+    ) {
+        Column(Modifier.padding(bottom = 12.dp)) {
+            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Row(
+                modifier = Modifier.padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                options.forEachIndexed { i, opt ->
+                    val sel = i == selected
+                    Button(
+                        onClick = { onSelect(i) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (sel) accent else Color(0xFF24262B),
+                            contentColor = Color.White,
+                        ),
+                        shape = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    ) { Text(opt, fontSize = 12.sp) }
+                }
             }
         }
     }

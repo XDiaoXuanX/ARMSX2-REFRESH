@@ -79,15 +79,16 @@ public class NativeApp {
 		}
 		String dataPath = (chosen != null) ? chosen : externalFilesDir.getAbsolutePath();
 
-		// BIOS folder: the directory that actually holds the configured BIOS
-		// file. The setup wizard (and the data-root migration in
-		// Main.kickoffEmucoreInit) place the BIOS under <dataRoot>/bios, so
-		// pointing EmuFolders::Bios at the file's own parent makes BIOS loading
-		// follow a custom system folder instead of being pinned to app-private.
-		// Falls back to <dataPath>/bios, then the app-private bios dir.
+		// BIOS folder: the directory that actually holds the configured BIOS file.
+		// The setup wizard (and the migration in Main.kickoffEmucoreInit) keep the
+		// BIOS in app-private internal storage — NOT under a custom/SD data root —
+		// because the native FileSystem APIs can't reliably open a BIOS off a
+		// removable/SAF volume on Android 11+ (that made a data-root-on-SD game fail
+		// VM init and bounce back to the library). Falls back to externalFilesDir/bios
+		// (always app-owned + readable), matching that decoupled-BIOS design.
 		String biosFolder = Main.Companion.biosFolderPosix();
 		if (biosFolder == null || biosFolder.isEmpty()) {
-			biosFolder = dataPath + java.io.File.separator + "bios";
+			biosFolder = externalFilesDir.getAbsolutePath() + java.io.File.separator + "bios";
 		}
 
 		initialize(dataPath, biosFolder, android.os.Build.VERSION.SDK_INT);
