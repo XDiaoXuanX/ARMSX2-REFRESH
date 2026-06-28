@@ -80,6 +80,11 @@ u32 GSGetManualFrameSkip();
 void GSSetMaxPresentFps(u32 fps, u64 present_interval);
 u32 GSGetMaxPresentFps();
 u64 GSGetMaxPresentInterval();
+// While true (set when the limiter enters Turbo / fast-forward), the present cap
+// above is bypassed so the speed-up is actually visible. The cap resumes — with
+// a clean re-prime, no catch-up burst — as soon as fast-forward ends.
+void GSSetPresentCapSuspended(bool suspended);
+bool GSGetPresentCapSuspended();
 int GSfreeze(FreezeAction mode, freezeData* data);
 std::string GSGetBaseSnapshotFilename();
 std::string GSGetBaseVideoFilename();

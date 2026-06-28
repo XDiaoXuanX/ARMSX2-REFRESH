@@ -111,6 +111,9 @@ data class Settings(
     val enableNoInterlacingPatches: Boolean = false,
     /** EmuCore/EnableFastBoot — skip BIOS splash and boot straight to the game. */
     val enableFastBoot: Boolean = false,
+    /** EmuCore/HostFs — host: filesystem access in the VM, for ELF/homebrew and mods
+     *  (e.g. modded Persona 3 FES). Per-game capable; applies on the next game boot. */
+    val hostFs: Boolean = false,
     /** EmuCore/EnableGameFixes — master switch for game-specific compatibility hacks. */
     val enableGameFixes: Boolean = false,
     /** EmuCore/Gamefixes/SoftwareRendererFMVHack. */
@@ -216,6 +219,12 @@ data class Settings(
      *  the GS upscale helper; per-game so each title keeps its own. Seeded from the
      *  legacy global "upscaleFloat" pref on first load. */
     val upscaleFloat: Float = 1.0f,
+    /** EmuCore/GS FramerateNTSC — the emulated PS2 vsync rate for NTSC games
+     *  (PCSX2 default 59.94). Lowering it slows the game's target rate; raising it
+     *  speeds it up. Mirrors NetherSX2's "Framerate For NTSC". */
+    val framerateNtsc: Float = 59.94f,
+    /** EmuCore/GS FrameratePAL — emulated PS2 vsync rate for PAL games (default 50.00). */
+    val frameratePal: Float = 50.00f,
     /** EmuCore/GS/deinterlace_mode — GSInterlaceMode:
      *  0 Auto · 1 Off · 2/3 Weave · 4/5 Bob · 6/7 Blend · 8/9 Adaptive. */
     val deinterlaceMode: Int = 0,
@@ -514,6 +523,7 @@ data class Settings(
         put("EmuCore", "EnableWideScreenPatches", "bool", enableWideScreenPatches.toString())
         put("EmuCore", "EnableNoInterlacingPatches", "bool", enableNoInterlacingPatches.toString())
         put("EmuCore", "EnableFastBoot", "bool", enableFastBoot.toString())
+        put("EmuCore", "HostFs", "bool", hostFs.toString())
         put("EmuCore", "EnableGameFixes", "bool", enableGameFixes.toString())
         put("EmuCore/Gamefixes", "SoftwareRendererFMVHack", "bool", gamefixSoftwareRendererFmv.toString())
         put("EmuCore/Gamefixes", "SkipMPEGHack", "bool", gamefixSkipMpeg.toString())
@@ -657,6 +667,8 @@ data class Settings(
         }
         put("EmuCore/GS", "AspectRatio", "string", aspectRatioName)
         put("EmuCore/GS", "deinterlace_mode", "int", deinterlaceMode.coerceIn(0, 9).toString())
+        put("EmuCore/GS", "FramerateNTSC", "float", framerateNtsc.toString())
+        put("EmuCore/GS", "FrameratePAL", "float", frameratePal.toString())
         put("EmuCore/GS", "hw_mipmap", "bool", hwMipmap.toString())
         put("EmuCore/GS", "accurate_blending_unit", "int", accurateBlendingUnit.toString())
         put("EmuCore/GS", "filter", "int", textureFiltering.toString())
@@ -781,6 +793,12 @@ data class Settings(
      *  park when only non-GS settings (audio, frame limit, …) changed.
      *  Excludes display aspect (its own live setter) and gpuProfile (device-init
      *  only — needs a renderer restart). */
+    // NOTE: FramerateNTSC/PAL are intentionally NOT here — the generic GS live
+    // reconfigure (applyGSSettingsLive) doesn't recompute the vsync target. They
+    // get their OWN live path instead: applySafeLiveDelta routes a framerate change
+    // to LiveGsApplyQueue.applyFramerate → NativeApp.applyFramerateLive, which parks
+    // the VM and recomputes vsync. Keeping them out of here avoids a redundant
+    // (and park-free, thus ineffective) GS reconfigure for a framerate-only edit.
     fun gsDiffersFrom(other: Settings): Boolean =
         deinterlaceMode != other.deinterlaceMode ||
             textureFiltering != other.textureFiltering ||
@@ -853,11 +871,14 @@ data class Settings(
         put("spu2NeonReverb", spu2NeonReverb)
         put("renderer", renderer)
         put("upscaleFloat", upscaleFloat.toDouble())
+        put("framerateNtsc", framerateNtsc.toDouble())
+        put("frameratePal", frameratePal.toDouble())
         put("enablePatches", enablePatches)
         put("enableCheats", enableCheats)
         put("enableWideScreenPatches", enableWideScreenPatches)
         put("enableNoInterlacingPatches", enableNoInterlacingPatches)
         put("enableFastBoot", enableFastBoot)
+        put("hostFs", hostFs)
         put("enableGameFixes", enableGameFixes)
         put("gamefixSoftwareRendererFmv", gamefixSoftwareRendererFmv)
         put("gamefixSkipMpeg", gamefixSkipMpeg)
@@ -1033,11 +1054,14 @@ data class Settings(
                 spu2NeonReverb = json.optBoolean("spu2NeonReverb", def.spu2NeonReverb),
                 renderer = json.optString("renderer", def.renderer),
                 upscaleFloat = json.optDouble("upscaleFloat", def.upscaleFloat.toDouble()).toFloat(),
+                framerateNtsc = json.optDouble("framerateNtsc", def.framerateNtsc.toDouble()).toFloat(),
+                frameratePal = json.optDouble("frameratePal", def.frameratePal.toDouble()).toFloat(),
                 enablePatches = json.optBoolean("enablePatches", def.enablePatches),
                 enableCheats = json.optBoolean("enableCheats", def.enableCheats),
                 enableWideScreenPatches = json.optBoolean("enableWideScreenPatches", def.enableWideScreenPatches),
                 enableNoInterlacingPatches = json.optBoolean("enableNoInterlacingPatches", def.enableNoInterlacingPatches),
                 enableFastBoot = json.optBoolean("enableFastBoot", def.enableFastBoot),
+                hostFs = json.optBoolean("hostFs", def.hostFs),
                 enableGameFixes = json.optBoolean("enableGameFixes", def.enableGameFixes),
                 gamefixSoftwareRendererFmv = json.optBoolean("gamefixSoftwareRendererFmv", def.gamefixSoftwareRendererFmv),
                 gamefixSkipMpeg = json.optBoolean("gamefixSkipMpeg", def.gamefixSkipMpeg),
@@ -1216,11 +1240,14 @@ data class Settings(
             if (current.spu2NeonReverb != base.spu2NeonReverb) j.put("spu2NeonReverb", current.spu2NeonReverb)
             if (current.renderer != base.renderer) j.put("renderer", current.renderer)
             if (current.upscaleFloat != base.upscaleFloat) j.put("upscaleFloat", current.upscaleFloat.toDouble())
+            if (current.framerateNtsc != base.framerateNtsc) j.put("framerateNtsc", current.framerateNtsc.toDouble())
+            if (current.frameratePal != base.frameratePal) j.put("frameratePal", current.frameratePal.toDouble())
             if (current.enablePatches != base.enablePatches) j.put("enablePatches", current.enablePatches)
             if (current.enableCheats != base.enableCheats) j.put("enableCheats", current.enableCheats)
             if (current.enableWideScreenPatches != base.enableWideScreenPatches) j.put("enableWideScreenPatches", current.enableWideScreenPatches)
             if (current.enableNoInterlacingPatches != base.enableNoInterlacingPatches) j.put("enableNoInterlacingPatches", current.enableNoInterlacingPatches)
             if (current.enableFastBoot != base.enableFastBoot) j.put("enableFastBoot", current.enableFastBoot)
+            if (current.hostFs != base.hostFs) j.put("hostFs", current.hostFs)
             if (current.enableGameFixes != base.enableGameFixes) j.put("enableGameFixes", current.enableGameFixes)
             if (current.gamefixSoftwareRendererFmv != base.gamefixSoftwareRendererFmv) j.put("gamefixSoftwareRendererFmv", current.gamefixSoftwareRendererFmv)
             if (current.gamefixSkipMpeg != base.gamefixSkipMpeg) j.put("gamefixSkipMpeg", current.gamefixSkipMpeg)
@@ -1385,11 +1412,14 @@ data class Settings(
             spu2NeonReverb = if (overrides.has("spu2NeonReverb")) overrides.getBoolean("spu2NeonReverb") else base.spu2NeonReverb,
             renderer = if (overrides.has("renderer")) overrides.getString("renderer") else base.renderer,
             upscaleFloat = if (overrides.has("upscaleFloat")) overrides.getDouble("upscaleFloat").toFloat() else base.upscaleFloat,
+            framerateNtsc = if (overrides.has("framerateNtsc")) overrides.getDouble("framerateNtsc").toFloat() else base.framerateNtsc,
+            frameratePal = if (overrides.has("frameratePal")) overrides.getDouble("frameratePal").toFloat() else base.frameratePal,
             enablePatches = if (overrides.has("enablePatches")) overrides.getBoolean("enablePatches") else base.enablePatches,
             enableCheats = if (overrides.has("enableCheats")) overrides.getBoolean("enableCheats") else base.enableCheats,
             enableWideScreenPatches = if (overrides.has("enableWideScreenPatches")) overrides.getBoolean("enableWideScreenPatches") else base.enableWideScreenPatches,
             enableNoInterlacingPatches = if (overrides.has("enableNoInterlacingPatches")) overrides.getBoolean("enableNoInterlacingPatches") else base.enableNoInterlacingPatches,
             enableFastBoot = if (overrides.has("enableFastBoot")) overrides.getBoolean("enableFastBoot") else base.enableFastBoot,
+            hostFs = if (overrides.has("hostFs")) overrides.getBoolean("hostFs") else base.hostFs,
             enableGameFixes = if (overrides.has("enableGameFixes")) overrides.getBoolean("enableGameFixes") else base.enableGameFixes,
             gamefixSoftwareRendererFmv = if (overrides.has("gamefixSoftwareRendererFmv")) overrides.getBoolean("gamefixSoftwareRendererFmv") else base.gamefixSoftwareRendererFmv,
             gamefixSkipMpeg = if (overrides.has("gamefixSkipMpeg")) overrides.getBoolean("gamefixSkipMpeg") else base.gamefixSkipMpeg,

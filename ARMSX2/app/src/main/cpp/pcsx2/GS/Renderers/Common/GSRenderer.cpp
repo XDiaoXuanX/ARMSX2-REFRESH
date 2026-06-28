@@ -664,16 +664,26 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	// arbitrary cap. Resync after a stall so we never burst-present to catch up.
 	if (const u64 cap_interval = GSGetMaxPresentInterval(); cap_interval > 0 && !skip_frame && !GSCapture::IsCapturingVideo())
 	{
-		const u64 now = GetCPUTicks();
-		if (m_fps_cap_next_present == 0)
-			m_fps_cap_next_present = now; // first present primes the schedule
-		if (now < m_fps_cap_next_present)
-			skip_frame = true; // not yet time for the next present → drop it
+		if (GSGetPresentCapSuspended())
+		{
+			// Fast-forward (Turbo): don't drop presents, so the speed-up is
+			// actually visible. Re-prime the schedule so the cap resumes cleanly
+			// the instant FF ends (no burst-present to "catch up").
+			m_fps_cap_next_present = 0;
+		}
 		else
 		{
-			m_fps_cap_next_present += cap_interval;
-			if (m_fps_cap_next_present < now)
-				m_fps_cap_next_present = now + cap_interval; // stalled → resync, no burst
+			const u64 now = GetCPUTicks();
+			if (m_fps_cap_next_present == 0)
+				m_fps_cap_next_present = now; // first present primes the schedule
+			if (now < m_fps_cap_next_present)
+				skip_frame = true; // not yet time for the next present → drop it
+			else
+			{
+				m_fps_cap_next_present += cap_interval;
+				if (m_fps_cap_next_present < now)
+					m_fps_cap_next_present = now + cap_interval; // stalled → resync, no burst
+			}
 		}
 	}
 

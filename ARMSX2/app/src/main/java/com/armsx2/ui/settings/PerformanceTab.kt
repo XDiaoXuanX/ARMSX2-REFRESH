@@ -137,9 +137,9 @@ fun PerformanceTab(state: MutableState<Settings>) {
         // Arbitrary value; default stays 100. Affects audio pitch / timing / RA.
         IntSliderRow(
             label = "Speed Limit %",
-            value = s.nominalSpeedPercent.coerceIn(10, 200),
+            value = s.nominalSpeedPercent.coerceIn(10, 1000),
             min = 10,
-            max = 200,
+            max = 1000,
             description = "Emulation speed as % of native (100 = full speed). Affects audio pitch, game timing and RetroAchievements (hardcore stays at/above 100%). This is NOT a display cap — pair it with Display FPS Cap for per-game tuning. Best left at 100 unless a game needs it.",
             valueFormatter = { "$it%" },
             onChange = { apply(s.copy(nominalSpeedPercent = it)) },
@@ -156,6 +156,29 @@ fun PerformanceTab(state: MutableState<Settings>) {
             description = "Caps the PRESENTED (display) frame rate — emulation keeps full speed, so this is a display cap, not true emulation FPS. Any value works (use with Speed Limit % to fine-tune per game). 0 = off; values between the clean rates (60/30/20/15) pace a little unevenly.",
             valueFormatter = { if (it == 0) "Off" else "$it fps" },
             onChange = { apply(s.copy(fpsLimit = it)) },
+        )
+        SettingsDivider()
+        // Per-region emulated vsync rate (PCSX2 EmuCore/GS FramerateNTSC / FrameratePAL)
+        // — the PS2 refresh the game targets. Defaults 60/50 Hz (true 59.94/50.00).
+        // Speed Limit % is relative to this; this is the rate, not a display cap.
+        IntSliderRow(
+            label = "NTSC Framerate (Hz)",
+            value = Math.round(s.framerateNtsc).coerceIn(20, 75),
+            min = 20,
+            max = 75,
+            description = "Emulated refresh for NTSC (US/JP) games. Default 60 (59.94 Hz). Like NetherSX2's per-region rate; games internally at 30fps run at half this.",
+            valueFormatter = { "$it Hz" },
+            onChange = { apply(s.copy(framerateNtsc = it.toFloat())) },
+        )
+        SettingsDivider()
+        IntSliderRow(
+            label = "PAL Framerate (Hz)",
+            value = Math.round(s.frameratePal).coerceIn(20, 75),
+            min = 20,
+            max = 75,
+            description = "Emulated refresh for PAL (EU) games. Default 50 Hz. Games internally at 25fps run at half this.",
+            valueFormatter = { "$it Hz" },
+            onChange = { apply(s.copy(frameratePal = it.toFloat())) },
         )
         SettingsDivider()
         IntSliderRow(

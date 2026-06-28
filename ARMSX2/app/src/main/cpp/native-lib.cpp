@@ -16,6 +16,7 @@
 #include "common/FileSystem.h"
 #include "common/ZipHelpers.h"
 #include "pcsx2/GS.h"
+#include "pcsx2/Counters.h"
 #include "pcsx2/VMManager.h"
 #include "pcsx2/CDVD/CDVDcommon.h"
 #include "SIO/Memcard/MemoryCardFile.h"
@@ -755,6 +756,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_speedhackLimitermode(JNIEnv *env, jclass cl
     if (mode == LimiterModeType::Slomo && Achievements::IsHardcoreModeActive())
         mode = LimiterModeType::Nominal;
     VMManager::SetLimiterMode(mode);
+    // Suspend the Android present-FPS cap while fast-forwarding (Turbo) so the
+    // speed-up is visible instead of being held at the cap. Unlimited (the
+    // frame-limit-off steady state) keeps the cap — there the user still wants a
+    // bounded DISPLAY rate over uncapped emulation. Re-engages on Nominal.
+    GSSetPresentCapSuspended(mode == LimiterModeType::Turbo);
 }
 
 extern "C"
@@ -1210,6 +1216,75 @@ Java_kr_co_iefriends_pcsx2_NativeApp_reloadPatches(JNIEnv *env, jclass clazz) {
     const u32 active_cheats = Patch::GetActiveCheatsCount();
     Console.WriteLnFmt("@@ANDROID_PNACH@@ reload active_cheats={}", active_cheats);
     return static_cast<jint>(active_cheats);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_applyFramerateLive(JNIEnv *env, jclass clazz,
+                                                        jfloat p_ntsc, jfloat p_pal) {
+    // Per-region NTSC/PAL emulated vsync rate, applied LIVE (no restart) so the
+    // Frame Rate sliders behave like NetherSX2. The pacer caches the rate in
+    // vSyncInfo, so a plain EmuConfig write does nothing until UpdateVSyncRate
+    // recomputes it — mirroring VMManager::CheckForGSConfigChanges' framerate
+    // branch (UpdateVSyncRate + UpdateTargetSpeed).
+    //
+    // CRITICAL: UpdateVSyncRate rewrites the EE-thread hsync/vsync counters and
+    // calls cpuRcntSet(), so it MUST run with the CPU/MTGS/MTVU threads parked —
+    // a raw JNI-thread call would race the emulation loop. ScopedVMPause(false)
+    // parks them but keeps the audio stream alive (avoids the low-latency-stream
+    // reclaim that muted audio on longer parks). Invoked off the UI thread via
+    // LiveGsApplyQueue, which also coalesces rapid slider drags.
+    if (!VMManager::HasValidVM())
+        return;
+    ScopedVMPause vm_pause(false);
+    if (!vm_pause.parked())
+        return;
+    EmuConfig.GS.FramerateNTSC = static_cast<float>(p_ntsc);
+    EmuConfig.GS.FrameratePAL = static_cast<float>(p_pal);
+    UpdateVSyncRate(true);
+    VMManager::UpdateTargetSpeed();
+    Console.WriteLnFmt("@@ANDROID_FRAMERATE@@ ntsc={} pal={}",
+        EmuConfig.GS.FramerateNTSC, EmuConfig.GS.FrameratePAL);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_enablePad2(JNIEnv *env, jclass clazz) {
+    // Local co-op: hot-plug a second DualShock2 into PS2 port 2 the moment a 2nd
+    // physical controller joins (PadRouter). By default GetDefaultPadType makes only
+    // port 0 a DualShock2, so until this runs SetControllerState(1,...) lands on the
+    // (valid, non-null) PadNotConnected slot 1 — a safe no-op. Persist [Pad2] to the
+    // base layer so a later ApplySettings keeps it, set the live EmuConfig, then
+    // Pad::LoadConfig rebuilds the pads (with eject ticks so the running game detects
+    // the insertion).
+    //
+    // Threading: Pad::LoadConfig reassigns s_controllers[] (make_unique) and is read
+    // by BOTH the EE/SIO (CPU) thread AND the Android input thread. ScopedVMPause
+    // parks the CPU/MTGS/MTVU side; s_pad_mutex serializes the input side (applyPadButton).
+    // Both are required to avoid a use-after-free on the replaced controller. Runs on a
+    // background thread (see Main.onPlayer2Joined) so the input thread isn't blocked by
+    // the up-to-3s park wait.
+    if (!VMManager::HasValidVM())
+        return;
+    if (EmuConfig.Pad.Ports[1].Type == Pad::ControllerType::DualShock2)
+        return; // already connected
+    ScopedVMPause vm_pause(false);
+    if (!vm_pause.parked())
+        return;
+    {
+        auto lock = Host::GetSettingsLock();
+        if (SettingsInterface* si = Host::GetSettingsInterface()) {
+            si->SetStringValue("Pad2", "Type", "DualShock2");
+            si->SetFloatValue("Pad2", "Deadzone", 0.0f);        // app shapes the stick (shapeStickMag)
+            si->SetFloatValue("Pad2", "AxisScale", 1.33f);      // PCSX2 default
+            si->SetFloatValue("Pad2", "ButtonDeadzone", 0.0f);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(s_pad_mutex);
+        EmuConfig.Pad.Ports[1].Type = Pad::ControllerType::DualShock2;
+        Pad::LoadConfig(*Host::GetSettingsInterface());
+    }
+    Console.WriteLn("@@ANDROID_COOP@@ Pad2 enabled (DualShock2)");
 }
 
 // jobjectArray<String> -> std::vector<std::string>.
@@ -1695,6 +1770,10 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
             "EmuCore/GS", "FrameLimitEnable", true);
         VMManager::SetLimiterMode(frame_limit_on ? LimiterModeType::Nominal
                                                  : LimiterModeType::Unlimited);
+        // The present-cap-suspend flag is process-global (it lives in GS.cpp), so a
+        // game stopped mid-fast-forward could leave it set. Clear it on every boot
+        // so a fresh game never starts with its display cap silently bypassed.
+        GSSetPresentCapSuspended(false);
         VMState _vmState = VMState::Running;
         VMManager::SetState(_vmState);
         ////

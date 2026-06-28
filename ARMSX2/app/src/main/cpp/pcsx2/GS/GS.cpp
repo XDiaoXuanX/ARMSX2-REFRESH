@@ -494,6 +494,11 @@ u32 GSGetManualFrameSkip()
 // to whole vsync multiples (60/30/20/15…) and hold steady at the boundary.
 static std::atomic<u32> s_max_present_fps{0};
 static std::atomic<u64> s_max_present_interval{0};
+// Fast-forward (Turbo) bypasses the present cap so the speed-up is visible. Set
+// from the limiter-mode JNI (Turbo → true, anything else → false) and read on
+// the GS thread in GSRenderer::VSync. Unlimited (frame-limit-off steady state)
+// deliberately does NOT set this — there the present cap is still wanted.
+static std::atomic<bool> s_present_cap_suspended{false};
 void GSSetMaxPresentFps(u32 fps, u64 present_interval)
 {
 	s_max_present_fps.store(fps, std::memory_order_relaxed);
@@ -506,6 +511,14 @@ u32 GSGetMaxPresentFps()
 u64 GSGetMaxPresentInterval()
 {
 	return s_max_present_interval.load(std::memory_order_relaxed);
+}
+void GSSetPresentCapSuspended(bool suspended)
+{
+	s_present_cap_suspended.store(suspended, std::memory_order_relaxed);
+}
+bool GSGetPresentCapSuspended()
+{
+	return s_present_cap_suspended.load(std::memory_order_relaxed);
 }
 
 void GSvsync(u32 field, bool registers_written)

@@ -396,6 +396,10 @@ public class NativeApp {
 	 *  display swap, so emulation keeps running at 100% speed while the
 	 *  on-screen FPS is limited. Applies live. */
 	public static native void setFpsCap(int fps);
+	/** Per-region emulated PS2 vsync rate (NTSC / PAL Hz), applied live without a
+	 *  restart — recomputes the vsync pacer + target speed. Parks the VM briefly
+	 *  (keeps audio alive), so call it off the UI thread (via LiveGsApplyQueue). */
+	public static native void applyFramerateLive(float ntsc, float pal);
 	/** Frame skip: present 1 frame, skip the next N (0 = off). Display-only
 	 *  throttle; applies live. */
 	public static native void setFrameSkip(int skip);
