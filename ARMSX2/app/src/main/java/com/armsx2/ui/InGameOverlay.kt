@@ -100,6 +100,7 @@ import com.armsx2.config.LiveGsApplyQueue
 import com.armsx2.config.Settings
 import com.armsx2.config.SettingsScope
 import com.armsx2.ui.settings.AudioTab
+import com.armsx2.ui.settings.controllerFocusable
 import com.armsx2.ui.settings.FixesTab
 import com.armsx2.ui.settings.HotkeysTab
 import com.armsx2.ui.settings.NetworkTab
@@ -317,6 +318,41 @@ object InGameOverlay {
         osdShown.value = anyOsdElementEnabled(updated)
     }
 
+    /** Reset the currently-shown settings tier to its baseline. Global scope →
+     *  restore Settings() defaults. Game scope → drop this game's per-game
+     *  overrides so it inherits global again (and, if a VM is running, clear the
+     *  game's portable INI via an empty diff). Applies live like any edit. */
+    fun resetCurrentScope() {
+        // Pad feel/stick-modes, system hotkeys, and UI-size live OUTSIDE the Settings
+        // object (Main.prefs / UiScale state) and are GLOBAL-ONLY — there is no per-game
+        // tier for them. Reset them on EITHER scope's reset: otherwise a deadzone / stick
+        // mode / hotkey / UI-size change made on those tabs can't be undone from the
+        // per-game "Reset this game to global" (the user is looking right at the reset
+        // button on that tab). The reset is confirm-tap-gated, so this is deliberate.
+        com.armsx2.input.ControllerMappings.resetTunables()
+        com.armsx2.input.ControllerMappings.clearAllHotkeys()
+        UiScale.resetToDefaults()
+
+        val serial = currentSerial.value
+        if (settingsScope.value == SettingsScope.Game && serial != null) {
+            ConfigStore.clearOverrides(serial)
+            val resolved = ConfigStore.loadGlobal()
+            val previous = settingsState.value
+            settingsState.value = resolved
+            if (Main.eState.value == EmuState.STOPPED) {
+                resolved.applyTo()
+            } else {
+                applySafeLiveDelta(previous, resolved)
+                // Empty diff → gameIniCommitWrite deletes the running game's INI.
+                resolved.writeGameSettingsIni(ConfigStore.loadGlobal())
+            }
+            frameLimitOn.value = resolved.frameLimitEnable
+            osdShown.value = anyOsdElementEnabled(resolved)
+        } else {
+            saveSettings(Settings())
+        }
+    }
+
     private fun anyOsdElementEnabled(settings: Settings): Boolean =
         settings.osdShowFps ||
             settings.osdShowVps ||
@@ -370,6 +406,14 @@ object InGameOverlay {
             NativeApp.setNominalSpeed(updated.nominalSpeedPercent.coerceIn(10, 1000))
         if (previous.fpsLimit != updated.fpsLimit)
             NativeApp.setFpsCap(updated.fpsLimit.coerceIn(0, 1000))
+
+        // Per-region NTSC/PAL framerate — applies live (NetherSX2-style) via a
+        // dedicated coalesced queue (it parks the VM to recompute the vsync pacer,
+        // so it can't run inline here). Persists to base inside the queue too.
+        if (previous.framerateNtsc != updated.framerateNtsc ||
+            previous.frameratePal != updated.frameratePal) {
+            LiveGsApplyQueue.applyFramerate(updated.framerateNtsc, updated.frameratePal)
+        }
 
         // Audio — SPU2 setters apply live to the open stream, no VM park.
         if (previous.audioVolume != updated.audioVolume)
@@ -1082,6 +1126,10 @@ object InGameOverlay {
                     if (currentTab.value != Tab.PlayingNow && !settingsOnly.value) {
                         Spacer(Modifier.height(4.dp))
                         ScopeToggle()
+                    }
+                    if (currentTab.value != Tab.PlayingNow) {
+                        Spacer(Modifier.height(4.dp))
+                        ResetScopeButton()
                     }
                     Spacer(Modifier.height(6.dp))
                     // weight(1f) gives RootTabs the remaining vertical
@@ -1910,6 +1958,50 @@ object InGameOverlay {
             Text(
                 label,
                 color = fg,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
+    /** Scope-aware "reset to defaults" row, shown under the scope toggle. Global
+     *  scope resets all global settings to defaults; Game scope drops the current
+     *  game's overrides. Requires a confirming second tap to avoid accidents. */
+    @Composable
+    private fun ResetScopeButton() {
+        val armed = remember(currentTab.value, settingsScope.value, settingsOnly.value) {
+            mutableStateOf(false)
+        }
+        val game = settingsScope.value == SettingsScope.Game && currentSerial.value != null
+        val label = when {
+            armed.value -> "Tap again to confirm reset"
+            game -> "Reset this game to global"
+            else -> "Reset global to defaults"
+        }
+        val act = {
+            if (armed.value) {
+                resetCurrentScope()
+                armed.value = false
+            } else {
+                armed.value = true
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFF1A1A1A))
+                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(4.dp))
+                .height(20.dp)
+                .controllerFocusable("settings-reset", onConfirm = act)
+                .clickable(onClick = act),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                label,
+                color = if (armed.value) Color(0xFFE53935) else Colors.pasx2_blue,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
