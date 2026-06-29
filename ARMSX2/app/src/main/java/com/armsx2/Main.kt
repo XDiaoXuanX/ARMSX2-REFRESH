@@ -107,6 +107,11 @@ class SurfaceCallbacks(context: Context) : SurfaceView(context), SurfaceHolder.C
 }
 
 private const val STICK_DEAD = 0.15f
+// Trigger (L2/R2) dead-low: much smaller than the stick deadzone — triggers want fine
+// control and full range. Just enough to swallow resting-axis noise on cheaper / non-Xbox
+// pads; the value is re-normalized past it (see sendTrigger) so pressure ramps smoothly
+// from 0 instead of flickering on/off at a hard threshold — the jitter those pads showed.
+private const val TRIGGER_DEAD = 0.06f
 // Threshold past which a stick remapped to D-pad / face buttons registers as a
 // digital press. Higher than STICK_DEAD so a resting/wobbling stick doesn't fire.
 private const val STICK_DIGITAL_THRESHOLD = 0.5f
@@ -1133,6 +1138,8 @@ class Main: ComponentActivity() {
         com.armsx2.LibraryView.load()
         com.armsx2.ui.UiScale.load()
         com.armsx2.ControllerSkinStore.load(applicationContext)
+        // Restore the saved rumble master toggle into the native gate (NativeApp.onPadRumble).
+        kr.co.iefriends.pcsx2.NativeApp.sRumbleEnabled = com.armsx2.input.ControllerMappings.rumbleEnabled()
         setupComplete.value = prefs.getBoolean("setupComplete", false)
         systemDir.value = prefs.getString("systemDir", null)
         bios.value = prefs.getString("bios", null)
@@ -1901,6 +1908,9 @@ class Main: ComponentActivity() {
                 MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ,
                 aXPos = 121, aXNeg = 123, aYPos = 122, aYNeg = 120, // R right/left, down/up
                 leftStick = false, port = port)
+            // Fire any ARMSX2 hotkey bound (Hotkeys tab) to a stick DIRECTION — lets an
+            // unused stick trigger Quick Save/Load etc. The stick still drives the pad.
+            fireStickHotkeys(ev, port)
             // D-pad: the physical HAT *and* any stick remapped to D-pad drive the
             // same four PAD buttons. Combine every source and write each direction
             // once — otherwise the centered HAT released the stick-as-D-pad press
@@ -2153,7 +2163,32 @@ class Main: ComponentActivity() {
             dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
             dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
         }
+        // Analog sticks (the HAT path above only covers the d-pad): bind a stick
+        // DIRECTION to the hotkey on a firm push, by synthesizing its reserved keycode
+        // and routing it through dispatchKeyEvent. One-shot per arm — binding ends the
+        // capture, so the gate above stops further events.
+        var stickCode = captureStickCode(ev, MotionEvent.AXIS_X, MotionEvent.AXIS_Y, true)
+        if (stickCode == 0) stickCode = captureStickCode(ev, MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ, false)
+        if (stickCode != 0) {
+            dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, stickCode))
+            dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, stickCode))
+        }
         return true
+    }
+
+    /** The reserved hotkey keycode for whichever direction of the [left]/right stick is
+     *  pushed past a firm threshold during capture, or 0 if centered. */
+    private fun captureStickCode(ev: MotionEvent, axisX: Int, axisY: Int, left: Boolean): Int {
+        val x = ev.getAxisValue(axisX)
+        val y = ev.getAxisValue(axisY)
+        val t = 0.7f
+        return when {
+            y <= -t -> ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.UP)
+            y >= t -> ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.DOWN)
+            x <= -t -> ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.LEFT)
+            x >= t -> ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.RIGHT)
+            else -> 0
+        }
     }
 
     private fun uiHatDirection(value: Float): Int = when {
@@ -2235,11 +2270,18 @@ class Main: ComponentActivity() {
         val curved =
             if (accel > 0f) Math.pow(t.toDouble(), (1f + accel).toDouble()).toFloat()
             else t
-        return (curved * ControllerMappings.stickSensitivity()).coerceIn(0f, 1f)
+        val out = (curved * ControllerMappings.stickSensitivity()).coerceIn(0f, 1f)
+        // Anti-deadzone (output floor): lift ANY non-zero output up to start at the floor,
+        // so a game with its own large stick deadzone responds the instant the stick moves
+        // and the rest of the travel maps proportionally above it (no dead bottom, no jump).
+        // True center (out == 0) stays 0. 0 floor = unchanged behaviour.
+        if (out <= 0f) return 0f
+        val anti = ControllerMappings.stickAntiDeadzone()
+        return if (anti > 0f) (anti + out * (1f - anti)).coerceIn(0f, 1f) else out
     }
 
-    private fun sendAxis(event: MotionEvent, axis: Int, posCode: Int, negCode: Int, port: Int) {
-        val v = event.getAxisValue(axis)
+    // [v] is the already-corrected axis value (swap/invert applied by dispatchStick).
+    private fun sendAxis(v: Float, posCode: Int, negCode: Int, port: Int) {
         // Deadzone is applied (and re-normalized) inside shapeStickMag now.
         val posVal = if (v > 0f) shapeStickMag(v) else 0f
         val negVal = if (v < 0f) shapeStickMag(-v) else 0f
@@ -2252,8 +2294,9 @@ class Main: ComponentActivity() {
      *  axis) into the left stick for "D-pad as Left Stick" without a separate
      *  writer releasing the stick on the next event. The HAT reads ±1 so a d-pad
      *  press becomes full deflection. */
-    private fun sendAxisMax(event: MotionEvent, axisA: Int, axisB: Int, posCode: Int, negCode: Int, port: Int) {
-        val a = event.getAxisValue(axisA)
+    // [a] is the already-corrected stick value; the HAT axis [axisB] (physical D-pad)
+    // is read raw — it stays correct regardless of the stick's invert/swap correction.
+    private fun sendAxisMax(a: Float, event: MotionEvent, axisB: Int, posCode: Int, negCode: Int, port: Int) {
         val b = event.getAxisValue(axisB)
         // The real stick (axisA) gets the user's deadzone/sensitivity/acceleration
         // shaping; the D-pad HAT (axisB, ±1) stays full so the D-pad keeps full
@@ -2273,6 +2316,15 @@ class Main: ComponentActivity() {
         aXPos: Int, aXNeg: Int, aYPos: Int, aYNeg: Int,
         leftStick: Boolean, port: Int,
     ) {
+        // Read the raw axis values once, then apply the per-stick axis correction
+        // (swap X/Y first, then invert each) BEFORE any mode dispatch — so it fixes
+        // pads that read rotated/mirrored ("down is up, left is right") in Analog,
+        // Face and Custom modes alike.
+        var vx = event.getAxisValue(axisX)
+        var vy = event.getAxisValue(axisY)
+        if (ControllerMappings.stickSwapXY(leftStick)) { val t = vx; vx = vy; vy = t }
+        if (ControllerMappings.stickInvertX(leftStick)) vx = -vx
+        if (ControllerMappings.stickInvertY(leftStick)) vy = -vy
         when (mode) {
             ControllerMappings.StickMode.ANALOG -> {
                 if (leftStick && ControllerMappings.dpadAsLeftStick()) {
@@ -2280,23 +2332,21 @@ class Main: ComponentActivity() {
                     // D-pad drives analog movement. Combining into ONE writer (max
                     // deflection per axis) avoids the resting stick releasing the
                     // D-pad's press — the HAT is gated out of dispatchDpadCombined.
-                    sendAxisMax(event, axisX, MotionEvent.AXIS_HAT_X, aXPos, aXNeg, port)
-                    sendAxisMax(event, axisY, MotionEvent.AXIS_HAT_Y, aYPos, aYNeg, port)
+                    sendAxisMax(vx, event, MotionEvent.AXIS_HAT_X, aXPos, aXNeg, port)
+                    sendAxisMax(vy, event, MotionEvent.AXIS_HAT_Y, aYPos, aYNeg, port)
                 } else {
-                    sendAxis(event, axisX, aXPos, aXNeg, port)
-                    sendAxis(event, axisY, aYPos, aYNeg, port)
+                    sendAxis(vx, aXPos, aXNeg, port)
+                    sendAxis(vy, aYPos, aYNeg, port)
                 }
             }
             ControllerMappings.StickMode.FACE -> {
-                sendAxisDigital(event, axisX, posCode = 97, negCode = 99, port = port)  // Circle / Square (right/left)
-                sendAxisDigital(event, axisY, posCode = 96, negCode = 100, port = port) // Cross / Triangle (down/up)
+                sendAxisDigital(vx, posCode = 97, negCode = 99, port = port)  // Circle / Square (right/left)
+                sendAxisDigital(vy, posCode = 96, negCode = 100, port = port) // Cross / Triangle (down/up)
             }
             ControllerMappings.StickMode.CUSTOM -> {
                 // Each direction is bound to any PS2 button (per-player). D-pad targets
                 // (19-22) are owned by dispatchDpadCombined() (avoids the release race);
                 // emitCustom keeps analog targets proportional, others thresholded.
-                val vx = event.getAxisValue(axisX)
-                val vy = event.getAxisValue(axisY)
                 emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.RIGHT, port),
                     if (vx > 0f) vx else 0f, port)
                 emitCustom(ControllerMappings.customStickCode(leftStick, ControllerMappings.StickDir.LEFT, port),
@@ -2309,10 +2359,97 @@ class Main: ComponentActivity() {
         }
     }
 
+    // CUSTOM stick directions bound to an ARMSX2 hotkey are edge-triggered: this tracks
+    // which hotkey codes are currently held past the threshold, per port, so each
+    // crossing fires exactly once (re-armed on release).
+    private val stickHotkeyHeld = Array(2) { HashSet<Int>() }
+
+    /** Fire any SysHotkey bound (Hotkeys tab) to a stick DIRECTION, edge-triggered. The
+     *  stick still drives the pad, so this is meant for sticks/directions a game doesn't
+     *  use. Reuses [stickHotkeyHeld] — the reserved 1000+ stick-hotkey keycodes don't
+     *  collide with the Custom-mode 300+ codes also tracked there. */
+    private fun fireStickHotkeys(ev: MotionEvent, port: Int) {
+        fireStickHotkeyAxis(ev, MotionEvent.AXIS_X, MotionEvent.AXIS_Y, true, port)
+        fireStickHotkeyAxis(ev, MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ, false, port)
+    }
+    private fun fireStickHotkeyAxis(ev: MotionEvent, axisX: Int, axisY: Int, left: Boolean, port: Int) {
+        val x = ev.getAxisValue(axisX)
+        val y = ev.getAxisValue(axisY)
+        val held = stickHotkeyHeld[port]
+        val dirs = arrayOf(
+            ControllerMappings.StickDir.UP to -y, ControllerMappings.StickDir.DOWN to y,
+            ControllerMappings.StickDir.LEFT to -x, ControllerMappings.StickDir.RIGHT to x,
+        )
+        for ((dir, value) in dirs) {
+            val code = ControllerMappings.stickHotkeyKeyCode(left, dir)
+            val hk = ControllerMappings.hotkeyFor(code)
+            if (hk == null) { held.remove(code); continue }
+            if (value > STICK_DIGITAL_THRESHOLD) { if (held.add(code)) runStickHotkey(hk) }
+            else held.remove(code)
+        }
+    }
+
+    /** Fire an ARMSX2 hotkey from a non-key source (a CUSTOM stick direction crossing
+     *  its threshold — edge-triggered, treated as a single press). Hold-type hotkeys
+     *  (FAST_FORWARD hold, PRESSURE_MOD) are no-ops here — a stick edge has no hold
+     *  semantics; the rest mirror the one-shot actions in dispatchKeyEvent. */
+    private fun runStickHotkey(h: ControllerMappings.SysHotkey) {
+        when (h) {
+            ControllerMappings.SysHotkey.MENU -> com.armsx2.ui.InGameOverlay.toggle()
+            ControllerMappings.SysHotkey.SAVE_STATE -> {
+                val slot = Main.currentSaveSlot.value
+                kotlin.concurrent.thread { runCatching { NativeApp.saveStateToSlot(slot) } }
+            }
+            ControllerMappings.SysHotkey.LOAD_STATE -> {
+                val slot = Main.currentSaveSlot.value
+                kotlin.concurrent.thread { runCatching { NativeApp.loadStateFromSlot(slot) } }
+            }
+            ControllerMappings.SysHotkey.CYCLE_SLOT -> cycleSaveSlot()
+            ControllerMappings.SysHotkey.TEXTURE_DUMP -> {
+                val on = runCatching { NativeApp.toggleTextureDumping() }.getOrDefault(false)
+                android.widget.Toast.makeText(this,
+                    if (on) "Texture dumping ON" else "Texture dumping OFF",
+                    android.widget.Toast.LENGTH_SHORT).show()
+            }
+            ControllerMappings.SysHotkey.FAST_FORWARD_TOGGLE -> {
+                Main.fastForwardToggleActive = !Main.fastForwardToggleActive
+                val on = Main.fastForwardToggleActive
+                runCatching { NativeApp.speedhackLimitermode(if (on) 1 else baseLimiterMode()) }
+                android.widget.Toast.makeText(this,
+                    if (on) "Fast Forward ON" else "Fast Forward OFF",
+                    android.widget.Toast.LENGTH_SHORT).show()
+            }
+            ControllerMappings.SysHotkey.RES_UP -> stepResolution(1)
+            ControllerMappings.SysHotkey.RES_DOWN -> stepResolution(-1)
+            ControllerMappings.SysHotkey.ACHIEVEMENTS -> com.armsx2.ui.InGameOverlay.openAchievements()
+            ControllerMappings.SysHotkey.CLOSE_GAME -> {
+                if (Main.launchedExternally &&
+                    Main.prefs.getBoolean("ui.exitToLauncherExternal", true))
+                    Main.quitAfterStop = true
+                Main.stop()
+            }
+            ControllerMappings.SysHotkey.QUIT_APP -> { Main.quitAfterStop = true; Main.stop() }
+            // Hold-type hotkeys have no one-shot stick-edge meaning.
+            ControllerMappings.SysHotkey.FAST_FORWARD,
+            ControllerMappings.SysHotkey.PRESSURE_MOD -> {}
+        }
+    }
+
     /** Emit one CUSTOM stick-direction binding given its 0..1 deflection [mag]
      *  toward that direction. D-pad codes (19-22) are skipped — dispatchDpadCombined
      *  owns them; analog codes (110-123) stay proportional; others are thresholded. */
     private fun emitCustom(code: Int, mag: Float, port: Int) {
+        // Bound to an ARMSX2 hotkey? Edge-trigger it (fire once on threshold crossing,
+        // re-arm on release) instead of sending a PS2 button.
+        ControllerMappings.hotkeyForStickCode(code)?.let { hk ->
+            val held = stickHotkeyHeld[port]
+            if (mag > STICK_DIGITAL_THRESHOLD) {
+                if (held.add(code)) runStickHotkey(hk)
+            } else {
+                held.remove(code)
+            }
+            return
+        }
         if (code in 19..22) return
         if (code in 110..123) {
             val m = shapeStickMag(mag)
@@ -2324,8 +2461,8 @@ class Main: ComponentActivity() {
 
     /** Stick-as-button: press [posCode] / [negCode] once the axis passes the digital
      *  threshold. setPadButton is a state set, so re-sending the same state is a no-op. */
-    private fun sendAxisDigital(event: MotionEvent, axis: Int, posCode: Int, negCode: Int, port: Int) {
-        val v = event.getAxisValue(axis)
+    // [v] is the already-corrected axis value (swap/invert applied by dispatchStick).
+    private fun sendAxisDigital(v: Float, posCode: Int, negCode: Int, port: Int) {
         NativeApp.setPadButtonForPort(port, posCode, 32767, v > STICK_DIGITAL_THRESHOLD)
         NativeApp.setPadButtonForPort(port, negCode, 32767, v < -STICK_DIGITAL_THRESHOLD)
     }
@@ -2429,9 +2566,15 @@ class Main: ComponentActivity() {
     }
 
     private fun sendTrigger(event: MotionEvent, axisA: Int, axisB: Int, code: Int, port: Int) {
-        val v = maxOf(event.getAxisValue(axisA), event.getAxisValue(axisB))
-        val clamped = if (v > STICK_DEAD) v.coerceAtMost(1f) else 0f
-        NativeApp.setPadButtonForPort(port, code, (clamped * 32767).toInt(), clamped > 0f)
+        // Pads report L2/R2 on AXIS_*TRIGGER or on AXIS_BRAKE/GAS — take the higher of
+        // the two, clamping negatives (some non-Xbox pads idle an unused trigger axis at
+        // -1). Then apply the SMALL trigger deadzone and re-normalize the remaining range
+        // to 0..1, so pressure ramps smoothly from zero to full instead of flicking on/off
+        // around the old hard 15% stick-deadzone boundary (the jitter non-Xbox pads showed)
+        // — and the low 15% of travel is no longer wasted.
+        val raw = maxOf(event.getAxisValue(axisA), event.getAxisValue(axisB)).coerceIn(0f, 1f)
+        val out = if (raw <= TRIGGER_DEAD) 0f else (raw - TRIGGER_DEAD) / (1f - TRIGGER_DEAD)
+        NativeApp.setPadButtonForPort(port, code, (out * 32767).toInt(), out > 0f)
     }
 
     override fun onPause() {

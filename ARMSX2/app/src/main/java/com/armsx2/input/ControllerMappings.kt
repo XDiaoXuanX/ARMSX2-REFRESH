@@ -77,6 +77,31 @@ object ControllerMappings {
     fun stickModeFor(left: Boolean, player: Int = 0): StickMode =
         if (left) leftStickMode(player) else rightStickMode(player)
 
+    // ---- Per-stick axis correction (invert / swap) ------------------------
+    // Fixes pads whose stick reads rotated or mirrored — e.g. a right stick where
+    // "down is up and left is right". Applied to the RAW axis values before any
+    // mode dispatch, so it corrects Analog, Face AND Custom modes alike. Per-stick
+    // but GLOBAL (a physical-pad correction, like sensitivity/deadzone above —
+    // not per-player). Swap is applied first, then the inverts.
+    private const val KEY_LSTICK_INVX = "pad.lstick.invertX"
+    private const val KEY_LSTICK_INVY = "pad.lstick.invertY"
+    private const val KEY_LSTICK_SWAP = "pad.lstick.swapXY"
+    private const val KEY_RSTICK_INVX = "pad.rstick.invertX"
+    private const val KEY_RSTICK_INVY = "pad.rstick.invertY"
+    private const val KEY_RSTICK_SWAP = "pad.rstick.swapXY"
+    fun stickInvertX(left: Boolean): Boolean =
+        Main.prefs.getBoolean(if (left) KEY_LSTICK_INVX else KEY_RSTICK_INVX, false)
+    fun stickInvertY(left: Boolean): Boolean =
+        Main.prefs.getBoolean(if (left) KEY_LSTICK_INVY else KEY_RSTICK_INVY, false)
+    fun stickSwapXY(left: Boolean): Boolean =
+        Main.prefs.getBoolean(if (left) KEY_LSTICK_SWAP else KEY_RSTICK_SWAP, false)
+    fun setStickInvertX(left: Boolean, on: Boolean) =
+        Main.prefs.edit().putBoolean(if (left) KEY_LSTICK_INVX else KEY_RSTICK_INVX, on).apply()
+    fun setStickInvertY(left: Boolean, on: Boolean) =
+        Main.prefs.edit().putBoolean(if (left) KEY_LSTICK_INVY else KEY_RSTICK_INVY, on).apply()
+    fun setStickSwapXY(left: Boolean, on: Boolean) =
+        Main.prefs.edit().putBoolean(if (left) KEY_LSTICK_SWAP else KEY_RSTICK_SWAP, on).apply()
+
     // Make the physical D-pad drive the LEFT analog stick (full deflection) so it
     // works in games that only read the analog stick. While on, the D-pad no
     // longer sends digital d-pad presses in-game.
@@ -154,6 +179,37 @@ object ControllerMappings {
         Main.prefs.edit().putFloat(KEY_STICK_OUTER, c).apply()
     }
 
+    // Anti-deadzone (output floor): the SMALLEST non-zero analog output sent to the PS2.
+    // Many PS2 games have a large built-in stick deadzone (e.g. Cold Fear / Area 51 ignore
+    // the stick until ~45%), so with a linear map the game feels dead at the bottom then
+    // jumps. Set this near the game's deadzone and ANY stick movement maps to just past it,
+    // so the full physical travel maps smoothly onto the game's active range (immediate +
+    // proportional, no jump, no slow zone). 0 = off (unchanged). Applied in Main.shapeStickMag
+    // AFTER sensitivity, only to a non-zero magnitude (true center still reads 0).
+    private const val KEY_STICK_ANTIDZ = "pad.stick.antiDeadzone"
+    const val STICK_ANTIDZ_MAX = 0.60f
+    @Volatile private var sStickAntiDz = Float.NaN
+    fun stickAntiDeadzone(): Float {
+        if (sStickAntiDz.isNaN())
+            sStickAntiDz = Main.prefs.getFloat(KEY_STICK_ANTIDZ, 0.0f).coerceIn(0f, STICK_ANTIDZ_MAX)
+        return sStickAntiDz
+    }
+    fun setStickAntiDeadzone(v: Float) {
+        val c = v.coerceIn(0f, STICK_ANTIDZ_MAX)
+        sStickAntiDz = c
+        Main.prefs.edit().putFloat(KEY_STICK_ANTIDZ, c).apply()
+    }
+
+    // Master rumble / vibration enable. Gates NativeApp.onPadRumble (controller motors AND
+    // the device-haptic fallback). Persisted in prefs and mirrored into the native gate
+    // NativeApp.sRumbleEnabled — live on change and at app start (Main.onCreate). Default on.
+    private const val KEY_RUMBLE = "pad.rumble.enabled"
+    fun rumbleEnabled(): Boolean = Main.prefs.getBoolean(KEY_RUMBLE, true)
+    fun setRumbleEnabled(on: Boolean) {
+        Main.prefs.edit().putBoolean(KEY_RUMBLE, on).apply()
+        kr.co.iefriends.pcsx2.NativeApp.sRumbleEnabled = on
+    }
+
     // ---- Custom per-direction stick→button binding (StickMode.CUSTOM) ----
 
     /** The four directions of a stick, each independently bindable in CUSTOM mode. */
@@ -174,7 +230,8 @@ object ControllerMappings {
         PsButton(200, "Analog (toggle)"),
     )
     fun stickTargetLabel(code: Int): String =
-        stickTargets.firstOrNull { it.code == code }?.label ?: "Code $code"
+        hotkeyForStickCode(code)?.let { "Hotkey: ${it.label}" }
+            ?: stickTargets.firstOrNull { it.code == code }?.label ?: "Code $code"
 
     // Default per-direction code = the stick's native analog code, so a fresh
     // CUSTOM stick behaves exactly like ANALOG until the user rebinds a direction.
@@ -194,6 +251,22 @@ object ControllerMappings {
         Main.prefs.getInt(customKey(left, dir, player), defaultCustomCode(left, dir))
     fun setCustomStickCode(left: Boolean, dir: StickDir, code: Int, player: Int = 0) =
         Main.prefs.edit().putInt(customKey(left, dir, player), code).apply()
+
+    // A CUSTOM stick direction can fire an ARMSX2 hotkey (Quick Save/Load State, etc.)
+    // instead of a PS2 button — so a freed-up stick direction (e.g. when the left stick
+    // already drives the D-pad) becomes a hotkey trigger. Hotkey targets share the
+    // customStickCode storage via a reserved code range (no separate persistence). To
+    // bind one, the user — while capturing a direction — presses a physical button they
+    // already assigned to that hotkey in the Hotkeys tab; PadTab maps it to these codes.
+    // Edge-triggered in Main.emitCustom (fires once when the direction crosses the
+    // digital threshold). [SysHotkey] is defined later in this object — fine, it's an
+    // object so member order doesn't matter.
+    const val HOTKEY_STICK_CODE_BASE = 300
+    fun stickCodeForHotkey(h: SysHotkey): Int = HOTKEY_STICK_CODE_BASE + h.ordinal
+    fun hotkeyForStickCode(code: Int): SysHotkey? {
+        val i = code - HOTKEY_STICK_CODE_BASE
+        return if (i in SysHotkey.values().indices) SysHotkey.values()[i] else null
+    }
 
     /** Active CUSTOM stick-direction capture target, or null. (left, dir). When
      *  non-null the Pad tab is waiting for a physical button to bind to this
@@ -224,8 +297,20 @@ object ControllerMappings {
     fun physicalFor(action: Action, player: Int = 0): Int =
         Main.prefs.getInt(playerPrefix(player) + KEY_PREFIX + action.id, action.defaultPhysicalKeyCode)
 
+    // Reserved keycodes for binding an ANALOG STICK DIRECTION to a SysHotkey from the
+    // Hotkeys tab (the d-pad already binds via its HAT->key translation; analog sticks
+    // didn't). Real Android keycodes top out far below 1000, so this never collides.
+    // 8 directions: L then R stick, each in StickDir ordinal order (Up/Down/Left/Right).
+    const val STICK_HOTKEY_KEY_BASE = 1000
+    fun stickHotkeyKeyCode(left: Boolean, dir: StickDir): Int =
+        STICK_HOTKEY_KEY_BASE + (if (left) 0 else 4) + dir.ordinal
+
     fun labelForKey(keyCode: Int): String = when (keyCode) {
         KeyEvent.KEYCODE_UNKNOWN -> "Not set"
+        in STICK_HOTKEY_KEY_BASE until STICK_HOTKEY_KEY_BASE + 8 -> {
+            val i = keyCode - STICK_HOTKEY_KEY_BASE
+            "${if (i < 4) "L-Stick" else "R-Stick"} ${StickDir.values()[i % 4].id.replaceFirstChar { it.uppercase() }}"
+        }
         KeyEvent.KEYCODE_DPAD_UP -> "D-Pad Up"
         KeyEvent.KEYCODE_DPAD_DOWN -> "D-Pad Down"
         KeyEvent.KEYCODE_DPAD_LEFT -> "D-Pad Left"
@@ -264,8 +349,11 @@ object ControllerMappings {
     fun resetTunables() {
         val edit = Main.prefs.edit()
         edit.remove(KEY_STICK_SENS).remove(KEY_STICK_ACCEL).remove(KEY_STICK_DZ)
-            .remove(KEY_STICK_OUTER).remove(KEY_DPAD_AS_LSTICK)
-        sStickSens = Float.NaN; sStickAccel = Float.NaN; sStickDz = Float.NaN; sStickOuter = Float.NaN
+            .remove(KEY_STICK_OUTER).remove(KEY_STICK_ANTIDZ).remove(KEY_DPAD_AS_LSTICK)
+            .remove(KEY_LSTICK_INVX).remove(KEY_LSTICK_INVY).remove(KEY_LSTICK_SWAP)
+            .remove(KEY_RSTICK_INVX).remove(KEY_RSTICK_INVY).remove(KEY_RSTICK_SWAP)
+        sStickSens = Float.NaN; sStickAccel = Float.NaN; sStickDz = Float.NaN
+        sStickOuter = Float.NaN; sStickAntiDz = Float.NaN
         for (p in intArrayOf(P1, P2)) {
             edit.remove(playerPrefix(p) + KEY_LSTICK).remove(playerPrefix(p) + KEY_RSTICK)
             for (left in booleanArrayOf(true, false))

@@ -93,7 +93,7 @@ fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 }
                 Text(
                     when {
-                        capturing -> "Press 1 button, or 2 together…"
+                        capturing -> "Press a button, push a stick, or 2 together…"
                         unset -> "Not set"
                         else -> binding
                     },

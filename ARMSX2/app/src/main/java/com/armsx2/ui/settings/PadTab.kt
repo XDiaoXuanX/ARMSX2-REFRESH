@@ -86,14 +86,20 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                     val ncode = event.key.nativeKeyCode
                     if (ncode == android.view.KeyEvent.KEYCODE_UNKNOWN)
                         return@onPreviewKeyEvent true
-                    val ps2 = ControllerMappings.stickCodeForPhysical(ncode, editPlayer.value)
-                    if (ps2 != null) {
-                        ControllerMappings.setCustomStickCode(sc.first, sc.second, ps2, editPlayer.value)
+                    // Prefer an ARMSX2 hotkey if the pressed button is already bound to
+                    // one (Hotkeys tab) — that turns a freed-up stick direction into a
+                    // Quick Save/Load State (etc.) trigger. Otherwise resolve to the PS2
+                    // button the pressed control drives, exactly as before.
+                    val hk = ControllerMappings.hotkeyFor(ncode)
+                    val target = if (hk != null) ControllerMappings.stickCodeForHotkey(hk)
+                        else ControllerMappings.stickCodeForPhysical(ncode, editPlayer.value)
+                    if (target != null) {
+                        ControllerMappings.setCustomStickCode(sc.first, sc.second, target, editPlayer.value)
                         ControllerMappings.endStickCapture()
                         refreshToken.value++
                     }
-                    // If the pressed button isn't mapped to any pad Action, keep
-                    // waiting (swallow) rather than binding nothing.
+                    // If the pressed button isn't mapped to any pad Action or hotkey,
+                    // keep waiting (swallow) rather than binding nothing.
                     return@onPreviewKeyEvent true
                 }
                 // Regular button capture — the menu button is captured in
@@ -163,6 +169,17 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 refreshToken.value++
             },
         )
+        // Master rumble / vibration enable — gates controller motors AND the device-haptic
+        // fallback (NativeApp.onPadRumble). Off = no haptics anywhere.
+        ToggleRow(
+            "Rumble / Vibration",
+            ControllerMappings.rumbleEnabled(),
+            description = "Master switch for controller rumble and the device's built-in vibration. Turn off to silence all haptics.",
+        ) {
+            ControllerMappings.setRumbleEnabled(it)
+            refreshToken.value++
+        }
+        SettingsDivider()
         // Buzz the selected player's controller and report whether Android can drive
         // its rumble — separates a routing problem from a pad whose haptics simply
         // aren't exposed to Android (common for DualSense/DS4 over Bluetooth).
@@ -218,6 +235,22 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                     SettingsDivider()
                 }
             }
+            // Axis correction for the LEFT stick — fixes pads that read mirrored/rotated.
+            ToggleRow("Left Stick — Swap X/Y", ControllerMappings.stickSwapXY(true),
+                description = "Swap the left stick's horizontal and vertical axes (for a stick that reads rotated 90°).") {
+                ControllerMappings.setStickSwapXY(true, it); refreshToken.value++
+            }
+            SettingsDivider()
+            ToggleRow("Left Stick — Invert X", ControllerMappings.stickInvertX(true),
+                description = "Mirror the left stick horizontally — fixes \"left is right\".") {
+                ControllerMappings.setStickInvertX(true, it); refreshToken.value++
+            }
+            SettingsDivider()
+            ToggleRow("Left Stick — Invert Y", ControllerMappings.stickInvertY(true),
+                description = "Mirror the left stick vertically — fixes \"down is up\".") {
+                ControllerMappings.setStickInvertY(true, it); refreshToken.value++
+            }
+            SettingsDivider()
             SegmentedRow(
                 label = "Right Stick",
                 options = stickOpts,
@@ -235,6 +268,22 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                     SettingsDivider()
                 }
             }
+            // Axis correction for the RIGHT stick — e.g. the tester's "down is up, left is right".
+            ToggleRow("Right Stick — Swap X/Y", ControllerMappings.stickSwapXY(false),
+                description = "Swap the right stick's horizontal and vertical axes (for a stick that reads rotated 90°).") {
+                ControllerMappings.setStickSwapXY(false, it); refreshToken.value++
+            }
+            SettingsDivider()
+            ToggleRow("Right Stick — Invert X", ControllerMappings.stickInvertX(false),
+                description = "Mirror the right stick horizontally — fixes \"left is right\".") {
+                ControllerMappings.setStickInvertX(false, it); refreshToken.value++
+            }
+            SettingsDivider()
+            ToggleRow("Right Stick — Invert Y", ControllerMappings.stickInvertY(false),
+                description = "Mirror the right stick vertically — fixes \"down is up\".") {
+                ControllerMappings.setStickInvertY(false, it); refreshToken.value++
+            }
+            SettingsDivider()
             ToggleRow(
                 "D-pad acts as Left Stick",
                 ControllerMappings.dpadAsLeftStick(),
@@ -262,6 +311,16 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 description = "Fraction of travel near the EDGE mapped to full output, so a stick that can't physically reach its corners still hits 100% (short-throw / handheld sticks like the Odin). 0 = off.",
                 valueFormatter = { if (it == 0) "Off" else "${it}%" },
                 onChange = { ControllerMappings.setStickOuterDeadzone(it / 100f); refreshToken.value++ },
+            )
+            SettingsDivider()
+            IntSliderRow(
+                label = "Stick Anti-Deadzone",
+                value = (ControllerMappings.stickAntiDeadzone() * 100f).toInt(), // 0.0..0.6 -> 0..60
+                min = 0,
+                max = (ControllerMappings.STICK_ANTIDZ_MAX * 100f).toInt(),
+                description = "Smallest output sent to the game, to cancel a game's OWN built-in stick deadzone (e.g. Cold Fear / Area 51 ignore the stick until ~45%, then aim jumps). Set near the game's deadzone so any stick movement responds immediately and the full travel maps smoothly above it. 0 = off.",
+                valueFormatter = { if (it == 0) "Off" else "${it}%" },
+                onChange = { ControllerMappings.setStickAntiDeadzone(it / 100f); refreshToken.value++ },
             )
             SettingsDivider()
             IntSliderRow(
@@ -383,7 +442,7 @@ private fun StickDirPickerRow(
         )
         Spacer(Modifier.weight(1f))
         Text(
-            if (capturing) "Press a button..." else ControllerMappings.stickTargetLabel(code),
+            if (capturing) "Press a button (or a hotkey button)..." else ControllerMappings.stickTargetLabel(code),
             color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
