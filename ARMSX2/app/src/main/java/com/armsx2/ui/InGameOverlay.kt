@@ -1713,6 +1713,7 @@ object InGameOverlay {
     @Composable
     private fun GameInfoTab() {
         val game = previewGame.value ?: Main.currentGame.value
+        val context = androidx.compose.ui.platform.LocalContext.current
         // getGameTitle now falls back to an on-demand disc scan when the native
         // game-list cache misses (which it usually does — the Android library is
         // scanned in Kotlin), so resolve the CRC OFF the UI thread to avoid
@@ -1752,6 +1753,28 @@ object InGameOverlay {
             if (game != null) {
                 Spacer(Modifier.height(4.dp))
                 CustomCoverControls(game)
+                // Always show — some launchers report isRequestPinShortcutSupported=false
+                // even when they accept the pin, and others fall back to the legacy
+                // INSTALL_SHORTCUT broadcast; pin() tries both and toasts on real failure.
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Add to Home Screen",
+                    color = Colors.pasx2_blue,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val ok = com.armsx2.HomeShortcuts.pin(context, game)
+                            android.widget.Toast.makeText(
+                                context,
+                                if (ok) "Added to home screen — check your launcher"
+                                else "Your launcher didn't accept the shortcut",
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                        .padding(vertical = 8.dp, horizontal = 4.dp),
+                )
             }
             Spacer(Modifier.height(8.dp))
             Text(
