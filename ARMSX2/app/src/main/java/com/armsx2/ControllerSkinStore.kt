@@ -49,7 +49,13 @@ object ControllerSkinStore {
     private fun keyForFilename(name: String): String? {
         val n = name.substringAfterLast('/').substringAfterLast('\\').lowercase()
         if (n.startsWith("._") || !n.endsWith(".png")) return null
-        val core = n.removeSuffix(".png").removePrefix("ic_controller_").removeSuffix("_button")
+        var core = n.removeSuffix(".png").removePrefix("ic_controller_").removeSuffix("_button")
+        // Newer skin packs split the analog thumb into per-side images
+        // (ic_controller_analog_stick_left/right.png). The overlay renders a single
+        // thumb for both sticks, so fold both onto the one analog_stick slot (whichever
+        // the pack ships — they're normally identical). analog_base + the older single
+        // ic_controller_analog_stick.png keep working unchanged.
+        if (core == "analog_stick_left" || core == "analog_stick_right") core = "analog_stick"
         return if (FILE.containsKey(core)) core else null
     }
 

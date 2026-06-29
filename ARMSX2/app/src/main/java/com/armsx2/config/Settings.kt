@@ -173,6 +173,16 @@ data class Settings(
     val syncToHostRefresh: Boolean = false,
     /** EmuCore/GS/DisableFramebufferFetch — disable the framebuffer-fetch path. Default off. */
     val disableFramebufferFetch: Boolean = false,
+    /** EmuCore/GS/HWROV — Rasterizer Order Views (accurate blending via fragment-shader interlock; Vulkan only). Default on. */
+    val hwRov: Boolean = true,
+    /** EmuCore/GS/HWAA1 — hardware PS2 AA1 edge anti-aliasing. Default off. Applies on game restart. */
+    val hwAa1: Boolean = false,
+    /** EmuCore/GS/HWAccurateAlphaTest — accurate alpha test for the HW renderer (pairs with ROV). Default off. */
+    val hwAat: Boolean = false,
+    /** EmuCore/GS/EnableAdrenoFramebufferFetch — opt-in: enable the Vulkan framebuffer-fetch
+     * (ROAA) accurate-blending fast path on non-Mali (Adreno) GPUs that expose the extension.
+     * Experimental; default off. Applies on game restart. */
+    val adrenoFbFetch: Boolean = false,
     /** EmuCore/GS/OverrideTextureBarriers — -1 Auto / 0 Off / 1 On. */
     val overrideTextureBarriers: Int = -1,
     /** EmuCore/GS/DisableVertexShaderExpand — force CPU vertex expansion. Renderer-init; restart to apply. */
@@ -703,6 +713,10 @@ data class Settings(
         put("EmuCore/GS", "disable_interlace_offset", "bool", disableInterlaceOffset.toString())
         put("EmuCore/GS", "SyncToHostRefreshRate", "bool", syncToHostRefresh.toString())
         put("EmuCore/GS", "DisableFramebufferFetch", "bool", disableFramebufferFetch.toString())
+        put("EmuCore/GS", "HWROV", "bool", hwRov.toString())
+        put("EmuCore/GS", "HWAA1", "bool", hwAa1.toString())
+        put("EmuCore/GS", "HWAccurateAlphaTest", "bool", hwAat.toString())
+        put("EmuCore/GS", "EnableAdrenoFramebufferFetch", "bool", adrenoFbFetch.toString())
         put("EmuCore/GS", "OverrideTextureBarriers", "int", overrideTextureBarriers.coerceIn(-1, 1).toString())
         put("EmuCore/GS", "DisableVertexShaderExpand", "bool", disableVertexShaderExpand.toString())
         put("EmuCore/GS", "UseBlitSwapChain", "bool", useBlitSwapChain.toString())
@@ -907,6 +921,10 @@ data class Settings(
         put("disableInterlaceOffset", disableInterlaceOffset)
         put("syncToHostRefresh", syncToHostRefresh)
         put("disableFramebufferFetch", disableFramebufferFetch)
+        put("hwRov", hwRov)
+        put("hwAa1", hwAa1)
+        put("hwAat", hwAat)
+        put("adrenoFbFetch", adrenoFbFetch)
         put("overrideTextureBarriers", overrideTextureBarriers)
         put("disableVertexShaderExpand", disableVertexShaderExpand)
         put("useBlitSwapChain", useBlitSwapChain)
@@ -1090,6 +1108,10 @@ data class Settings(
                 disableInterlaceOffset = json.optBoolean("disableInterlaceOffset", def.disableInterlaceOffset),
                 syncToHostRefresh = json.optBoolean("syncToHostRefresh", def.syncToHostRefresh),
                 disableFramebufferFetch = json.optBoolean("disableFramebufferFetch", def.disableFramebufferFetch),
+                hwRov = json.optBoolean("hwRov", def.hwRov),
+                hwAa1 = json.optBoolean("hwAa1", def.hwAa1),
+                hwAat = json.optBoolean("hwAat", def.hwAat),
+                adrenoFbFetch = json.optBoolean("adrenoFbFetch", def.adrenoFbFetch),
                 overrideTextureBarriers = json.optInt("overrideTextureBarriers", def.overrideTextureBarriers),
                 disableVertexShaderExpand = json.optBoolean("disableVertexShaderExpand", def.disableVertexShaderExpand),
                 useBlitSwapChain = json.optBoolean("useBlitSwapChain", def.useBlitSwapChain),
@@ -1276,6 +1298,10 @@ data class Settings(
             if (current.disableInterlaceOffset != base.disableInterlaceOffset) j.put("disableInterlaceOffset", current.disableInterlaceOffset)
             if (current.syncToHostRefresh    != base.syncToHostRefresh)    j.put("syncToHostRefresh", current.syncToHostRefresh)
             if (current.disableFramebufferFetch != base.disableFramebufferFetch) j.put("disableFramebufferFetch", current.disableFramebufferFetch)
+            if (current.hwRov != base.hwRov) j.put("hwRov", current.hwRov)
+            if (current.hwAa1 != base.hwAa1) j.put("hwAa1", current.hwAa1)
+            if (current.hwAat != base.hwAat) j.put("hwAat", current.hwAat)
+            if (current.adrenoFbFetch != base.adrenoFbFetch) j.put("adrenoFbFetch", current.adrenoFbFetch)
             if (current.overrideTextureBarriers != base.overrideTextureBarriers) j.put("overrideTextureBarriers", current.overrideTextureBarriers)
             if (current.disableVertexShaderExpand != base.disableVertexShaderExpand) j.put("disableVertexShaderExpand", current.disableVertexShaderExpand)
             if (current.useBlitSwapChain     != base.useBlitSwapChain)     j.put("useBlitSwapChain", current.useBlitSwapChain)
@@ -1448,6 +1474,10 @@ data class Settings(
             disableInterlaceOffset = if (overrides.has("disableInterlaceOffset")) overrides.getBoolean("disableInterlaceOffset") else base.disableInterlaceOffset,
             syncToHostRefresh = if (overrides.has("syncToHostRefresh")) overrides.getBoolean("syncToHostRefresh") else base.syncToHostRefresh,
             disableFramebufferFetch = if (overrides.has("disableFramebufferFetch")) overrides.getBoolean("disableFramebufferFetch") else base.disableFramebufferFetch,
+            hwRov = if (overrides.has("hwRov")) overrides.getBoolean("hwRov") else base.hwRov,
+            hwAa1 = if (overrides.has("hwAa1")) overrides.getBoolean("hwAa1") else base.hwAa1,
+            hwAat = if (overrides.has("hwAat")) overrides.getBoolean("hwAat") else base.hwAat,
+            adrenoFbFetch = if (overrides.has("adrenoFbFetch")) overrides.getBoolean("adrenoFbFetch") else base.adrenoFbFetch,
             overrideTextureBarriers = if (overrides.has("overrideTextureBarriers")) overrides.getInt("overrideTextureBarriers") else base.overrideTextureBarriers,
             disableVertexShaderExpand = if (overrides.has("disableVertexShaderExpand")) overrides.getBoolean("disableVertexShaderExpand") else base.disableVertexShaderExpand,
             useBlitSwapChain = if (overrides.has("useBlitSwapChain")) overrides.getBoolean("useBlitSwapChain") else base.useBlitSwapChain,

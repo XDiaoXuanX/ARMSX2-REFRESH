@@ -621,7 +621,7 @@ object SetupImpl {
         if (selectedRenderer.value == null)
             selectedRenderer.value = if (g.renderer == "opengl") "opengl" else "vulkan"
         recAspect.value = g.aspectRatio.coerceIn(0, 4)
-        recUpscale.value = g.upscaleFloat.toInt().coerceIn(1, 5)
+        recUpscale.value = g.upscaleFloat.toInt().coerceIn(1, 8)
         recAntiBlur.value = g.antiBlur
         recWidescreen.value = g.enableWideScreenPatches
         recDeinterlaceOff.value = g.deinterlaceMode == 1 // 0 = Auto, 1 = Off
@@ -635,7 +635,7 @@ object SetupImpl {
             com.armsx2.config.ConfigStore.saveGlobal(
                 g.copy(
                     aspectRatio = recAspect.value.coerceIn(0, 4),
-                    upscaleFloat = recUpscale.value.coerceIn(1, 5).toFloat(),
+                    upscaleFloat = recUpscale.value.coerceIn(1, 8).toFloat(),
                     antiBlur = recAntiBlur.value,
                     enableWideScreenPatches = recWidescreen.value,
                     deinterlaceMode = if (recDeinterlaceOff.value) 1 else 0,
@@ -1961,7 +1961,7 @@ object SetupImpl {
                 Spacer(Modifier.height(12.dp))
             }
             RecChoiceRow("Aspect Ratio", listOf("Stretch", "Auto", "4:3", "16:9", "10:7"), recAspect.value, blue) { recAspect.value = it }
-            RecChoiceRow("Internal Resolution", listOf("1x", "2x", "3x", "4x", "5x"), recUpscale.value - 1, blue) { recUpscale.value = it + 1 }
+            RecChoiceRow("Internal Resolution", listOf("1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x"), recUpscale.value - 1, blue) { recUpscale.value = it + 1 }
             RecChoiceRow("Anti-Blur", listOf("Off", "On"), if (recAntiBlur.value) 1 else 0, blue) { recAntiBlur.value = it == 1 }
             RecChoiceRow("Widescreen Patches", listOf("Off", "On"), if (recWidescreen.value) 1 else 0, blue) { recWidescreen.value = it == 1 }
             RecChoiceRow("Deinterlacing", listOf("Auto", "Off"), if (recDeinterlaceOff.value) 1 else 0, blue) { recDeinterlaceOff.value = it == 1 }

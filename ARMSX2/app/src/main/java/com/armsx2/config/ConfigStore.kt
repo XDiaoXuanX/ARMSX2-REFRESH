@@ -90,7 +90,7 @@ object ConfigStore {
             is Long -> raw.toFloat()
             is String -> raw.toFloatOrNull()
             else -> null
-        }?.coerceIn(0.25f, 5.0f)
+        }?.coerceIn(0.25f, 8.0f)
         return coerce(all["upscaleFloat"]) ?: coerce(all["upscale"])
     }
 

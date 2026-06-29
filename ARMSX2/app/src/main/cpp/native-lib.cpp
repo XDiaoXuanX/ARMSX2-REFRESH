@@ -1148,6 +1148,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_applyGSSettingsLive(JNIEnv *env, jclass cla
     const auto saved_blit_swap       = EmuConfig.GS.UseBlitSwapChain;
     const auto saved_no_shader_cache = EmuConfig.GS.DisableShaderCache;
     const auto saved_no_fb_fetch     = EmuConfig.GS.DisableFramebufferFetch;
+    const auto saved_adreno_fbfetch  = EmuConfig.GS.EnableAdrenoFramebufferFetch;
     const auto saved_no_vs_expand    = EmuConfig.GS.DisableVertexShaderExpand;
     const auto saved_tex_barriers    = EmuConfig.GS.OverrideTextureBarriers;
     const auto saved_depth_feedback  = EmuConfig.GS.DepthFeedbackMode;
@@ -1173,6 +1174,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_applyGSSettingsLive(JNIEnv *env, jclass cla
     EmuConfig.GS.UseBlitSwapChain           = saved_blit_swap;
     EmuConfig.GS.DisableShaderCache         = saved_no_shader_cache;
     EmuConfig.GS.DisableFramebufferFetch    = saved_no_fb_fetch;
+    EmuConfig.GS.EnableAdrenoFramebufferFetch = saved_adreno_fbfetch;
     EmuConfig.GS.DisableVertexShaderExpand  = saved_no_vs_expand;
     EmuConfig.GS.OverrideTextureBarriers    = saved_tex_barriers;
     EmuConfig.GS.DepthFeedbackMode          = saved_depth_feedback;

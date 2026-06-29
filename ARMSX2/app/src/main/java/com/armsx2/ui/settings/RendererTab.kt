@@ -71,6 +71,9 @@ private val UPSCALE_OPTIONS = listOf(
     UpscaleOption(3.5f, "3.5x"),
     UpscaleOption(4.0f, "4x"),
     UpscaleOption(5.0f, "5x"),
+    UpscaleOption(6.0f, "6x"),
+    UpscaleOption(7.0f, "7x"),
+    UpscaleOption(8.0f, "8x"),
 )
 
 @Composable
@@ -268,6 +271,41 @@ fun RendererTab(state: MutableState<Settings>) {
             description = "Controls alpha/blending precision. Basic is faster; higher can fix effects.",
             onChange = { apply(s.copy(accurateBlendingUnit = it)) },
         )
+        // Blending-accuracy companion features (match upstream's grouping under
+        // Blending Accuracy). ROV + Accurate Alpha Test apply live; AA1 needs a
+        // game restart.
+        SettingsDivider()
+        ToggleRow(
+            "Rasterizer Ordered View (ROV)",
+            s.hwRov,
+            description = "Vulkan only: accurate blending via fragment-shader interlock. Mainly benefits desktop GPUs — most mobile GPUs either lack the required interlock (e.g. Turnip) or run it slower than the default blending path. Leave off unless your own benchmarks show a gain. No effect on OpenGL. Applies live.",
+        ) {
+            apply(s.copy(hwRov = it))
+        }
+        SettingsDivider()
+        ToggleRow(
+            "Accurate blending fast path (experimental)",
+            s.adrenoFbFetch,
+            description = "Vulkan + Adreno only: route accurate blending through the tile-memory framebuffer-fetch path instead of ROV / texture-barrier copies — the mobile-native equivalent of desktop ROV, and usually much faster on a tiler. Experimental: some drivers return stale reads and may show artifacts (sprite alpha cutouts, invisible floor patches), so verify your games. Restart the game to apply. No effect on Mali (already enabled) or OpenGL.",
+        ) {
+            apply(s.copy(adrenoFbFetch = it))
+        }
+        SettingsDivider()
+        ToggleRow(
+            "Accurate Alpha Test",
+            s.hwAat,
+            description = "More accurate alpha testing in the hardware renderer (pairs with ROV). Applies live.",
+        ) {
+            apply(s.copy(hwAat = it))
+        }
+        SettingsDivider()
+        ToggleRow(
+            "HW AA1 (edge anti-aliasing)",
+            s.hwAa1,
+            description = "Hardware PS2 AA1 line/triangle edge anti-aliasing. Restart the game to apply.",
+        ) {
+            apply(s.copy(hwAa1 = it))
+        }
         // Hardware & upscaling compatibility fixes now live in the dedicated
         // "Fixes" tab (FixesTab) to keep Render focused on quality/display.
         SettingsDivider()

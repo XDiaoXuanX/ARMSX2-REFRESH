@@ -280,17 +280,20 @@ public class NativeApp {
 		if (!sRumbleEnabled) return;
 		int devId = com.armsx2.input.PadRouter.INSTANCE.deviceIdForPort(pad);
 		if (devId < 0) devId = sRumbleDeviceId;
-		if (devId < 0) return;
+		// devId may stay -1 for touch-only Player 1 (no gamepad); vibrateDevice still
+		// drives the device's own haptic for P1 (issue #241). P2 with no pad has no target.
+		if (devId < 0 && pad != 0) return;
 		float low = Math.max(0f, Math.min(1f, largeMotor / 255f));   // low-frequency / large
 		float high = Math.max(0f, Math.min(1f, smallMotor / 255f));  // high-frequency / small
-		vibrateDevice(devId, low, high, RUMBLE_MS);
+		vibrateDevice(devId, low, high, RUMBLE_MS, pad == 0);
 	}
 
-	/** Drive [devId]'s vibrator(s) with the PS2 large/high motor intensities for [ms]. */
-	private static void vibrateDevice(int devId, float low, float high, int ms) {
+	/** Drive [devId]'s vibrator(s) with the PS2 large/high motor intensities for [ms].
+	 *  When the controller exposes no usable vibrator and [allowSystemFallback] is set,
+	 *  drive the device's own haptic motor instead (issue #241 — handhelds like the
+	 *  Odin 3 whose built-in gamepad has no rumble actuator, only system haptics). */
+	private static void vibrateDevice(int devId, float low, float high, int ms, boolean allowSystemFallback) {
 		try {
-			InputDevice dev = InputDevice.getDevice(devId);
-			if (dev == null) return;
 			// Single combined motor can't reproduce both PS2 actuators, so blend
 			// them the way AetherSX2/NetherSX2 do (org.libsdl.app
 			// SDLControllerManager): 0.6*large + 0.4*small. The PS2 small motor is
@@ -299,31 +302,42 @@ public class NativeApp {
 			// like the large motor was firing for small-motor events. The weighted
 			// mix keeps a small-only pulse light and distinct from a large pulse.
 			float combined = Math.min(1f, low * 0.6f + high * 0.4f);
-			if (Build.VERSION.SDK_INT >= 31) {
-				VibratorManager vm = dev.getVibratorManager();
-				int[] ids = vm.getVibratorIds();
-				if (ids.length >= 2) {
-					rumbleOne(vm.getVibrator(ids[0]), low, ms);
-					rumbleOne(vm.getVibrator(ids[1]), high, ms);
-				} else if (ids.length == 1) {
-					rumbleOne(vm.getVibrator(ids[0]), combined, ms);
+			boolean drove = false;
+			InputDevice dev = (devId >= 0) ? InputDevice.getDevice(devId) : null;
+			if (dev != null) {
+				if (Build.VERSION.SDK_INT >= 31) {
+					VibratorManager vm = dev.getVibratorManager();
+					int[] ids = vm.getVibratorIds();
+					if (ids.length >= 2) {
+						drove = rumbleOne(vm.getVibrator(ids[0]), low, ms);
+						drove |= rumbleOne(vm.getVibrator(ids[1]), high, ms);
+					} else if (ids.length == 1) {
+						drove = rumbleOne(vm.getVibrator(ids[0]), combined, ms);
+					} else {
+						// Some pads (e.g. certain DualShock/DualSense BT modes) expose 0
+						// vibrators to VibratorManager but still drive via the legacy API.
+						drove = rumbleOne(dev.getVibrator(), combined, ms);
+					}
 				} else {
-					// Some pads (e.g. certain DualShock/DualSense BT modes) expose 0
-					// vibrators to VibratorManager but still drive via the legacy API.
-					rumbleOne(dev.getVibrator(), combined, ms);
+					drove = rumbleOne(dev.getVibrator(), combined, ms);
 				}
-			} else {
-				rumbleOne(dev.getVibrator(), combined, ms);
+			}
+			// No controller actuator handled it → fall back to the device's built-in
+			// haptic (issue #241), when permitted (Player 1 / explicit test) so a
+			// vibrator-less P2 pad never buzzes the handheld that P1 is holding.
+			if (!drove && allowSystemFallback) {
+				rumbleOne(systemVibrator(), combined, ms);
 			}
 		} catch (Throwable ignored) {
 		}
 	}
 
-	private static void rumbleOne(Vibrator v, float intensity, int ms) {
-		if (v == null || !v.hasVibrator()) return;
+	/** @return true if [v] is a real, usable vibrator that was driven (or cancelled). */
+	private static boolean rumbleOne(Vibrator v, float intensity, int ms) {
+		if (v == null || !v.hasVibrator()) return false;
 		if (intensity <= 0f) {
 			try { v.cancel(); } catch (Throwable ignored) {}
-			return;
+			return true;
 		}
 		int amp = Math.round(intensity * 255f);
 		if (amp < 1) amp = 1;
@@ -333,6 +347,30 @@ public class NativeApp {
 		} catch (Throwable t) {
 			try { v.vibrate(ms); } catch (Throwable ignored) {}
 		}
+		return true;
+	}
+
+	// The device's own haptic motor (system vibrator), resolved once. On handhelds
+	// like the Odin 3 the built-in gamepad exposes no rumble actuator — only this —
+	// so it's the fallback target when a controller has no usable vibrator (issue #241).
+	private static volatile Vibrator sSystemVibrator;
+	private static Vibrator systemVibrator() {
+		Vibrator v = sSystemVibrator;
+		if (v != null) return v;
+		try {
+			Context ctx = getContext();
+			if (ctx != null) {
+				if (Build.VERSION.SDK_INT >= 31) {
+					VibratorManager vm = (VibratorManager) ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
+					v = (vm != null) ? vm.getDefaultVibrator() : null;
+				} else {
+					v = (Vibrator) ctx.getSystemService(Context.VIBRATOR_SERVICE);
+				}
+				if (v != null) sSystemVibrator = v;
+			}
+		} catch (Throwable ignored) {
+		}
+		return v;
 	}
 
 	/** Index (0-based) of the [index]th connected physical gamepad, or -1. Used as a
@@ -357,8 +395,9 @@ public class NativeApp {
 	public static void testRumble(int port) {
 		int devId = com.armsx2.input.PadRouter.INSTANCE.deviceIdForPort(port);
 		if (devId < 0) devId = nthGamepadDeviceId(port);
-		if (devId < 0) return;
-		vibrateDevice(devId, 0.9f, 0.9f, 500);
+		// devId may stay -1 (touch-only / Odin built-in with no rumble); vibrateDevice
+		// then falls back to the device's own haptic so the test still buzzes (issue #241).
+		vibrateDevice(devId, 0.9f, 0.9f, 500, true);
 	}
 
 	/** One-line report of [port]'s controller and whether Android exposes any vibrator

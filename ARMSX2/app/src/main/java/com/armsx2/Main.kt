@@ -1835,7 +1835,7 @@ class Main: ComponentActivity() {
      *  persist to the running game's tier — per-game when it has a serial — so it
      *  survives a reboot without bleeding into other titles. */
     private fun stepResolution(dir: Int) {
-        val next = (Main.upscale.value.toInt() + dir).coerceIn(1, 5)
+        val next = (Main.upscale.value.toInt() + dir).coerceIn(1, 8)
         val nf = next.toFloat()
         Main.upscale.value = nf
         runCatching { NativeApp.renderUpscalemultiplier(nf) }

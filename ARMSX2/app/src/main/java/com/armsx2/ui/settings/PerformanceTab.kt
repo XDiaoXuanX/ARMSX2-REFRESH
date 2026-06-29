@@ -191,13 +191,13 @@ fun PerformanceTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(frameSkip = it)) },
         )
         SettingsDivider()
-        HelpText("Compatibility shortcuts. Leave Game Fixes off unless a game needs one of the fixes below.")
+        HelpText("Compatibility shortcuts. Leave GameDB Fixes off unless a game needs one of the fixes below.")
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             BubbleGridRow {
                 ToggleBubble("Skip BIOS", s.enableFastBoot, modifier = Modifier.weight(1f)) {
                     apply(s.copy(enableFastBoot = it))
                 }
-                ToggleBubble("Game Fixes", s.enableGameFixes, modifier = Modifier.weight(1f)) {
+                ToggleBubble("GameDB Fixes", s.enableGameFixes, modifier = Modifier.weight(1f)) {
                     apply(s.copy(enableGameFixes = it))
                 }
                 ToggleBubble("Skip MPEG", s.gamefixSkipMpeg, modifier = Modifier.weight(1f)) {
@@ -264,7 +264,7 @@ fun PerformanceTab(state: MutableState<Settings>) {
         }
         HelpText(
             "Skip BIOS - bypasses the PS2 startup screen.\n" +
-                "Game Fixes - master switch for manual compatibility fixes.\n" +
+                "GameDB Fixes - master switch for manual compatibility fixes.\n" +
                 "Skip MPEG - skips problematic video playback.\n" +
                 "FMV Software - switches FMVs to software rendering.\n" +
                 "EE Timing - adjusts CPU timing for sensitive games.\n" +
