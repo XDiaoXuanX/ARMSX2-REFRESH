@@ -118,6 +118,28 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
         )
         SettingsDivider()
+        // Open the on-screen touch-layout editor straight from here (no need to be
+        // in-game). Closes the settings overlay and drops into edit mode over the
+        // game/library. With no game running it edits the Global Default layout.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+                .background(rowAura())
+                .clickable { com.armsx2.ui.InGameOverlay.editTouchLayout() }
+                .controllerFocusable(
+                    controllerId = "pad-edit-touch",
+                    onConfirm = { com.armsx2.ui.InGameOverlay.editTouchLayout() },
+                )
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                "Edit On-Screen Touch Layout",
+                color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            )
+        }
+        SettingsDivider()
         @Suppress("UNUSED_EXPRESSION")
         refreshToken.value
         // Also recompose when the mappings change externally (e.g. the global
@@ -230,6 +252,16 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 description = "Fraction of physical analog travel ignored near center. Lower = stick responds sooner (handheld sticks have little range); 0 = none. Movement re-normalizes past it, so no jump.",
                 valueFormatter = { if (it == 0) "Off" else "${it}%" },
                 onChange = { ControllerMappings.setStickDeadzone(it / 100f); refreshToken.value++ },
+            )
+            SettingsDivider()
+            IntSliderRow(
+                label = "Stick Outer Deadzone",
+                value = (ControllerMappings.stickOuterDeadzone() * 100f).toInt(), // 0.0..0.4 -> 0..40
+                min = 0,
+                max = (ControllerMappings.STICK_OUTER_MAX * 100f).toInt(),
+                description = "Fraction of travel near the EDGE mapped to full output, so a stick that can't physically reach its corners still hits 100% (short-throw / handheld sticks like the Odin). 0 = off.",
+                valueFormatter = { if (it == 0) "Off" else "${it}%" },
+                onChange = { ControllerMappings.setStickOuterDeadzone(it / 100f); refreshToken.value++ },
             )
             SettingsDivider()
             IntSliderRow(

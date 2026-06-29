@@ -111,6 +111,7 @@ import com.armsx2.ui.settings.PerformanceTab
 import com.armsx2.ui.settings.RecompilerTab
 import com.armsx2.ui.settings.RendererTab
 import com.armsx2.ui.settings.SettingsControllerNav
+import com.armsx2.ui.settings.SkinsTab
 import kr.co.iefriends.pcsx2.NativeApp
 
 /**
@@ -172,6 +173,7 @@ object InGameOverlay {
         Network("Network"),
         Overlay("Overlay"),
         Pad("Pad"),
+        Skins("Skins"),
         Hotkeys("Hotkeys"),
         Recompiler("JIT"),
         Info("Info"),
@@ -731,7 +733,7 @@ object InGameOverlay {
 
     private fun cycleTab(delta: Int) {
         val tabs = if (settingsOnly.value) {
-            listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Hotkeys, Tab.Recompiler, Tab.Info)
+            listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Skins, Tab.Hotkeys, Tab.Recompiler, Tab.Info)
         } else {
             Tab.values().toList()
         }
@@ -820,7 +822,7 @@ object InGameOverlay {
         saveSettings(settingsState.value.copy(frameLimitEnable = !frameLimitOn.value))
     }
 
-    private fun editTouchLayout() {
+    fun editTouchLayout() {
         com.armsx2.ui.touch.TouchControls.ensureLoaded()
         com.armsx2.ui.touch.TouchControls.editMode.value = true
         closeKeepingState()
@@ -1665,6 +1667,7 @@ object InGameOverlay {
             Tab.Network -> NetworkTab(settingsState)
             Tab.Overlay -> OverlayTab(settingsState)
             Tab.Pad -> PadTab(settingsState)
+            Tab.Skins -> SkinsTab(settingsState)
             Tab.Hotkeys -> HotkeysTab(settingsState)
             Tab.Recompiler -> RecompilerTab(settingsState)
             Tab.Info -> GameInfoTab()
@@ -1838,7 +1841,7 @@ object InGameOverlay {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             val tabs = if (settingsOnly.value) {
-                listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Hotkeys, Tab.Recompiler, Tab.Info)
+                listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Skins, Tab.Hotkeys, Tab.Recompiler, Tab.Info)
             } else {
                 Tab.values().toList()
             }

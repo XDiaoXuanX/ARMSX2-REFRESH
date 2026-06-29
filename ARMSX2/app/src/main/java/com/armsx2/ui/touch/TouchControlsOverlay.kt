@@ -45,10 +45,15 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.armsx2.ControllerSkinStore
 import com.armsx2.EmuState
 import com.armsx2.Main
 import com.armsx2.input.ControllerMappings
@@ -85,10 +90,13 @@ fun TouchControlsOverlay() {
         if (Main.eState.value == EmuState.RUNNING || Main.eState.value == EmuState.PAUSED)
             TouchControls.applyForSerial(gameSerial)
     }
+    val edit = TouchControls.editMode.value
     val running = Main.eState.value == EmuState.RUNNING ||
                   Main.eState.value == EmuState.PAUSED
-    if (!running) return
-    val edit = TouchControls.editMode.value
+    // Edit mode renders even with no game running, so the touch-layout editor can be
+    // opened from the main-menu Pad settings — not only in-game. (Lines below already
+    // let the overlay paint over the library while editing.)
+    if (!running && !edit) return
     // Hide while the pause overlay is up so the pause menu owns the screen.
     // In edit mode we ignore overlayVisible — the user enters edit mode
     // from the pause menu, and the overlay closes itself when toggling on.
@@ -104,6 +112,12 @@ fun TouchControlsOverlay() {
         val density = LocalDensity.current
         val widthPx = with(density) { w.toPx() }
         val heightPx = with(density) { h.toPx() }
+        // Dim the cluttered library/menu behind the editor when it's opened from the
+        // main menu (no game running). In-game the paused frame is a fine backdrop, so
+        // the scrim is library-mode only.
+        if (edit && !running) {
+            Box(Modifier.fillMaxSize().background(Color(0xF2101015)))
+        }
         LaunchedEffect(widthPx, heightPx) {
             OverlayDims.last = OverlayDims.Dims(widthPx, heightPx)
         }
@@ -222,7 +236,8 @@ fun TouchControlsOverlay() {
             Box(
                 modifier = Modifier
                     .offset(x = left, y = top)
-                    .size(size),
+                    .size(size)
+                    .alpha(if (edit && !cfg.enabled) 0.4f else 1f),
             ) {
                 when (cfg.id.kind) {
                     TouchButtonId.Kind.DPAD -> DpadWidget(cfg, edit)
@@ -236,6 +251,7 @@ fun TouchControlsOverlay() {
 	                        forcedPressed = faceMulti && cfg.id in multiPressed,
 	                    )
                 }
+                if (edit && !cfg.enabled) DisabledMarker()
             }
         }
 
@@ -342,7 +358,7 @@ private fun ButtonWidget(
     val darkenOnPress = pressed && !hasPressedSprite(cfg.id)
     Box(modifier = mod, contentAlignment = Alignment.Center) {
         Image(
-            painter = painterResource(drawableFor(cfg.id, pressed)),
+            painter = skinPainter(skinKeyFor(cfg.id)) ?: painterResource(drawableFor(cfg.id, pressed)),
             contentDescription = cfg.id.label,
             contentScale = ContentScale.Fit,
             alpha = opacity,
@@ -377,6 +393,36 @@ private fun hasPressedSprite(id: TouchButtonId): Boolean = when (id) {
 /** Map a button id + press state to the bundled PNG. CIRCLE / SQUARE
  *  ship without a separate pressed sprite, so they reuse their default
  *  for both states. */
+/** Active custom-skin painter for a logical [key] (e.g. "cross", "up",
+ *  "analog_base"), or null to fall back to the built-in drawable. Decode is cached
+ *  in [ControllerSkinStore]; skins have no pressed variant so [pressed] is ignored
+ *  for the override (the built-in fallback keeps its pressed art). */
+@Composable
+private fun skinPainter(key: String?): Painter? {
+    if (key == null) return null
+    val active = ControllerSkinStore.activeSkinId.value ?: return null
+    val ctx = LocalContext.current
+    val bmp = remember(active, key) { ControllerSkinStore.bitmapForKey(ctx, key) } ?: return null
+    return remember(bmp) { BitmapPainter(bmp) }
+}
+
+/** Logical skin key for a button, or null for buttons with no skin slot. */
+private fun skinKeyFor(id: TouchButtonId): String? = when (id) {
+    TouchButtonId.CROSS -> "cross"
+    TouchButtonId.CIRCLE -> "circle"
+    TouchButtonId.SQUARE -> "square"
+    TouchButtonId.TRIANGLE -> "triangle"
+    TouchButtonId.L1 -> "l1"
+    TouchButtonId.L2 -> "l2"
+    TouchButtonId.L3 -> "l3"
+    TouchButtonId.R1 -> "r1"
+    TouchButtonId.R2 -> "r2"
+    TouchButtonId.R3 -> "r3"
+    TouchButtonId.START -> "start"
+    TouchButtonId.SELECT -> "select"
+    else -> null
+}
+
 private fun drawableFor(id: TouchButtonId, pressed: Boolean): Int = when (id) {
     TouchButtonId.CROSS    -> if (pressed) R.drawable.pad_cross_pressed    else R.drawable.pad_cross
     TouchButtonId.CIRCLE   -> R.drawable.pad_circle
@@ -655,12 +701,19 @@ private fun DpadWidget(cfg: TouchButtonCfg, edit: Boolean) {
     Box(
         modifier = Modifier.fillMaxSize().then(pressMod),
     ) {
+        // Custom-skin arm overrides (null = built-in). Computed once and reused for
+        // the painter and to drop the built-in down-arm 180° rotation — a skin's
+        // "down" image is already oriented correctly.
+        val skUp = skinPainter("up")
+        val skDown = skinPainter("down")
+        val skLeft = skinPainter("left")
+        val skRight = skinPainter("right")
         // Only the UP arm needs a nudge — the tight crop trimmed some
         // AA off the outer flat edge so without this it reads "pushed
         // inwards" toward the center. The down arm uses the same
         // sprite rotated 180° and sat correctly already.
         Image(
-            painter = painterResource(
+            painter = skUp ?: painterResource(
                 if (active.value.up) R.drawable.pad_dpad_up_pressed else R.drawable.pad_dpad_up
             ),
             contentDescription = "DPad up",
@@ -673,7 +726,7 @@ private fun DpadWidget(cfg: TouchButtonCfg, edit: Boolean) {
                 .aspectRatio(upRatio),
         )
         Image(
-            painter = painterResource(
+            painter = skDown ?: painterResource(
                 if (active.value.down) R.drawable.pad_dpad_up_pressed else R.drawable.pad_dpad_up
             ),
             contentDescription = "DPad down",
@@ -683,10 +736,10 @@ private fun DpadWidget(cfg: TouchButtonCfg, edit: Boolean) {
                 .align(Alignment.BottomCenter)
                 .fillMaxHeight(0.5f)
                 .aspectRatio(upRatio)
-                .rotate(180f),
+                .rotate(if (skDown != null) 0f else 180f),
         )
         Image(
-            painter = painterResource(
+            painter = skLeft ?: painterResource(
                 if (active.value.left) R.drawable.pad_dpad_left_pressed else R.drawable.pad_dpad_left
             ),
             contentDescription = "DPad left",
@@ -698,7 +751,7 @@ private fun DpadWidget(cfg: TouchButtonCfg, edit: Boolean) {
                 .aspectRatio(lrRatio),
         )
         Image(
-            painter = painterResource(
+            painter = skRight ?: painterResource(
                 if (active.value.right) R.drawable.pad_dpad_right_pressed else R.drawable.pad_dpad_right
             ),
             contentDescription = "DPad right",
@@ -743,6 +796,10 @@ private fun releaseDpad(state: DpadState) {
 @Composable
 private fun StickWidget(cfg: TouchButtonCfg, edit: Boolean) {
     val thumb = remember(cfg.id) { mutableStateOf(Offset.Zero) }
+    // Floating-stick state: captured touch-down origin (null = released) and the
+    // visual shift of the ring + thumb from the widget center to that origin.
+    val origin = remember(cfg.id) { mutableStateOf<Offset?>(null) }
+    val baseShift = remember(cfg.id) { mutableStateOf(Offset.Zero) }
     val lastEmit = remember(cfg.id) { mutableStateOf(StickEmit()) }
     val opacity = TouchControls.opacity.value
     val density = LocalDensity.current
@@ -759,26 +816,63 @@ private fun StickWidget(cfg: TouchButtonCfg, edit: Boolean) {
     } else {
         Modifier.pointerInput(cfg.id) {
             val radiusPx = with(density) { (cfg.sizeDp / 2f).dp.toPx() }
+            // Visual thumb caps inside the ring; force is normalized against the
+            // same cap. Hoisted so the floating-origin clamp can reuse it.
+            val capPx = radiusPx * 0.66f
             awaitPointerEventScope {
+                // Lock the gesture onto the pointer that started it. Tracking
+                // ev.changes.firstOrNull() instead would let a SECOND finger
+                // landing in/lifting from the stick trigger a spurious recenter
+                // or release mid-gesture (worse with the floating origin, which
+                // would then re-capture at the surviving finger's position).
+                var activeId: androidx.compose.ui.input.pointer.PointerId? = null
                 while (true) {
                     val ev = awaitPointerEvent()
-                    val change = ev.changes.firstOrNull() ?: continue
-                    if (!change.pressed) {
-                        thumb.value = Offset.Zero
-                        if (lastEmit.value.any()) {
-                            releaseStick(codes, lastEmit.value)
-                            lastEmit.value = StickEmit()
+                    val tracked = if (activeId == null)
+                        ev.changes.firstOrNull { it.pressed }
+                    else
+                        ev.changes.firstOrNull { it.id == activeId }
+                    // Release: our tracked pointer lifted or is gone.
+                    if (tracked == null || !tracked.pressed) {
+                        if (activeId != null) {
+                            thumb.value = Offset.Zero
+                            origin.value = null
+                            baseShift.value = Offset.Zero
+                            activeId = null
+                            if (lastEmit.value.any()) {
+                                releaseStick(codes, lastEmit.value)
+                                lastEmit.value = StickEmit()
+                            }
                         }
                         continue
                     }
+                    // Start of gesture: lock onto this pointer's id.
+                    if (activeId == null) activeId = tracked.id
                     val cxLocal = size.width / 2f
                     val cyLocal = size.height / 2f
-                    val dx = change.position.x - cxLocal
-                    val dy = change.position.y - cyLocal
+                    // Floating stick: the FIRST touch-down point of a gesture becomes
+                    // the origin (ring re-centers under the finger); fixed center when
+                    // off. Snap-back on release is unchanged either way.
+                    if (origin.value == null) {
+                        if (TouchControls.floatingStick.value) {
+                            // Clamp the captured origin so the cap circle (and the
+                            // visible ring) stays fully within the widget, keeping
+                            // full deflection reachable in every direction.
+                            val hiX = (size.width - capPx).coerceAtLeast(capPx)
+                            val hiY = (size.height - capPx).coerceAtLeast(capPx)
+                            val ox = tracked.position.x.coerceIn(capPx, hiX)
+                            val oy = tracked.position.y.coerceIn(capPx, hiY)
+                            origin.value = Offset(ox, oy)
+                            baseShift.value = Offset(ox - cxLocal, oy - cyLocal)
+                        } else {
+                            origin.value = Offset(cxLocal, cyLocal)
+                            baseShift.value = Offset.Zero
+                        }
+                    }
+                    val o = origin.value!!
+                    val dx = tracked.position.x - o.x
+                    val dy = tracked.position.y - o.y
                     val r = hypot(dx, dy)
-                    // Visual thumb caps inside the ring; force is
-                    // normalized against the same cap.
-                    val capPx = radiusPx * 0.66f
                     val scale = if (r > capPx) capPx / r else 1f
                     val capDx = dx * scale
                     val capDy = dy * scale
@@ -806,23 +900,28 @@ private fun StickWidget(cfg: TouchButtonCfg, edit: Boolean) {
         modifier = Modifier.fillMaxSize().then(pressMod),
     ) {
         Image(
-            painter = painterResource(R.drawable.pad_stick_base),
+            painter = skinPainter("analog_base") ?: painterResource(R.drawable.pad_stick_base),
             contentDescription = cfg.id.label + " base",
             contentScale = ContentScale.Fit,
             alpha = opacity,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .offset(
+                    x = with(density) { baseShift.value.x.toDp() },
+                    y = with(density) { baseShift.value.y.toDp() },
+                ),
         )
         val thumbSizeDp = cfg.sizeDp * 0.62f
         Image(
-            painter = painterResource(R.drawable.pad_thumb),
+            painter = skinPainter("analog_stick") ?: painterResource(R.drawable.pad_thumb),
             contentDescription = cfg.id.label + " thumb",
             contentScale = ContentScale.Fit,
             alpha = opacity,
             modifier = Modifier
                 .align(Alignment.Center)
                 .offset(
-                    x = with(density) { thumb.value.x.toDp() },
-                    y = with(density) { thumb.value.y.toDp() },
+                    x = with(density) { (baseShift.value.x + thumb.value.x).toDp() },
+                    y = with(density) { (baseShift.value.y + thumb.value.y).toDp() },
                 )
                 .size(thumbSizeDp.dp),
         )
@@ -961,6 +1060,20 @@ private object OverlayDims {
  *  thicker for the currently-selected widget so the user can confirm
  *  which one the toolbar size slider operates on. */
 @Composable
+private fun DisabledMarker() {
+    androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        val c = Color(0xFFFF5555)
+        val sw = size.minDimension * 0.06f
+        drawLine(c, androidx.compose.ui.geometry.Offset(size.width * 0.2f, size.height * 0.2f),
+            androidx.compose.ui.geometry.Offset(size.width * 0.8f, size.height * 0.8f), strokeWidth = sw)
+        drawLine(c, androidx.compose.ui.geometry.Offset(size.width * 0.8f, size.height * 0.2f),
+            androidx.compose.ui.geometry.Offset(size.width * 0.2f, size.height * 0.8f), strokeWidth = sw)
+    }
+}
+
+/** Edit-mode marker for a hidden (disabled) button — a red X so it can be found and
+ *  re-enabled; in play mode the button isn't drawn at all (render-skip at the loop). */
+@Composable
 private fun EditAdornment(id: TouchButtonId? = null) {
     val isSelected = id != null && TouchControls.selectedButton.value == id
     val color = if (isSelected) Color(0xFFFFD33A) else Colors.pasx2_blue
@@ -982,6 +1095,14 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        // Scope hint: with no game running the editor edits the GLOBAL Default
+        // layout (per-game layouts need a running disc).
+        Text(
+            if (Main.eState.value == EmuState.RUNNING || Main.eState.value == EmuState.PAUSED)
+                "Editing this game's touch layout"
+            else "Editing Global Default touch layout",
+            color = Color(0xFFFFD33A), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+        )
         // Action chips up top — save commits the live layout into the
         // active profile, discard reverts to the saved version, reset
         // restores the default, profiles opens the picker.
@@ -999,14 +1120,18 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
             }
             ToolbarChip("Reset") {
                 TouchControls.resetActiveToDefault()
-                TouchControls.clearGameLayout(
-                    Main.currentGame.value?.serial?.takeIf { it.isNotEmpty() }
-                        ?: InGameOverlay.currentSerial.value
-                )
+                // Only clear a per-game key when a VM is actually running. From
+                // the library this is a Global Default edit; resolving a serial
+                // off the (possibly stale) Main.currentGame would wrongly delete
+                // the last-played game's per-serial layout.
+                TouchControls.clearGameLayoutIfRunning()
             }
             ToolbarChip("Profiles") { TouchControls.profileDialogOpen.value = true }
             ToolbarChip(if (TouchControls.faceMultiTouch.value) "Multi-Touch On" else "Multi-Touch Off") {
                 TouchControls.setFaceMultiTouch(!TouchControls.faceMultiTouch.value)
+            }
+            ToolbarChip(if (TouchControls.floatingStick.value) "Floating Stick On" else "Floating Stick Off") {
+                TouchControls.setFloatingStick(!TouchControls.floatingStick.value)
             }
         }
         // Opacity slider — controls the live HUD alpha so the user sees
@@ -1082,6 +1207,9 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
                     fontSize = 11.sp,
                     modifier = Modifier.width(48.dp),
                 )
+                ToolbarChip(if (selectedCfg.enabled) "Hide" else "Show") {
+                    TouchControls.updateButton(selectedCfg.id) { it.copy(enabled = !it.enabled) }
+                }
             }
         }
     }

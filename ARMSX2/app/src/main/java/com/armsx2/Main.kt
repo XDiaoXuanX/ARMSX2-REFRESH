@@ -1105,6 +1105,7 @@ class Main: ComponentActivity() {
         com.armsx2.LibraryTitles.load()
         com.armsx2.LibraryView.load()
         com.armsx2.ui.UiScale.load()
+        com.armsx2.ControllerSkinStore.load(applicationContext)
         setupComplete.value = prefs.getBoolean("setupComplete", false)
         systemDir.value = prefs.getString("systemDir", null)
         bios.value = prefs.getString("bios", null)
@@ -2196,11 +2197,13 @@ class Main: ComponentActivity() {
     private fun shapeStickMag(m: Float): Float {
         val dz = ControllerMappings.stickDeadzone()
         if (m <= dz) return 0f
-        // Re-normalize past the deadzone so output ramps smoothly from 0 instead of
-        // jumping to `dz` at the edge (the "dead then sudden acceleration" feel the
-        // small handheld sticks suffer). Then apply the acceleration curve +
-        // sensitivity scale.
-        val t = (if (dz < 1f) (m - dz) / (1f - dz) else 0f).coerceIn(0f, 1f)
+        // Re-normalize the window [dz, 1-outer] to [0, 1] so output ramps smoothly
+        // from 0 past the inner deadzone (no jump), and reaches FULL at (1-outer) —
+        // the outer/anti-deadzone lets a short-throw stick that can't physically
+        // reach its corners still hit 100%. Then apply the accel curve + sensitivity.
+        val outer = ControllerMappings.stickOuterDeadzone()
+        val hi = (1f - outer).coerceAtLeast(dz + 0.01f) // upper edge; guard hi > dz
+        val t = ((m - dz) / (hi - dz)).coerceIn(0f, 1f)
         val accel = ControllerMappings.stickAcceleration()
         val curved =
             if (accel > 0f) Math.pow(t.toDouble(), (1f + accel).toDouble()).toFloat()

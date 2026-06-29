@@ -136,6 +136,24 @@ object ControllerMappings {
         Main.prefs.edit().putFloat(KEY_STICK_DZ, c).apply()
     }
 
+    // Outer (anti-)deadzone: fraction of travel near the EDGE that maps to full
+    // output, so a stick that can't physically reach its corners still hits 100%
+    // (short-throw / handheld sticks like the AYN Odin). 0 = off. Applied in
+    // Main.shapeStickMag as the upper edge of the post-deadzone re-normalize window.
+    private const val KEY_STICK_OUTER = "pad.stick.outerDeadzone"
+    const val STICK_OUTER_MAX = 0.40f
+    @Volatile private var sStickOuter = Float.NaN
+    fun stickOuterDeadzone(): Float {
+        if (sStickOuter.isNaN())
+            sStickOuter = Main.prefs.getFloat(KEY_STICK_OUTER, 0.0f).coerceIn(0f, STICK_OUTER_MAX)
+        return sStickOuter
+    }
+    fun setStickOuterDeadzone(v: Float) {
+        val c = v.coerceIn(0f, STICK_OUTER_MAX)
+        sStickOuter = c
+        Main.prefs.edit().putFloat(KEY_STICK_OUTER, c).apply()
+    }
+
     // ---- Custom per-direction stick→button binding (StickMode.CUSTOM) ----
 
     /** The four directions of a stick, each independently bindable in CUSTOM mode. */
@@ -245,8 +263,9 @@ object ControllerMappings {
      *  why the Settings reset alone didn't clear them.) */
     fun resetTunables() {
         val edit = Main.prefs.edit()
-        edit.remove(KEY_STICK_SENS).remove(KEY_STICK_ACCEL).remove(KEY_STICK_DZ).remove(KEY_DPAD_AS_LSTICK)
-        sStickSens = Float.NaN; sStickAccel = Float.NaN; sStickDz = Float.NaN
+        edit.remove(KEY_STICK_SENS).remove(KEY_STICK_ACCEL).remove(KEY_STICK_DZ)
+            .remove(KEY_STICK_OUTER).remove(KEY_DPAD_AS_LSTICK)
+        sStickSens = Float.NaN; sStickAccel = Float.NaN; sStickDz = Float.NaN; sStickOuter = Float.NaN
         for (p in intArrayOf(P1, P2)) {
             edit.remove(playerPrefix(p) + KEY_LSTICK).remove(playerPrefix(p) + KEY_RSTICK)
             for (left in booleanArrayOf(true, false))

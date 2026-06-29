@@ -28,6 +28,7 @@ object TouchControls {
     private const val KEY_ACTIVE = "touch.active"
     private const val KEY_OPACITY = "touch.opacity"
     private const val KEY_FACE_MULTI = "touch.faceMulti"
+    private const val KEY_FLOATING_STICK = "touch.floatingStick"
     private const val KEY_VIS_MODE = "touch.visibilityMode"
     // Per-game active-profile override: touch.active.game.<serial> -> profile name.
     private const val KEY_ACTIVE_GAME_PREFIX = "touch.active.game."
@@ -90,6 +91,12 @@ object TouchControls {
     // Multi-touch hit-test layer for face + shoulder buttons (lets you press
     // several at once / roll between them). Persisted under KEY_FACE_MULTI.
     val faceMultiTouch = mutableStateOf(false)
+
+    // Floating on-screen stick: the first touch-down inside a stick's zone becomes
+    // its origin (the ring re-centers under your finger) instead of a fixed center —
+    // easier to grab without looking. Snaps back to rest on release. Global; persisted
+    // under KEY_FLOATING_STICK.
+    val floatingStick = mutableStateOf(false)
 
     /** Held-state for the DS2 pressure-sensitivity modifier. While true, the
      *  pressure-capable buttons report ~50% pressure (PCSX2's
@@ -164,6 +171,7 @@ object TouchControls {
         activeLayout.value = match.layout.copy()
         opacity.value = Main.prefs.getFloat(KEY_OPACITY, 0.55f).coerceIn(0.20f, 1.0f)
         faceMultiTouch.value = Main.prefs.getBoolean(KEY_FACE_MULTI, false)
+        floatingStick.value = Main.prefs.getBoolean(KEY_FLOATING_STICK, false)
         visibilityMode.value = Main.prefs.getInt(KEY_VIS_MODE, 11).coerceIn(0, 11)
         if (visibilityMode.value == 0) visible.value = false
     }
@@ -176,6 +184,7 @@ object TouchControls {
             .putString(KEY_ACTIVE, activeProfileName.value)
             .putFloat(KEY_OPACITY, opacity.value)
             .putBoolean(KEY_FACE_MULTI, faceMultiTouch.value)
+            .putBoolean(KEY_FLOATING_STICK, floatingStick.value)
             .putInt(KEY_VIS_MODE, visibilityMode.value)
             .apply()
         syncFolder()
@@ -205,24 +214,26 @@ object TouchControls {
      *  (library/global edit), fall back to overwriting the active profile so the
      *  global Default still reflects the edit. */
     fun saveLiveLayoutToActive() {
-        val serial = runningSerial()
-        when {
-            // A game is running and we resolved its serial -> isolated per-serial
-            // layout. Never touches any shared profile.
-            serial != null -> {
+        // gameIsRunning() is the OUTER gate. The per-serial/CRC isolation paths
+        // must only run when a VM is actually up — keying off a merely-non-null
+        // serial was wrong because Main.currentGame (hence runningSerial()) stays
+        // stale after Close Game, so a Global-Default edit from the main menu
+        // would silently write into the LAST-PLAYED game's per-serial key.
+        if (gameIsRunning()) {
+            val serial = runningSerial()
+            if (serial != null) {
+                // In-game with a resolved serial -> isolated per-serial layout.
+                // Never touches any shared profile.
                 Main.prefs.edit()
                     .putString(
                         KEY_LAYOUT_GAME_PREFIX + serial,
                         activeLayout.value.toJson().toString(),
                     )
                     .apply()
-            }
-            // A game IS running but no serial could be resolved (e.g. homebrew /
-            // BIOS / a disc with no serial). Storing into the shared Default
-            // profile here is exactly the bleed bug — instead key the layout by
-            // the disc CRC so it stays isolated; if even the CRC is unknown,
-            // no-op with a warning rather than corrupting the global Default.
-            gameIsRunning() -> {
+            } else {
+                // In-game but no serial (homebrew / BIOS / serial-less disc).
+                // Key by disc CRC so it stays isolated; if even the CRC is
+                // unknown, no-op with a warning rather than corrupting Default.
                 val crc = runCatching { NativeApp.getGameCRC() }.getOrNull()
                     ?.trim()?.uppercase()?.takeIf { it.isNotEmpty() && it != "00000000" }
                 if (crc != null) {
@@ -239,14 +250,13 @@ object TouchControls {
                     )
                 }
             }
-            // No game running at all (library / global edit) -> overwrite the
-            // active profile, exactly as before.
-            else -> {
-                val idx = profiles.indexOfFirst { it.name == activeProfileName.value }
-                if (idx >= 0) {
-                    profiles[idx] = profiles[idx].copy(layout = activeLayout.value.copy())
-                    persist()
-                }
+        } else {
+            // No game running (library / Global Default edit) -> overwrite the
+            // active profile.
+            val idx = profiles.indexOfFirst { it.name == activeProfileName.value }
+            if (idx >= 0) {
+                profiles[idx] = profiles[idx].copy(layout = activeLayout.value.copy())
+                persist()
             }
         }
         selectedButton.value = null
@@ -265,7 +275,9 @@ object TouchControls {
         // Bind the new profile to the game currently running so it only applies
         // to THAT game (otherwise it becomes the globally-active profile and
         // bleeds into every other game's boot). No game running -> global only.
-        val serial = runningSerial()
+        // Gate on gameIsRunning() so a stale Main.currentGame (after Close Game)
+        // can't bind this profile to the last-played game from the library.
+        val serial = if (gameIsRunning()) runningSerial() else null
         if (serial != null)
             Main.prefs.edit().putString(KEY_ACTIVE_GAME_PREFIX + serial, trimmed).apply()
         persist()
@@ -278,7 +290,9 @@ object TouchControls {
         // When a game is running, remember this profile FOR that game so it
         // auto-applies on the next boot (per-game tier). With no game (library),
         // it's just the global default, persisted via KEY_ACTIVE in persist().
-        val serial = runningSerial()
+        // Gate on gameIsRunning() so a stale Main.currentGame (after Close Game)
+        // can't bind this from the library to the last-played game.
+        val serial = if (gameIsRunning()) runningSerial() else null
         if (serial != null)
             Main.prefs.edit().putString(KEY_ACTIVE_GAME_PREFIX + serial, name).apply()
         persist()
@@ -408,6 +422,15 @@ object TouchControls {
         Main.prefs.edit().remove(KEY_LAYOUT_GAME_PREFIX + serial).apply()
     }
 
+    /** Reset chip: only clear the running game's per-serial layout when a VM is
+     *  actually up. From the library (Global Default edit) there is no per-game
+     *  key to clear, and Main.currentGame may still point at the last-played
+     *  game — so resolving a serial there would wrongly delete that game's
+     *  custom layout. */
+    fun clearGameLayoutIfRunning() {
+        if (gameIsRunning()) clearGameLayout(runningSerial())
+    }
+
     /** `<DataRoot>/inputprofiles/` (native creates it on init). Null when no
      *  system dir is configured yet. */
     private fun profilesDir(): File? {
@@ -470,6 +493,11 @@ object TouchControls {
 
     fun setFaceMultiTouch(enabled: Boolean) {
         faceMultiTouch.value = enabled
+        persist()
+    }
+
+    fun setFloatingStick(enabled: Boolean) {
+        floatingStick.value = enabled
         persist()
     }
 
