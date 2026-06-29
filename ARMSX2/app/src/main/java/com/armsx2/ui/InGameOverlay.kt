@@ -150,6 +150,7 @@ object InGameOverlay {
         data object AchievementsLogin : State()
         data object Achievements : State()
         data object HardcoreEnableConfirm : State()
+        data object HardcoreDisableConfirm : State()
         data object HardcoreSaveStateBlocked : State()
     }
 
@@ -592,7 +593,7 @@ object InGameOverlay {
                 if (dy != 0) modalSelection.value = (modalSelection.value + dy).coerceIn(0, 2)
                 return true
             }
-            is State.ResetConfirm, is State.HardcoreEnableConfirm -> {
+            is State.ResetConfirm, is State.HardcoreEnableConfirm, is State.HardcoreDisableConfirm -> {
                 val delta = if (dy != 0) dy else dx
                 if (delta != 0) modalSelection.value = (modalSelection.value + delta).coerceIn(0, 1)
                 return true
@@ -679,6 +680,14 @@ object InGameOverlay {
                     enterState(State.Root)
                 } else {
                     enableHardcoreMode()
+                }
+                return true
+            }
+            is State.HardcoreDisableConfirm -> {
+                if (modalSelection.value.coerceIn(0, 1) == 0) {
+                    enterState(State.Root)
+                } else {
+                    disableHardcoreMode()
                 }
                 return true
             }
@@ -870,6 +879,15 @@ object InGameOverlay {
         NativeApp.setHardcoreMode(true)
         hardcoreOn.value = true
         resetSystem()
+    }
+
+    private fun disableHardcoreMode() {
+        // Drop to softcore. Unlike enable, this does NOT reset the game — it just
+        // flips the flag off for the rest of the session (matching the old
+        // immediate-toggle behaviour, now gated behind a confirm).
+        NativeApp.setHardcoreMode(false)
+        hardcoreOn.value = false
+        enterState(State.Root)
     }
 
     /** Open the overlay. Pauses the VM. Safe to call when already open. */
@@ -1165,10 +1183,16 @@ object InGameOverlay {
                             },
                             onHardcoreToggle = {
                                 if (hardcoreOn.value) {
-                                    NativeApp.setHardcoreMode(false)
-                                    hardcoreOn.value = false
+                                    // Gate the disable behind a confirm — users were
+                                    // turning hardcore off by accident with a single
+                                    // tap and silently losing challenge-mode unlocks.
+                                    enterState(State.HardcoreDisableConfirm)
                                 } else {
-                                    state.value = State.HardcoreEnableConfirm
+                                    // enterState (not a bare assignment) resets
+                                    // modalSelection to 0 so controller focus
+                                    // defaults to CANCEL — symmetric with the
+                                    // disable path and safe against a stale index.
+                                    enterState(State.HardcoreEnableConfirm)
                                 }
                             },
                         )
@@ -1315,6 +1339,7 @@ object InGameOverlay {
                         )
                         is State.HardcoreSaveStateBlocked -> HardcoreBlockedBubble()
                         is State.HardcoreEnableConfirm -> Unit // rendered fullscreen below
+                        is State.HardcoreDisableConfirm -> Unit // rendered fullscreen below
                         is State.Achievements -> Unit // rendered in the top-left column
                         is State.Root -> Unit
                     }
@@ -1329,6 +1354,13 @@ object InGameOverlay {
             // user to know exactly what's about to happen.
             if (state.value is State.HardcoreEnableConfirm) {
                 HardcoreEnableConfirmFullscreen()
+            }
+            // Same PS2-BIOS-style fullscreen confirm for DISABLING hardcore.
+            // Turning hardcore off mid-session drops you to softcore for the
+            // rest of the run, so make the user explicitly confirm instead of
+            // letting a stray tap silently flip it.
+            if (state.value is State.HardcoreDisableConfirm) {
+                HardcoreDisableConfirmFullscreen()
             }
             } // displayCutoutPadding inner box
         }
@@ -2433,6 +2465,79 @@ object InGameOverlay {
 	                        selected = modalSelection.value == 1,
 	                        modifier = Modifier.weight(1f),
 	                    ) { enableHardcoreMode() }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun HardcoreDisableConfirmFullscreen() {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xCC000000))
+                // Eat taps so background controls don't trigger.
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                ) {},
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(420.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color(0xFF0A0A18))
+                    .border(2.dp, Color(0xFF8888AA), RoundedCornerShape(2.dp))
+                    .padding(2.dp)
+                    .border(1.dp, Color(0xFF333366), RoundedCornerShape(2.dp))
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    "DISABLE HARDCORE MODE",
+                    color = Color(0xFFFFCC66),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 2.sp,
+                )
+                Spacer(Modifier.height(2.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Color(0xFF8888AA)),
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "This drops you to Softcore for the rest of this session. Achievements you unlock will no longer count as hardcore on RetroAchievements, and save states and cheats become available again.",
+                    color = Color(0xFFDDDDEE),
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "You can't turn hardcore back on without resetting the game.",
+                    color = Color(0xFFFFCC66),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(20.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    BiosLikeButton(
+                        label = "CANCEL",
+                        primary = false,
+                        selected = modalSelection.value == 0,
+                        modifier = Modifier.weight(1f),
+                    ) { enterState(State.Root) }
+                    BiosLikeButton(
+                        label = "DISABLE",
+                        primary = true,
+                        selected = modalSelection.value == 1,
+                        modifier = Modifier.weight(1f),
+                    ) { disableHardcoreMode() }
                 }
             }
         }
