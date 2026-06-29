@@ -363,7 +363,10 @@ private fun DriverBrowserRow(
             Column(modifier = Modifier.weight(1f)) {
                 Text(remote.assetName, color = Color.White, fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(remote.releaseName, color = Color(0xFFAAAAAA), fontSize = 11.sp,
+                Text(
+                    if (remote.source.isNotEmpty()) "${remote.source} · ${remote.releaseName}"
+                    else remote.releaseName,
+                    color = Color(0xFFAAAAAA), fontSize = 11.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Spacer(Modifier.width(10.dp))

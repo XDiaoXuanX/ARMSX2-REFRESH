@@ -2407,7 +2407,10 @@ object SetupImpl {
                 .padding(12.dp),
         ) {
             Text(
-                remote.releaseName.ifBlank { remote.assetName },
+                run {
+                    val base = remote.releaseName.ifBlank { remote.assetName }
+                    if (remote.source.isNotEmpty()) "${remote.source} · $base" else base
+                },
                 color = Color.White,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
