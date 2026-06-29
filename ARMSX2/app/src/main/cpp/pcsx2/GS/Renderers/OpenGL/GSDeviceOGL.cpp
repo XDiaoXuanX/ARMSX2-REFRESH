@@ -662,6 +662,13 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// Change depth convention
 	if (GLAD_GL_ARB_clip_control)
 		glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+	else if (m_is_gles && GLAD_GL_EXT_clip_control)
+		// GLES has no ARB_clip_control; GL_EXT_clip_control (advertised by Adreno, and
+		// some Mali) is the same API/enums. Without it, GLES uses the legacy z-remap that
+		// CLAMPS PS2 Z >= 2^24 to the far plane (tfx_vgs.glsl), collapsing far depth so
+		// large-Z world geometry z-fights/vanishes — e.g. God of War II's transparent
+		// walls. Pairs with HAS_CLIP_CONTROL below (same condition) so the shader matches.
+		glClipControlEXT(GL_LOWER_LEFT_EXT, GL_ZERO_TO_ONE_EXT);
 
 	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=date_raster_done");
 	// ****************************************************************
@@ -857,7 +864,8 @@ bool GSDeviceOGL::CheckFeatures()
 				"GL_ARB_copy_image is not supported, copies will be slower.", Host::OSD_ERROR_DURATION);
 		}
 
-		if (!GLAD_GL_VERSION_4_5 && !GLAD_GL_ARB_clip_control)
+		if (!GLAD_GL_VERSION_4_5 && !GLAD_GL_ARB_clip_control &&
+			!(m_is_gles && GLAD_GL_EXT_clip_control))
 		{
 			Host::AddOSDMessage(
 				"GL_ARB_clip_control is not supported, depth will be less accurate.", Host::OSD_ERROR_DURATION);
@@ -1749,7 +1757,8 @@ std::string GSDeviceOGL::GenGlslHeader(const std::string_view entry, GLenum type
 		header += "#define DEPTH_FEEDBACK_SUPPORT 2\n"; // Depth as RT
 	}
 
-	if (!m_is_gles && GLAD_GL_ARB_clip_control)
+	// Must match the glClipControl(EXT) enable above: desktop ARB, or GLES with EXT.
+	if (GLAD_GL_ARB_clip_control || (m_is_gles && GLAD_GL_EXT_clip_control))
 		header += "#define HAS_CLIP_CONTROL 1\n";
 	else
 		header += "#define HAS_CLIP_CONTROL 0\n";
