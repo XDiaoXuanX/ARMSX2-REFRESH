@@ -1000,6 +1000,9 @@ class Main: ComponentActivity() {
             }
         }
 
+        // (BIOS data-root mirror runs in the background invoke{} block below — it's
+        // cosmetic and must not block first paint / risk an ANR on slow SD cards.)
+
         invoke {
             NativeApp.initializeOnce(applicationContext)
             nativeReady.value = true
@@ -1021,6 +1024,30 @@ class Main: ComponentActivity() {
                 if (name.isNotEmpty()) {
                     NativeApp.setSetting("Filenames", "BIOS", "string", name)
                     NativeApp.commitSettings()
+                }
+            }
+
+            // Mirror the canonical (app-private) BIOS into the user's data root at
+            // <dataRoot>/bios so it's visible/backup-able next to cache/covers/etc.
+            // COPY-ONLY (the emulator reads the app-private copy pinned above), so
+            // it can never break boot. Runs here on the background init thread so it
+            // never blocks first paint / risks an ANR on slow SD cards. The migration
+            // block above (inline) has already populated internalBios. Skips dotfiles
+            // and ".migrate.tmp" scratch leftovers so junk never lands in the mirror.
+            runCatching {
+                val rootPosix = systemDirPosix()
+                if (!rootPosix.isNullOrEmpty()) {
+                    val internalBios = internalBiosDir(applicationContext)
+                    val mirrorDir = File(rootPosix, "bios")
+                    if (mirrorDir.absolutePath != internalBios.absolutePath) {
+                        mirrorDir.mkdirs()
+                        internalBios.listFiles { f ->
+                            f.isFile && !f.name.startsWith(".") && !f.name.endsWith(".migrate.tmp")
+                        }?.forEach { f ->
+                            val dst = File(mirrorDir, f.name)
+                            if (!dst.exists() || dst.length() != f.length()) copyFileViaTemp(f, dst)
+                        }
+                    }
                 }
             }
 
