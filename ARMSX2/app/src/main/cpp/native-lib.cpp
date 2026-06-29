@@ -3072,6 +3072,22 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getCompatibilityForSerial(JNIEnv* env, jcla
     return static_cast<jint>(db_entry->compat);
 }
 
+// The GameDB's curated region string for a serial (e.g. "NTSC-U", "PAL-E", "PAL-IN",
+// "NTSC-C", "NTSC-K", "NTSC-HK"), or "" if not in the database. Lets the library show
+// the TRUE region (India, China, Korea, Hong Kong…) that a serial PREFIX can't tell
+// apart — e.g. SCES-55670 "Don 2" is PAL-IN (India), not generic PAL/Europe.
+extern "C" JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getRegionForSerial(JNIEnv* env, jclass, jstring jSerial)
+{
+    if (!jSerial) return env->NewStringUTF("");
+    const std::string serial = GetJavaString(env, jSerial);
+    if (serial.empty()) return env->NewStringUTF("");
+
+    const GameDatabaseSchema::GameEntry* db_entry = GameDatabase::findGame(serial);
+    if (!db_entry) return env->NewStringUTF("");
+    return env->NewStringUTF(db_entry->region.c_str());
+}
+
 // ---------------------------------------------------------------------------
 // BIOS info probe — invoked from the setup wizard while the user is picking
 // a BIOS directory. Takes ownership of `fd` (the caller MUST have detached

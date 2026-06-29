@@ -130,10 +130,12 @@ data class GameInfo(
             "https://raw.githubusercontent.com/xlenore/$repo/main/covers/default/$s.jpg"
     }
 
-    /** Human-readable region (USA / Europe / Japan / …) from the serial prefix,
-     *  or null if unrecognized. Shown under the cover so users can tell apart
-     *  multiple regional versions of the same game. */
-    val region: String? get() = serial?.let { regionForSerial(it) }
+    /** Human-readable region (USA / Europe / Japan / India / China / …). Prefers the
+     *  curated GameDB region (so India/China/Korea/HK releases that share a serial PREFIX
+     *  with Europe/Japan are labelled correctly — matching PCSX2), falling back to the
+     *  serial-prefix heuristic when the serial isn't in the database. Shown under the
+     *  cover so users can tell apart multiple regional versions of the same game. */
+    val region: String? get() = serial?.let { gameDbRegion(it) ?: regionForSerial(it) }
 
     /** Region as a flag emoji (🇺🇸 / 🇪🇺 / 🇯🇵 / …) for the cover label, or null.
      *  Rendered ahead of the title so the region is always visible even when a
@@ -238,6 +240,43 @@ object CustomCovers {
 }
 
 /** Map a PS1/PS2 serial prefix to a region label. */
+// GameDB region cache (serial -> mapped label, or "" = looked up & not in DB / no JNI).
+// One native lookup per serial, then memoized so the cover/flag render path stays cheap
+// during scroll. The GameDatabase is loaded by the time the library shows (the compat
+// stars use it too), so this resolves for listed games.
+private val gameDbRegionCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+/** The mapped region label from PCSX2's GameDB (India / China / Korea / Hong Kong / …),
+ *  or null when the serial isn't in the database — the caller then falls back to the
+ *  serial-prefix heuristic. Matches PCSX2, which a serial PREFIX can't (SCES = both
+ *  Europe AND India, etc.). */
+fun gameDbRegion(serial: String): String? {
+    val cached = gameDbRegionCache.getOrPut(serial) {
+        val raw = runCatching { kr.co.iefriends.pcsx2.NativeApp.getRegionForSerial(serial) }
+            .getOrNull().orEmpty()
+        mapGameDbRegion(raw) ?: ""
+    }
+    return cached.takeIf { it.isNotEmpty() }
+}
+
+/** Map a PCSX2 GameDB region string ("NTSC-U", "PAL-E", "PAL-IN", "NTSC-C", "NTSC-HK", …)
+ *  to our display label. */
+private fun mapGameDbRegion(raw: String): String? {
+    val u = raw.trim().uppercase()
+    if (u.isEmpty()) return null
+    return when {
+        u == "PAL-IN" || u.contains("INDIA") -> "India"
+        u.startsWith("NTSC-U") -> "USA"
+        u.startsWith("NTSC-J") -> "Japan"
+        u.startsWith("NTSC-K") -> "Korea"
+        u.startsWith("NTSC-HK") -> "Hong Kong"
+        u.startsWith("NTSC-C") -> "China"          // NTSC-C, NTSC-C-E, NTSC-C-J
+        u.startsWith("NTSC-A") || u == "NTSC" -> "Asia"
+        u.startsWith("PAL") -> "Europe"            // PAL, PAL-E, PAL-A, … (PAL-IN handled above)
+        else -> null
+    }
+}
+
 fun regionForSerial(serial: String): String? = when (serial.take(4).uppercase()) {
     "SLUS", "SCUS", "PBPX", "LSP0" -> "USA"
     "SLES", "SCES", "SLED", "SCED", "SLPN" -> "Europe"
@@ -253,6 +292,9 @@ fun regionFlagFor(region: String): String? = when (region) {
     "Europe" -> "🇪🇺"
     "Japan" -> "🇯🇵"
     "Korea" -> "🇰🇷"
+    "India" -> "🇮🇳"
+    "China" -> "🇨🇳"
+    "Hong Kong" -> "🇭🇰"
     "Asia" -> "🌏"
     else -> null
 }

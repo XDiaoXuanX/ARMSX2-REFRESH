@@ -538,6 +538,11 @@ public class NativeApp {
 	 */
 	public static native int getCompatibilityForSerial(String serial);
 
+	/** GameDB region string for a serial ("NTSC-U", "PAL-E", "PAL-IN", "NTSC-C", "NTSC-K",
+	 *  "NTSC-HK", ...), or "" if the serial isn't in the database. Lets the library show
+	 *  the real region (India/China/Korea/HK) a serial prefix alone can't distinguish. */
+	public static native String getRegionForSerial(String serial);
+
 	public static native boolean saveStateToSlot(int slot);
 	public static native boolean loadStateFromSlot(int slot);
 	public static native String getGamePathSlot(int slot);
