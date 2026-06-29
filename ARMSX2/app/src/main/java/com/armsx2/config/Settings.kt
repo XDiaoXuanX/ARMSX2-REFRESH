@@ -114,8 +114,14 @@ data class Settings(
     /** EmuCore/HostFs — host: filesystem access in the VM, for ELF/homebrew and mods
      *  (e.g. modded Persona 3 FES). Per-game capable; applies on the next game boot. */
     val hostFs: Boolean = false,
-    /** EmuCore/EnableGameFixes — master switch for game-specific compatibility hacks. */
-    val enableGameFixes: Boolean = false,
+    /** EmuCore/EnableGameFixes — master switch that lets the GameDB apply each game's
+     *  curated compatibility gamefixes (e.g. VuAddSubHack, SkipMPEGHack). Defaults TRUE
+     *  to match upstream PCSX2 (Pcsx2Config.cpp EnableGameFixes = true) and trak's Mac:
+     *  Android was the outlier defaulting it false, which silently skipped every GameDB
+     *  CPU gamefix — that's what broke Valkyrie Profile 2 (needs VuAddSubHack; without it
+     *  the first VU0 program diverges and the EE derails to PC=0) and made Skip MPEG inert.
+     *  GameDB gamefixes are per-game curated, so on-by-default only helps compatibility. */
+    val enableGameFixes: Boolean = true,
     /** EmuCore/Gamefixes/SoftwareRendererFMVHack. */
     val gamefixSoftwareRendererFmv: Boolean = false,
     /** EmuCore/Gamefixes/SkipMPEGHack. */
@@ -173,8 +179,12 @@ data class Settings(
     val syncToHostRefresh: Boolean = false,
     /** EmuCore/GS/DisableFramebufferFetch — disable the framebuffer-fetch path. Default off. */
     val disableFramebufferFetch: Boolean = false,
-    /** EmuCore/GS/HWROV — Rasterizer Order Views (accurate blending via fragment-shader interlock; Vulkan only). Default on. */
-    val hwRov: Boolean = true,
+    /** EmuCore/GS/HWROV — Rasterizer Order Views (accurate blending via fragment-shader
+     *  interlock; Vulkan only). Default OFF on mobile: it's a perf loss on tilers and is
+     *  inert on Turnip/Adreno (no VK_EXT_fragment_shader_interlock), so on-by-default just
+     *  costs frames for no gain. Upstream PCSX2 defaults it true (desktop); we override to
+     *  false for Android. Users can still enable it in Renderer for benchmarking. */
+    val hwRov: Boolean = false,
     /** EmuCore/GS/HWAA1 — hardware PS2 AA1 edge anti-aliasing. Default off. Applies on game restart. */
     val hwAa1: Boolean = false,
     /** EmuCore/GS/HWAccurateAlphaTest — accurate alpha test for the HW renderer (pairs with ROV). Default off. */
