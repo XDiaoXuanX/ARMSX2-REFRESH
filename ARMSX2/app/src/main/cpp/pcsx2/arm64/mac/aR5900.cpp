@@ -3822,6 +3822,48 @@ static u32 recScanBlockEnd(u32 startpc)
 	return pc;
 }
 
+// Skip MPEG game-fix (CHECK_SKIPMPEGHACK) — ported from the x86 rec's
+// skipMPEG_By_Pattern (ix86-32/iR5900.cpp). It was previously x86-only, so the
+// "Skip MPEG" toggle did nothing on Android (this ARM64 EE backend). The PS2
+// sceMpegIsEnd routine is a tiny 3-instruction leaf:
+//     lw reg, 0x40(a0) ; jr ra ; lw v0, 0(reg)
+// When the fix is on and a block starts exactly on that pattern, we don't
+// recompile it — we stub it to force v0 = 1 ("movie finished") and return to ra,
+// so games that spin waiting for an FMV to end skip it (Katamari et al.). The
+// pattern detection is architecture-independent; the host state change is done by
+// this C helper (called via armEmitCall) so no hand-emitted field writes are
+// needed, and the normal block finalize then event-tests + dispatches from the
+// cpuRegs.pc the helper set.
+static void eeSkipMpegIsEnd()
+{
+	cpuRegs.GPR.n.v0.UD[0] = 1;          // v0 = 1 (UL[0] = 1, UL[1] = 0)
+	cpuRegs.pc = cpuRegs.GPR.n.ra.UL[0]; // jr ra
+}
+
+// Returns true (and emits the stub call) when [startpc] is the sceMpegIsEnd leaf
+// and the fix is enabled. s_eeEndBlock must already be set (recScanBlockEnd).
+static bool recTrySkipMpeg(u32 startpc)
+{
+	if (!CHECK_SKIPMPEGHACK)
+		return false;
+
+	// Exactly three words, middle op == `jr ra` (0x03e00008).
+	if (s_eeEndBlock != startpc + 12 || memRead32(startpc + 4) != 0x03e00008u)
+		return false;
+
+	const u32 code = memRead32(startpc);
+	const u32 p1 = 0x8c800040u;                             // lw ?, 0x40(a0)
+	const u32 p2 = 0x8c020000u | ((code & 0x1f0000u) << 5); // lw v0, 0(reg)
+	if ((code & 0xffe0ffffu) != p1)
+		return false;
+	if (memRead32(startpc + 8) != p2)
+		return false;
+
+	armEmitCall(reinterpret_cast<const void*>(eeSkipMpegIsEnd));
+	Console.WriteLn("sceMpegIsEnd pattern found! Recompiling skip video fix... [ARM64]");
+	return true;
+}
+
 // --------------------------------------------------------------------------------------
 //  Block compiler (Phase 4.3 / 4.4)
 // --------------------------------------------------------------------------------------
@@ -3956,7 +3998,19 @@ static void recRecompile(u32 startpc)
 		}
 	}
 
-	for (;;)
+	// Skip MPEG game-fix: if enabled and this block IS the sceMpegIsEnd leaf, stub it
+	// (force v0=1 + jr ra) instead of recompiling, then fall straight into the normal
+	// block finalize/dispatch below — which resumes at cpuRegs.pc (= ra) the stub set.
+	const bool skipped_mpeg = recTrySkipMpeg(startpc);
+	if (skipped_mpeg)
+	{
+		endpc = s_eeEndBlock; // the 3-word leaf [startpc, startpc+12)
+		raw_cycles = eeOpCycles(memRead32(startpc)) + eeOpCycles(0x03e00008u) +
+			eeOpCycles(memRead32(startpc + 8));
+		// known_dispatch_pc stays false -> dispatch dynamically from cpuRegs.pc.
+	}
+
+	for (; !skipped_mpeg;)
 	{
 		// Keep every block within a single host RAM page so its SMC protection mode (see
 		// recEmitManualProtection) governs the whole block, and so a page-fault clear of
