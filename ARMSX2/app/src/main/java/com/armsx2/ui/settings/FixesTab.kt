@@ -431,33 +431,5 @@ fun FixesTab(state: MutableState<Settings>) {
     }
 }
 
-/** A titled section whose body collapses behind a tap/▸ disclosure (default collapsed
- *  so the Fixes tab isn't a giant wall of rows). Mirrors the RetroAchievements "Options"
- *  pattern; the header is controller-focusable so a gamepad can open it without a touch. */
-@Composable
-private fun CollapsibleSection(title: String, content: @Composable () -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Spacer(Modifier.height(8.dp))
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .controllerFocusable(controllerId = "fixes:sect:$title", onConfirm = { expanded = !expanded })
-            .clickable { expanded = !expanded }
-            .padding(horizontal = 6.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            title,
-            color = Colors.pasx2_blue,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            if (expanded) "▾" else "▸",
-            color = Colors.pasx2_blue,
-            fontSize = 12.sp,
-        )
-    }
-    if (expanded) content()
-}
+// CollapsibleSection now lives in SettingsWidgets.kt (shared by the Fixes / Pad /
+// Performance / Renderer tabs).

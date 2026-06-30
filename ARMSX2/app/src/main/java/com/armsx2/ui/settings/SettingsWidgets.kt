@@ -408,6 +408,38 @@ fun SettingsDivider() {
     )
 }
 
+/** Collapsible settings section: a tappable header (▸ collapsed / ▾ expanded) that
+ *  shows or hides its content. Controller-focusable so a gamepad can open it. Shared
+ *  by the Fixes / Pad / Performance / Renderer tabs to de-bloat long settings lists.
+ *  [initiallyExpanded] lets a tab open its most-used section by default. */
+@Composable
+fun CollapsibleSection(
+    title: String,
+    initiallyExpanded: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(initiallyExpanded) }
+    Spacer(Modifier.height(8.dp))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .controllerFocusable(controllerId = "sect:$title", onConfirm = { expanded = !expanded })
+            .clickable { expanded = !expanded }
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            color = Colors.pasx2_blue,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.weight(1f),
+        )
+        Text(if (expanded) "▾" else "▸", color = Colors.pasx2_blue, fontSize = 12.sp)
+    }
+    if (expanded) content()
+}
+
 @Composable
 fun HelpText(text: String, modifier: Modifier = Modifier) {
     Text(

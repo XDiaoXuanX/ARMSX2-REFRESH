@@ -11,12 +11,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -36,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import com.armsx2.config.Settings
 import com.armsx2.input.ControllerMappings
 import com.armsx2.ui.Colors
+import com.armsx2.ui.touch.TouchButtonId
 import com.armsx2.ui.touch.TouchControls
 import kr.co.iefriends.pcsx2.NativeApp
 
@@ -49,14 +54,18 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
     val ctx = LocalContext.current
     val refreshToken = remember { mutableStateOf(0) }
     val focusRequester = remember { FocusRequester() }
+    // Which macro's "configure button set" dialog is open (null = none).
+    val macroDialogFor = remember { mutableStateOf<TouchButtonId?>(null) }
+    // Which macro is capturing a physical-controller trigger button (null = none).
+    val macroCapture = remember { mutableStateOf<TouchButtonId?>(null) }
 
     val stickCapture = ControllerMappings.captureStickDir
-    LaunchedEffect(capture.value, stickCapture.value) {
+    LaunchedEffect(capture.value, stickCapture.value, macroCapture.value) {
         // Tell Main.dispatchKeyEvent to stop intercepting controller buttons for
         // overlay nav while we're capturing, so B/A/Y/etc. reach onPreviewKeyEvent
-        // and bind instead of (e.g.) exiting the menu. Either an Action capture or
-        // a stick-direction capture arms the bypass.
-        val capturingNow = capture.value != null || stickCapture.value != null
+        // and bind instead of (e.g.) exiting the menu. An Action capture, a stick-
+        // direction capture, or a macro physical-trigger capture arms the bypass.
+        val capturingNow = capture.value != null || stickCapture.value != null || macroCapture.value != null
         ControllerMappings.padCapturing.value = capturingNow
         if (capturingNow)
             focusRequester.requestFocus()
@@ -75,6 +84,21 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             .focusRequester(focusRequester)
             .focusable()
             .onPreviewKeyEvent { event ->
+                // Macro physical-trigger capture: bind the pressed physical button to
+                // fire this macro's button set. Captures the raw keycode (not a PS2
+                // target) since macros override the button's normal mapping.
+                val mc = macroCapture.value
+                if (mc != null) {
+                    if (event.type != KeyEventType.KeyDown)
+                        return@onPreviewKeyEvent true
+                    val ncode = event.key.nativeKeyCode
+                    if (ncode == android.view.KeyEvent.KEYCODE_UNKNOWN)
+                        return@onPreviewKeyEvent true
+                    TouchControls.setMacroPhysicalCode(mc, ncode)
+                    macroCapture.value = null
+                    refreshToken.value++
+                    return@onPreviewKeyEvent true
+                }
                 // Stick-direction CUSTOM capture: resolve the pressed physical
                 // button to the PS2 code it drives (same physical->target lookup
                 // as gameplay) and bind that direction. Shares this focusable and
@@ -146,6 +170,9 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             )
         }
         SettingsDivider()
+        // Loose state reads kept at the top of the grouped area so they always
+        // recompose the tab regardless of which sections are collapsed.
+        @Suppress("UNUSED_EXPRESSION") TouchControls.macroBindTick.value
         @Suppress("UNUSED_EXPRESSION")
         refreshToken.value
         // Also recompose when the mappings change externally (e.g. the global
@@ -153,246 +180,334 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         // so the feel sliders / stick modes refresh without re-opening the tab.
         @Suppress("UNUSED_EXPRESSION")
         ControllerMappings.stickBindTick.value
-        // Local co-op: pick which player's buttons / stick mode you're editing. P2 is
-        // the second controller to press a button in-game (auto-assigned). Stick
-        // feel (deadzone / sensitivity / acceleration) and the D-pad-as-stick toggle
-        // below are shared by both players.
-        SegmentedRow(
-            label = "Editing",
-            options = listOf("Player 1", "Player 2"),
-            selectedIndex = editPlayer.value,
-            description = "Configure Player 1 or Player 2's button mapping. Player 2 = the 2nd controller that joins in-game.",
-            onChange = {
-                editPlayer.value = it
-                capture.value = null
-                ControllerMappings.captureStickDir.value = null
-                refreshToken.value++
-            },
-        )
-        // Master rumble / vibration enable — gates controller motors AND the device-haptic
-        // fallback (NativeApp.onPadRumble). Off = no haptics anywhere.
-        ToggleRow(
-            "Rumble / Vibration",
-            ControllerMappings.rumbleEnabled(),
-            description = "Master switch for controller rumble and the device's built-in vibration. Turn off to silence all haptics.",
-        ) {
-            ControllerMappings.setRumbleEnabled(it)
-            refreshToken.value++
-        }
-        SettingsDivider()
-        // Buzz the selected player's controller and report whether Android can drive
-        // its rumble — separates a routing problem from a pad whose haptics simply
-        // aren't exposed to Android (common for DualSense/DS4 over Bluetooth).
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(30.dp)
-                .background(rowAura())
-                .clickable {
-                    NativeApp.testRumble(editPlayer.value)
-                    android.widget.Toast.makeText(
-                        ctx, NativeApp.rumbleStatusForPort(editPlayer.value),
-                        android.widget.Toast.LENGTH_LONG,
-                    ).show()
+        CollapsibleSection("Macros", initiallyExpanded = false) {
+            // Macros — 4 combo buttons, each firing a chosen SET of pad buttons at once
+            // (e.g. R1+R2+R3). Tap a row to pick its buttons. Use them on-screen (enable +
+            // position the M1-M4 buttons in the layout editor, off by default) and/or bind a
+            // PHYSICAL controller button to fire the same macro ("Bind").
+            Text(
+                "Macros (combo buttons — touch + physical)",
+                color = Color(0xFFBBBBBB),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+            )
+            listOf(TouchButtonId.MACRO1, TouchButtonId.MACRO2, TouchButtonId.MACRO3, TouchButtonId.MACRO4).forEach { mid ->
+                val buttons = TouchControls.macroButtons(mid)
+                val summary = if (buttons.isEmpty()) "Not set" else buttons.joinToString(" + ") { it.label }
+                val physCode = TouchControls.macroPhysicalCode(mid)
+                val capturingThis = macroCapture.value == mid
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .background(rowAura())
+                        .clickable { macroDialogFor.value = mid }
+                        .controllerFocusable(
+                            controllerId = "pad-macro-${mid.name}",
+                            onConfirm = { macroDialogFor.value = mid },
+                        )
+                        .padding(horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(mid.label, color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(summary, color = Color(0xFFCCCCCC), fontSize = 12.sp)
+                        Text(
+                            when {
+                                capturingThis -> "Press a controller button…"
+                                physCode != android.view.KeyEvent.KEYCODE_UNKNOWN ->
+                                    "Controller: ${ControllerMappings.labelForKey(physCode)}"
+                                else -> "Controller: not bound"
+                            },
+                            color = if (capturingThis) Color(0xFFFFD33A) else Color(0xFF999999),
+                            fontSize = 10.sp,
+                        )
+                    }
+                    if (physCode != android.view.KeyEvent.KEYCODE_UNKNOWN && !capturingThis) {
+                        Text(
+                            "Clear",
+                            color = Color(0xFFFF6B6B), fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clickable { TouchControls.clearMacroPhysicalCode(mid); refreshToken.value++ }
+                                .padding(end = 10.dp),
+                        )
+                    }
+                    Text(
+                        if (capturingThis) "Cancel" else "Bind",
+                        color = Colors.pasx2_blue, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable {
+                                macroCapture.value = if (capturingThis) null else mid
+                                capture.value = null
+                                ControllerMappings.captureStickDir.value = null
+                            }
+                            .padding(end = 10.dp),
+                    )
+                    Text("Edit", color = Colors.pasx2_blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
-                .controllerFocusable(
-                    controllerId = "pad-test-rumble",
-                    onConfirm = {
+                SettingsDivider()
+            }
+            macroDialogFor.value?.let { mid ->
+                MacroConfigDialog(
+                    macroId = mid,
+                    onSaved = { refreshToken.value++ },
+                    onDismiss = { macroDialogFor.value = null },
+                )
+            }
+        }
+        CollapsibleSection("Player & Rumble", initiallyExpanded = true) {
+            // Local co-op: pick which player's buttons / stick mode you're editing. P2 is
+            // the second controller to press a button in-game (auto-assigned). Stick
+            // feel (deadzone / sensitivity / acceleration) and the D-pad-as-stick toggle
+            // below are shared by both players.
+            SegmentedRow(
+                label = "Editing",
+                options = listOf("Player 1", "Player 2"),
+                selectedIndex = editPlayer.value,
+                description = "Configure Player 1 or Player 2's button mapping. Player 2 = the 2nd controller that joins in-game.",
+                onChange = {
+                    editPlayer.value = it
+                    capture.value = null
+                    ControllerMappings.captureStickDir.value = null
+                    refreshToken.value++
+                },
+            )
+            // Master rumble / vibration enable — gates controller motors AND the device-haptic
+            // fallback (NativeApp.onPadRumble). Off = no haptics anywhere.
+            ToggleRow(
+                "Rumble / Vibration",
+                ControllerMappings.rumbleEnabled(),
+                description = "Master switch for controller rumble and the device's built-in vibration. Turn off to silence all haptics.",
+            ) {
+                ControllerMappings.setRumbleEnabled(it)
+                refreshToken.value++
+            }
+            SettingsDivider()
+            // Buzz the selected player's controller and report whether Android can drive
+            // its rumble — separates a routing problem from a pad whose haptics simply
+            // aren't exposed to Android (common for DualSense/DS4 over Bluetooth).
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(30.dp)
+                    .background(rowAura())
+                    .clickable {
                         NativeApp.testRumble(editPlayer.value)
                         android.widget.Toast.makeText(
                             ctx, NativeApp.rumbleStatusForPort(editPlayer.value),
                             android.widget.Toast.LENGTH_LONG,
                         ).show()
-                    },
-                )
-                .padding(horizontal = 6.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                if (editPlayer.value == 0) "Test rumble — Player 1" else "Test rumble — Player 2",
-                color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-            )
-        }
-        SettingsDivider()
-        // Analog stick remapping — make a physical stick act as the D-pad or the
-        // face buttons (great for fighting games on analog-centric controllers).
-        run {
-            val stickOpts = ControllerMappings.StickMode.values().map { it.label }
-            SegmentedRow(
-                label = "Left Stick",
-                options = stickOpts,
-                selectedIndex = ControllerMappings.leftStickMode(editPlayer.value).ordinal,
-                description = "What the left analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
-                onChange = {
-                    ControllerMappings.setLeftStickMode(ControllerMappings.StickMode.values()[it], editPlayer.value)
-                    refreshToken.value++
-                },
-            )
-            SettingsDivider()
-            if (ControllerMappings.leftStickMode(editPlayer.value) == ControllerMappings.StickMode.CUSTOM) {
-                ControllerMappings.StickDir.values().forEach { dir ->
-                    StickDirPickerRow(leftStick = true, dir = dir, player = editPlayer.value, onChanged = { refreshToken.value++ })
-                    SettingsDivider()
-                }
-            }
-            // Axis correction for the LEFT stick — fixes pads that read mirrored/rotated.
-            ToggleRow("Left Stick — Swap X/Y", ControllerMappings.stickSwapXY(true),
-                description = "Swap the left stick's horizontal and vertical axes (for a stick that reads rotated 90°).") {
-                ControllerMappings.setStickSwapXY(true, it); refreshToken.value++
-            }
-            SettingsDivider()
-            ToggleRow("Left Stick — Invert X", ControllerMappings.stickInvertX(true),
-                description = "Mirror the left stick horizontally — fixes \"left is right\".") {
-                ControllerMappings.setStickInvertX(true, it); refreshToken.value++
-            }
-            SettingsDivider()
-            ToggleRow("Left Stick — Invert Y", ControllerMappings.stickInvertY(true),
-                description = "Mirror the left stick vertically — fixes \"down is up\".") {
-                ControllerMappings.setStickInvertY(true, it); refreshToken.value++
-            }
-            SettingsDivider()
-            SegmentedRow(
-                label = "Right Stick",
-                options = stickOpts,
-                selectedIndex = ControllerMappings.rightStickMode(editPlayer.value).ordinal,
-                description = "What the right analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
-                onChange = {
-                    ControllerMappings.setRightStickMode(ControllerMappings.StickMode.values()[it], editPlayer.value)
-                    refreshToken.value++
-                },
-            )
-            SettingsDivider()
-            if (ControllerMappings.rightStickMode(editPlayer.value) == ControllerMappings.StickMode.CUSTOM) {
-                ControllerMappings.StickDir.values().forEach { dir ->
-                    StickDirPickerRow(leftStick = false, dir = dir, player = editPlayer.value, onChanged = { refreshToken.value++ })
-                    SettingsDivider()
-                }
-            }
-            // Axis correction for the RIGHT stick — e.g. the tester's "down is up, left is right".
-            ToggleRow("Right Stick — Swap X/Y", ControllerMappings.stickSwapXY(false),
-                description = "Swap the right stick's horizontal and vertical axes (for a stick that reads rotated 90°).") {
-                ControllerMappings.setStickSwapXY(false, it); refreshToken.value++
-            }
-            SettingsDivider()
-            ToggleRow("Right Stick — Invert X", ControllerMappings.stickInvertX(false),
-                description = "Mirror the right stick horizontally — fixes \"left is right\".") {
-                ControllerMappings.setStickInvertX(false, it); refreshToken.value++
-            }
-            SettingsDivider()
-            ToggleRow("Right Stick — Invert Y", ControllerMappings.stickInvertY(false),
-                description = "Mirror the right stick vertically — fixes \"down is up\".") {
-                ControllerMappings.setStickInvertY(false, it); refreshToken.value++
-            }
-            SettingsDivider()
-            ToggleRow(
-                "D-pad acts as Left Stick",
-                ControllerMappings.dpadAsLeftStick(),
-                description = "Make the physical D-pad drive the left analog stick (full deflection) so it works in games that only read the analog stick. The D-pad stops sending digital presses while this is on.",
+                    }
+                    .controllerFocusable(
+                        controllerId = "pad-test-rumble",
+                        onConfirm = {
+                            NativeApp.testRumble(editPlayer.value)
+                            android.widget.Toast.makeText(
+                                ctx, NativeApp.rumbleStatusForPort(editPlayer.value),
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                        },
+                    )
+                    .padding(horizontal = 6.dp),
+                contentAlignment = Alignment.CenterStart,
             ) {
-                ControllerMappings.setDpadAsLeftStick(it)
-                refreshToken.value++
+                Text(
+                    if (editPlayer.value == 0) "Test rumble — Player 1" else "Test rumble — Player 2",
+                    color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                )
             }
             SettingsDivider()
-            IntSliderRow(
-                label = "Stick Deadzone",
-                value = (ControllerMappings.stickDeadzone() * 100f).toInt(), // 0.0..0.4 -> 0..40
-                min = 0,
-                max = (ControllerMappings.STICK_DZ_MAX * 100f).toInt(),
-                description = "Fraction of physical analog travel ignored near center. Lower = stick responds sooner (handheld sticks have little range); 0 = none. Movement re-normalizes past it, so no jump.",
-                valueFormatter = { if (it == 0) "Off" else "${it}%" },
-                onChange = { ControllerMappings.setStickDeadzone(it / 100f); refreshToken.value++ },
-            )
-            SettingsDivider()
-            IntSliderRow(
-                label = "Stick Outer Deadzone",
-                value = (ControllerMappings.stickOuterDeadzone() * 100f).toInt(), // 0.0..0.4 -> 0..40
-                min = 0,
-                max = (ControllerMappings.STICK_OUTER_MAX * 100f).toInt(),
-                description = "Fraction of travel near the EDGE mapped to full output, so a stick that can't physically reach its corners still hits 100% (short-throw / handheld sticks like the Odin). 0 = off.",
-                valueFormatter = { if (it == 0) "Off" else "${it}%" },
-                onChange = { ControllerMappings.setStickOuterDeadzone(it / 100f); refreshToken.value++ },
-            )
-            SettingsDivider()
-            IntSliderRow(
-                label = "Stick Anti-Deadzone",
-                value = (ControllerMappings.stickAntiDeadzone() * 100f).toInt(), // 0.0..0.6 -> 0..60
-                min = 0,
-                max = (ControllerMappings.STICK_ANTIDZ_MAX * 100f).toInt(),
-                description = "Smallest output sent to the game, to cancel a game's OWN built-in stick deadzone (e.g. Cold Fear / Area 51 ignore the stick until ~45%, then aim jumps). Set near the game's deadzone so any stick movement responds immediately and the full travel maps smoothly above it. 0 = off.",
-                valueFormatter = { if (it == 0) "Off" else "${it}%" },
-                onChange = { ControllerMappings.setStickAntiDeadzone(it / 100f); refreshToken.value++ },
-            )
-            SettingsDivider()
-            IntSliderRow(
-                label = "Stick Sensitivity",
-                value = (ControllerMappings.stickSensitivity() * 20f).toInt(), // 0.5..2.0 -> 10..40
-                min = 10,
-                max = 40,
-                description = "Linear scale on the physical analog sticks (native Analog + Custom analog directions). Under 100% = finer/slower aim, over 100% = faster.",
-                valueFormatter = { "${it * 5}%" },
-                onChange = { ControllerMappings.setStickSensitivity(it / 20f); refreshToken.value++ },
-            )
-            SettingsDivider()
-            IntSliderRow(
-                label = "Stick Acceleration",
-                value = (ControllerMappings.stickAcceleration() * 10f).toInt(), // 0.0..2.0 -> 0..20
-                min = 0,
-                max = 20,
-                description = "Non-linear response curve: small tilts stay precise for aiming, full tilt ramps up to full speed. 0 = linear (off); higher = more curve.",
-                valueFormatter = { if (it == 0) "Off (linear)" else "+%.1f".format(it / 10f) },
-                onChange = { ControllerMappings.setStickAcceleration(it / 10f); refreshToken.value++ },
-            )
-            SettingsDivider()
         }
-        ControllerMappings.actions.forEach { action ->
-            val physical = ControllerMappings.physicalFor(action, editPlayer.value)
-            PadBindingRow(
-                action = action,
-                physical = physical,
-                capturing = capture.value == action,
-                onClick = { capture.value = action },
-            )
-            SettingsDivider()
-        }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(30.dp)
-                .background(rowAura())
-                .clickable {
-                    ControllerMappings.reset(editPlayer.value)
-                    capture.value = null
-                    refreshToken.value++
-                }
-                .controllerFocusable(
-                    controllerId = "pad-reset",
-                    onConfirm = {
-                        ControllerMappings.reset(editPlayer.value)
-                        capture.value = null
+        CollapsibleSection("Analog Sticks", initiallyExpanded = false) {
+            // Analog stick remapping — make a physical stick act as the D-pad or the
+            // face buttons (great for fighting games on analog-centric controllers).
+            run {
+                val stickOpts = ControllerMappings.StickMode.values().map { it.label }
+                SegmentedRow(
+                    label = "Left Stick",
+                    options = stickOpts,
+                    selectedIndex = ControllerMappings.leftStickMode(editPlayer.value).ordinal,
+                    description = "What the left analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
+                    onChange = {
+                        ControllerMappings.setLeftStickMode(ControllerMappings.StickMode.values()[it], editPlayer.value)
                         refreshToken.value++
                     },
                 )
-                .padding(horizontal = 6.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                if (editPlayer.value == 0) "Reset Player 1 Mappings" else "Reset Player 2 Mappings",
-                color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                SettingsDivider()
+                if (ControllerMappings.leftStickMode(editPlayer.value) == ControllerMappings.StickMode.CUSTOM) {
+                    ControllerMappings.StickDir.values().forEach { dir ->
+                        StickDirPickerRow(leftStick = true, dir = dir, player = editPlayer.value, onChanged = { refreshToken.value++ })
+                        SettingsDivider()
+                    }
+                }
+                // Axis correction for the LEFT stick — fixes pads that read mirrored/rotated.
+                ToggleRow("Left Stick — Swap X/Y", ControllerMappings.stickSwapXY(true),
+                    description = "Swap the left stick's horizontal and vertical axes (for a stick that reads rotated 90°).") {
+                    ControllerMappings.setStickSwapXY(true, it); refreshToken.value++
+                }
+                SettingsDivider()
+                ToggleRow("Left Stick — Invert X", ControllerMappings.stickInvertX(true),
+                    description = "Mirror the left stick horizontally — fixes \"left is right\".") {
+                    ControllerMappings.setStickInvertX(true, it); refreshToken.value++
+                }
+                SettingsDivider()
+                ToggleRow("Left Stick — Invert Y", ControllerMappings.stickInvertY(true),
+                    description = "Mirror the left stick vertically — fixes \"down is up\".") {
+                    ControllerMappings.setStickInvertY(true, it); refreshToken.value++
+                }
+                SettingsDivider()
+                SegmentedRow(
+                    label = "Right Stick",
+                    options = stickOpts,
+                    selectedIndex = ControllerMappings.rightStickMode(editPlayer.value).ordinal,
+                    description = "What the right analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
+                    onChange = {
+                        ControllerMappings.setRightStickMode(ControllerMappings.StickMode.values()[it], editPlayer.value)
+                        refreshToken.value++
+                    },
+                )
+                SettingsDivider()
+                if (ControllerMappings.rightStickMode(editPlayer.value) == ControllerMappings.StickMode.CUSTOM) {
+                    ControllerMappings.StickDir.values().forEach { dir ->
+                        StickDirPickerRow(leftStick = false, dir = dir, player = editPlayer.value, onChanged = { refreshToken.value++ })
+                        SettingsDivider()
+                    }
+                }
+                // Axis correction for the RIGHT stick — e.g. the tester's "down is up, left is right".
+                ToggleRow("Right Stick — Swap X/Y", ControllerMappings.stickSwapXY(false),
+                    description = "Swap the right stick's horizontal and vertical axes (for a stick that reads rotated 90°).") {
+                    ControllerMappings.setStickSwapXY(false, it); refreshToken.value++
+                }
+                SettingsDivider()
+                ToggleRow("Right Stick — Invert X", ControllerMappings.stickInvertX(false),
+                    description = "Mirror the right stick horizontally — fixes \"left is right\".") {
+                    ControllerMappings.setStickInvertX(false, it); refreshToken.value++
+                }
+                SettingsDivider()
+                ToggleRow("Right Stick — Invert Y", ControllerMappings.stickInvertY(false),
+                    description = "Mirror the right stick vertically — fixes \"down is up\".") {
+                    ControllerMappings.setStickInvertY(false, it); refreshToken.value++
+                }
+                SettingsDivider()
+                ToggleRow(
+                    "D-pad acts as Left Stick",
+                    ControllerMappings.dpadAsLeftStick(),
+                    description = "Make the physical D-pad drive the left analog stick (full deflection) so it works in games that only read the analog stick. The D-pad stops sending digital presses while this is on.",
+                ) {
+                    ControllerMappings.setDpadAsLeftStick(it)
+                    refreshToken.value++
+                }
+                SettingsDivider()
+                IntSliderRow(
+                    label = "Stick Deadzone",
+                    value = (ControllerMappings.stickDeadzone() * 100f).toInt(), // 0.0..0.4 -> 0..40
+                    min = 0,
+                    max = (ControllerMappings.STICK_DZ_MAX * 100f).toInt(),
+                    description = "Fraction of physical analog travel ignored near center. Lower = stick responds sooner (handheld sticks have little range); 0 = none. Movement re-normalizes past it, so no jump.",
+                    valueFormatter = { if (it == 0) "Off" else "${it}%" },
+                    onChange = { ControllerMappings.setStickDeadzone(it / 100f); refreshToken.value++ },
+                )
+                SettingsDivider()
+                IntSliderRow(
+                    label = "Stick Outer Deadzone",
+                    value = (ControllerMappings.stickOuterDeadzone() * 100f).toInt(), // 0.0..0.4 -> 0..40
+                    min = 0,
+                    max = (ControllerMappings.STICK_OUTER_MAX * 100f).toInt(),
+                    description = "Fraction of travel near the EDGE mapped to full output, so a stick that can't physically reach its corners still hits 100% (short-throw / handheld sticks like the Odin). 0 = off.",
+                    valueFormatter = { if (it == 0) "Off" else "${it}%" },
+                    onChange = { ControllerMappings.setStickOuterDeadzone(it / 100f); refreshToken.value++ },
+                )
+                SettingsDivider()
+                IntSliderRow(
+                    label = "Stick Anti-Deadzone",
+                    value = (ControllerMappings.stickAntiDeadzone() * 100f).toInt(), // 0.0..0.6 -> 0..60
+                    min = 0,
+                    max = (ControllerMappings.STICK_ANTIDZ_MAX * 100f).toInt(),
+                    description = "Smallest output sent to the game, to cancel a game's OWN built-in stick deadzone (e.g. Cold Fear / Area 51 ignore the stick until ~45%, then aim jumps). Set near the game's deadzone so any stick movement responds immediately and the full travel maps smoothly above it. 0 = off.",
+                    valueFormatter = { if (it == 0) "Off" else "${it}%" },
+                    onChange = { ControllerMappings.setStickAntiDeadzone(it / 100f); refreshToken.value++ },
+                )
+                SettingsDivider()
+                IntSliderRow(
+                    label = "Stick Sensitivity",
+                    value = (ControllerMappings.stickSensitivity() * 20f).toInt(), // 0.5..2.0 -> 10..40
+                    min = 10,
+                    max = 40,
+                    description = "Linear scale on the physical analog sticks (native Analog + Custom analog directions). Under 100% = finer/slower aim, over 100% = faster.",
+                    valueFormatter = { "${it * 5}%" },
+                    onChange = { ControllerMappings.setStickSensitivity(it / 20f); refreshToken.value++ },
+                )
+                SettingsDivider()
+                IntSliderRow(
+                    label = "Stick Acceleration",
+                    value = (ControllerMappings.stickAcceleration() * 10f).toInt(), // 0.0..2.0 -> 0..20
+                    min = 0,
+                    max = 20,
+                    description = "Non-linear response curve: small tilts stay precise for aiming, full tilt ramps up to full speed. 0 = linear (off); higher = more curve.",
+                    valueFormatter = { if (it == 0) "Off (linear)" else "+%.1f".format(it / 10f) },
+                    onChange = { ControllerMappings.setStickAcceleration(it / 10f); refreshToken.value++ },
+                )
+                SettingsDivider()
+            }
+        }
+        CollapsibleSection("Button Mapping", initiallyExpanded = true) {
+            ControllerMappings.actions.forEach { action ->
+                val physical = ControllerMappings.physicalFor(action, editPlayer.value)
+                PadBindingRow(
+                    action = action,
+                    physical = physical,
+                    capturing = capture.value == action,
+                    onClick = { capture.value = action },
+                    onClear = {
+                        ControllerMappings.clearAction(action, editPlayer.value)
+                        if (capture.value == action) capture.value = null
+                        refreshToken.value++
+                    },
+                )
+                SettingsDivider()
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(30.dp)
+                    .background(rowAura())
+                    .clickable {
+                        ControllerMappings.reset(editPlayer.value)
+                        capture.value = null
+                        refreshToken.value++
+                    }
+                    .controllerFocusable(
+                        controllerId = "pad-reset",
+                        onConfirm = {
+                            ControllerMappings.reset(editPlayer.value)
+                            capture.value = null
+                            refreshToken.value++
+                        },
+                    )
+                    .padding(horizontal = 6.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(
+                    if (editPlayer.value == 0) "Reset Player 1 Mappings" else "Reset Player 2 Mappings",
+                    color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        CollapsibleSection("On-Screen Controls", initiallyExpanded = false) {
+            // Controller hotkeys now live in their own dedicated "Hotkeys" tab
+            // (see HotkeysTab) so they're easier to find than buried under Pad.
+            SettingsDivider()
+            IntSliderRow(
+                label = "On-screen controls",
+                value = TouchControls.visibilityMode.value,
+                min = 0,
+                max = 11,
+                description = "On-screen touch buttons. Never = always hidden (for physical-controls devices — also hides the settings cog so nothing overlaps R1). 1–10s = auto-hide after that long without a touch. Auto = show on touch, hide when you use a controller.",
+                valueFormatter = { when (it) { 0 -> "Never"; 11 -> "Auto"; else -> "${it}s" } },
+                onChange = { TouchControls.setVisibilityMode(it) },
             )
         }
-
-        // Controller hotkeys now live in their own dedicated "Hotkeys" tab
-        // (see HotkeysTab) so they're easier to find than buried under Pad.
-        SettingsDivider()
-        IntSliderRow(
-            label = "On-screen controls",
-            value = TouchControls.visibilityMode.value,
-            min = 0,
-            max = 11,
-            description = "On-screen touch buttons. Never = always hidden (for physical-controls devices — also hides the settings cog so nothing overlaps R1). 1–10s = auto-hide after that long without a touch. Auto = show on touch, hide when you use a controller.",
-            valueFormatter = { when (it) { 0 -> "Never"; 11 -> "Auto"; else -> "${it}s" } },
-            onChange = { TouchControls.setVisibilityMode(it) },
-        )
     }
 }
 
@@ -450,12 +565,65 @@ private fun StickDirPickerRow(
     }
 }
 
+/** Dialog to choose which pad buttons a macro fires together. */
+@Composable
+private fun MacroConfigDialog(
+    macroId: TouchButtonId,
+    onSaved: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val selected = remember(macroId) {
+        mutableStateListOf<TouchButtonId>().apply { addAll(TouchControls.macroButtons(macroId)) }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Configure ${macroId.label}", color = Color.White, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(Modifier.verticalScroll(remember { ScrollState(0) })) {
+                Text(
+                    "Tap the buttons this macro should press together.",
+                    color = Color(0xFFBBBBBB), fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                TouchControls.macroAssignableButtons.forEach { b ->
+                    val on = b in selected
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(36.dp)
+                            .clickable { if (on) selected.remove(b) else selected.add(b) }
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            if (on) "☑" else "☐",
+                            color = if (on) Colors.pasx2_blue else Color(0xFF888888),
+                            fontSize = 16.sp,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(b.label, color = Color.White, fontSize = 14.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                TouchControls.setMacroButtons(macroId, selected.toList())
+                onSaved()
+                onDismiss()
+            }) { Text("SAVE") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("CANCEL") } },
+    )
+}
+
 @Composable
 private fun PadBindingRow(
     action: ControllerMappings.Action,
     physical: Int,
     capturing: Boolean,
     onClick: () -> Unit,
+    onClear: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -472,6 +640,19 @@ private fun PadBindingRow(
     ) {
         Text(action.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.weight(1f))
+        // "Clear" unbinds the button (leaves it blank, free to assign as a hotkey) —
+        // mirrors the Hotkeys tab. Shown only when bound and not mid-capture.
+        if (!capturing && physical != android.view.KeyEvent.KEYCODE_UNKNOWN) {
+            Text(
+                "Clear",
+                color = Color(0xFFFF6B6B),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .clickable(onClick = onClear)
+                    .padding(end = 10.dp),
+            )
+        }
         Text(
             if (capturing) "Press a button..." else ControllerMappings.labelForKey(physical),
             color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
