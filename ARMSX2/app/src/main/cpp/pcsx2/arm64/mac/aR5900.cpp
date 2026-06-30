@@ -2104,15 +2104,23 @@ static bool recTranslateOp(u32 op)
 				default:   return false;
 			}
 
-		// MMI — second-pipeline multiply/divide (Phase 3.5). Other MMI ops (SIMD,
-		// MFHI1/MFLO1, ...) are not yet implemented and fall through to false.
+		// MMI — second-pipeline multiply/divide (Phase 3.5) + multiply-accumulate
+		// and the pipeline-1 HI/LO moves. Remaining MMI ops fall through to false.
 		case 0x1C:
 			switch (funct)
 			{
+				case 0x00: armEmitMADD(rd, rs, rt); return true;   // MADD
+				case 0x01: armEmitMADDU(rd, rs, rt); return true;  // MADDU
+				case 0x10: armEmitMFHI1(rd); return true;          // MFHI1
+				case 0x11: armEmitMTHI1(rs); return true;          // MTHI1
+				case 0x12: armEmitMFLO1(rd); return true;          // MFLO1
+				case 0x13: armEmitMTLO1(rs); return true;          // MTLO1
 				case 0x18: armEmitMULT1(rd, rs, rt); return true;
 				case 0x19: armEmitMULTU1(rd, rs, rt); return true;
 				case 0x1A: armEmitDIV1(rs, rt); return true;
 				case 0x1B: armEmitDIVU1(rs, rt); return true;
+				case 0x20: armEmitMADD1(rd, rs, rt); return true;  // MADD1
+				case 0x21: armEmitMADDU1(rd, rs, rt); return true; // MADDU1
 				// Direct tbl_MMI entries (indexed by funct = op & 0x3F).
 				case 0x04: armEmitPLZCW(rd, rs); return true;
 				// MMI0/1/2/3 SIMD sub-groups (Phase 5.4); sub-op in `sa`.
@@ -2429,6 +2437,14 @@ static bool recEmitBranch(u32 op, u32 branchpc)
 			}
 			return false; // BC2FL/BC2TL (likely) + COP2 transfer/macro ops (straight-line)
 
+		case 0x10: // COP0: BC0 branches live under rs==0x08 (BC); rt selects tf/likely.
+			if (rs == 0x08)
+			{
+				if (rt == 0x00) { armEmitBC0F(btarget, fallthrough); return true; }  // BC0F
+				if (rt == 0x01) { armEmitBC0T(btarget, fallthrough); return true; }  // BC0T
+			}
+			return false; // BC0FL/BC0TL (likely) + COP0 transfer/TLB/DI ops (handled elsewhere)
+
 		default: return false;
 	}
 }
@@ -2567,6 +2583,8 @@ static bool recIsHandledBranch(u32 op)
 			return rs == 0x08 && (rt == 0x00 || rt == 0x01);
 		case 0x12: // COP2: only BC2F/BC2T (rs==BC, rt 0/1); all other COP2 ops are straight-line/macro.
 			return rs == 0x08 && (rt == 0x00 || rt == 0x01);
+		case 0x10: // COP0: only BC0F/BC0T (rs==BC, rt 0/1); MFC0/MTC0/TLB/DI handled elsewhere.
+			return rs == 0x08 && (rt == 0x00 || rt == 0x01);
 		default:
 			return false;
 	}
@@ -2594,6 +2612,8 @@ static bool recIsLikelyBranch(u32 op)
 			return rs == 0x08 && (rt == 0x02 || rt == 0x03);
 		case 0x12: // COP2: BC2FL / BC2TL
 			return rs == 0x08 && (rt == 0x02 || rt == 0x03);
+		case 0x10: // COP0: BC0FL / BC0TL
+			return rs == 0x08 && (rt == 0x02 || rt == 0x03);
 		default:
 			return false;
 	}
@@ -2603,6 +2623,24 @@ static bool recIsLikelyBranch(u32 op)
 static bool recIsCop0DI(u32 op)
 {
 	return (op >> 26) == 0x10 && ((op >> 21) & 0x1f) == 0x10 && (op & 0x3f) == 0x39;
+}
+
+// COP0 EI (enable interrupts, funct 0x38) / ERET (exception return, funct 0x18) —
+// CO ops (rs==0x10). x86 compiles both via recBranchCall: end the block, run the
+// interpreter handler, then event-test + dispatch (EI so a now-unmasked pending IRQ
+// is serviced; ERET because it writes cpuRegs.pc). recRecompile handles them that way
+// instead of single-stepping (the top EE interpreter fallback after the BC0/MADD work).
+static bool recIsCop0EI(u32 op)
+{
+	return (op >> 26) == 0x10 && ((op >> 21) & 0x1f) == 0x10 && (op & 0x3f) == 0x38;
+}
+static bool recIsCop0ERET(u32 op)
+{
+	return (op >> 26) == 0x10 && ((op >> 21) & 0x1f) == 0x10 && (op & 0x3f) == 0x18;
+}
+static bool recIsCop0EIorERET(u32 op)
+{
+	return recIsCop0EI(op) || recIsCop0ERET(op);
 }
 
 // MIPS trap ops: SPECIAL T{GE,GEU,LT,LTU,EQ,NE} (funct 0x30-0x34,0x36) and REGIMM
@@ -2813,6 +2851,12 @@ static u32 recBranchConditionReads(u32 op)
 		case 0x06: case 0x07: return (1u << rs);      // BLEZ/BGTZ
 		case 0x01: // REGIMM: BLTZ/BGEZ only — the AL forms write a link register.
 			return (rt == 0x00 || rt == 0x01) ? (1u << rs) : 0xffffffffu;
+		case 0x10: // COP0: BC0F/BC0T read CPCOND0 (DMAC STAT/PCR), not GPRs -> 0 GPR reads.
+			// Lets the DMA-wait spin qualify as a wait-loop so the existing fast-forward
+			// idle-skips it (the big win). CPCOND0 flips only at event-scheduled DMA
+			// completion, so the skip lands exactly at the next event. Gated by the
+			// WaitLoop speedhack (BC0 is left conditional in recBranchIsUnconditional).
+			return (rs == 0x08 && (rt == 0x00 || rt == 0x01)) ? 0u : 0xffffffffu;
 		default: return 0xffffffffu;                  // anything else: not a candidate
 	}
 }
@@ -3071,6 +3115,26 @@ static bool recOpNeedsCycleFlush(u32 op)
 		return !recVUMacroIsMode0(op);
 	}
 	return (op >> 26) == OP_LQC2 || (op >> 26) == OP_SQC2;
+}
+
+// True for MFC0/MTC0 of the Count (rd 9) or PERF (rd 25) registers — the COP0 ops the EE
+// rec previously single-stepped (recTranslateOpOptimized returns false for them) because
+// they read a live cpuRegs.cycle this rec only flushes at the block tail. Games busy-poll
+// Count for timing, so the single-step path can dominate EE (Jackie Chan Adventures: ~80%
+// of EE fallbacks). recRecompile handles these by committing the block's accumulated cycles
+// before an INLINE interp call (so the read is live), instead of the expensive single-step.
+// Per-op commit also fixes the historic "two MFC0 Count in one block read the same stale
+// value -> games lock up" hazard: each read now advances cpuRegs.cycle. Excludes BC0 / ERET
+// / EI / DI / WAIT, which still single-step (they write PC or gate interrupts).
+static bool recCop0NeedsLiveCycle(u32 op)
+{
+	if ((op >> 26) != 0x10)
+		return false; // COP0
+	const u32 rs = (op >> 21) & 0x1f;
+	if (rs != 0x00 && rs != 0x04)
+		return false; // MFC0 / MTC0 only (BC0 rs==0x08 + C0 rs==0x10 keep their paths)
+	const u32 rd = (op >> 11) & 0x1f;
+	return (rd == 9 || rd == 25); // Count / PERF
 }
 
 // CALLMS (COP2 SPECIAL1 funct 0x38) / CALLMSR (0x39) — x86's only INTERPRETATE_COP2_FUNC ops
@@ -4221,6 +4285,63 @@ static void recRecompile(u32 startpc)
 			}
 			else if (g_pCurInstInfo->info & EEINST_COP2_SYNC_VU0)
 				raw_cycles = 0;
+		}
+
+		// MFC0/MTC0 of Count(rd9)/PERF(rd25): commit the block's cycles (incl. this op) so
+		// the read is live, clear the accumulator, then INLINE-interp in-block — instead of
+		// the expensive single-step path (these were ~80% of Jackie Chan's EE fallbacks, a
+		// Count busy-poll). Same commit-then-inline shape as the CALLMS launch above; the
+		// per-op commit makes consecutive Count reads see an advancing cpuRegs.cycle (no
+		// stale-value lock-up). See recCop0NeedsLiveCycle + the COP0 note in recTranslateOpOptimized.
+		if (recCop0NeedsLiveCycle(op))
+		{
+			raw_cycles += eeOpCycles(op);
+			recEmitCommitBlockCycles(raw_cycles);
+			raw_cycles = 0;
+			// Flush + kill the GPR register cache / const tracking before the inline interp,
+			// exactly like the trap path (recCacheFlushAll/KillAll/ConstKillAll above): MTC0
+			// reads cpuRegs.GPR.r[rt] from memory (must be authoritative) and MFC0 WRITES it —
+			// a stale cached copy in a callee-saved host reg would survive the C call and shadow
+			// the Count value, silently breaking the very poll loop this targets.
+			recCacheFlushAll(cache_state);
+			recCacheKillAll(cache_state);
+			recConstKillAll(const_state);
+			recEmitInterpInline(op);
+			waitloop_possible = false; // inline live-cycle op — not a wait-loop body
+			pc += 4;
+			endpc = pc;
+			if (++compiled >= MAX_BLOCK_INSTS)
+			{
+				recEmitWritePc(pc);
+				known_dispatch_pc = true;
+				dispatch_pc = pc;
+				break;
+			}
+			continue;
+		}
+
+		// COP0 EI / ERET (CO ops, rs==0x10; funct 0x38 / 0x18). Faithful to x86
+		// recEI/recERET (recBranchCall): run the interpreter handler in-block, then END
+		// the block so the tail event-tests + dispatches from cpuRegs.pc. EI: a now-
+		// unmasked pending IRQ gets serviced by that event test (x86 "must branch after
+		// enabling interrupts"); ERET: it writes cpuRegs.pc, so the dispatch must read it.
+		// Like the handled-branch path, the block's cycles ride in raw_cycles and the
+		// post-loop commits them (x86's iBranchTest also commits AFTER the Interp call) —
+		// no early commit, so no spurious tail +1. Replaces the per-op single-step (the
+		// top EE interpreter fallback after the BC0/MADD work).
+		if (recIsCop0EIorERET(op))
+		{
+			raw_cycles += eeOpCycles(op);
+			recCacheFlushAll(cache_state);
+			recCacheKillAll(cache_state);
+			recConstKillAll(const_state);
+			if (!recIsCop0ERET(op))
+				recEmitWritePc(pc + 4); // EI doesn't write PC; resume after it unless the event test diverts
+			recEmitInterpInline(op);    // Interp::EI sets Status.EIE / Interp::ERET sets cpuRegs.pc
+			waitloop_possible = false;
+			known_dispatch_pc = false;  // dispatch from cpuRegs.pc: an IRQ raised by the tail event test, or ERET's new pc
+			endpc = pc + 4;
+			break;
 		}
 
 		// Straight-line op we can codegen? (Generators decode from `op` directly;
