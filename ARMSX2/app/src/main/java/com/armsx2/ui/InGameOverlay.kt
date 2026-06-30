@@ -356,6 +356,141 @@ object InGameOverlay {
         }
     }
 
+    /** Tabs that have settings to reset via the per-tab Reset button. PlayingNow has
+     *  only session actions; Skins/Info are managed/read-only. */
+    private fun currentTabHasReset(): Boolean = when (currentTab.value) {
+        Tab.PlayingNow, Tab.Skins, Tab.Info -> false
+        else -> true
+    }
+
+    /** Reset ONLY the current tab's settings, leaving the other tabs untouched. The
+     *  common ask: "let me reset the Pad tab without wiping all my game settings."
+     *  Settings-backed tabs reset just their own fields — to Settings() defaults in
+     *  Global scope, or to the resolved-global value in Game scope (so the game
+     *  re-inherits global for those fields only). Pad / Hotkeys / Overlay also reset
+     *  their GLOBAL-ONLY external state (stick feel + rumble, hotkeys, UI scale), which
+     *  has no per-game tier — same as resetCurrentScope handles them. Applies live like
+     *  any edit. NOTE: keep each tab's field list in sync with its *Tab.kt composable. */
+    fun resetCurrentTab() {
+        val base = if (settingsScope.value == SettingsScope.Game && currentSerial.value != null)
+            ConfigStore.loadGlobal() else Settings()
+        val cur = settingsState.value
+        val updated: Settings? = when (currentTab.value) {
+            Tab.Performance -> cur.copy(
+                eeClampMode = base.eeClampMode, eeCycleRate = base.eeCycleRate,
+                eeCycleSkip = base.eeCycleSkip, eeFpuRoundMode = base.eeFpuRoundMode,
+                enableFastBoot = base.enableFastBoot, enableGameFixes = base.enableGameFixes,
+                fastCDVD = base.fastCDVD, fpsLimit = base.fpsLimit, frameSkip = base.frameSkip,
+                framerateNtsc = base.framerateNtsc, frameratePal = base.frameratePal,
+                intcStat = base.intcStat, mtvu = base.mtvu,
+                nominalSpeedPercent = base.nominalSpeedPercent,
+                skipDuplicateFrames = base.skipDuplicateFrames, vu0RoundMode = base.vu0RoundMode,
+                vu1Instant = base.vu1Instant, vu1RoundMode = base.vu1RoundMode,
+                vuClampMode = base.vuClampMode, vuDeferredWrites = base.vuDeferredWrites,
+                vuFlagHack = base.vuFlagHack, vuNeonFusions = base.vuNeonFusions,
+                vuSkipStallSim = base.vuSkipStallSim, waitLoop = base.waitLoop,
+            )
+            Tab.Renderer -> cur.copy(
+                renderer = base.renderer,
+                accurateBlendingUnit = base.accurateBlendingUnit, adrenoFbFetch = base.adrenoFbFetch,
+                aspectRatio = base.aspectRatio, deinterlaceMode = base.deinterlaceMode,
+                dumpReplaceableTextures = base.dumpReplaceableTextures, gpuProfile = base.gpuProfile,
+                hardwareDownloadMode = base.hardwareDownloadMode, hwAa1 = base.hwAa1,
+                hwAat = base.hwAat, hwMipmap = base.hwMipmap, hwRov = base.hwRov,
+                loadTextureReplacements = base.loadTextureReplacements,
+                loadTextureReplacementsAsync = base.loadTextureReplacementsAsync,
+                maxAnisotropy = base.maxAnisotropy,
+                osdShowTextureReplacements = base.osdShowTextureReplacements,
+                precacheTextureReplacements = base.precacheTextureReplacements,
+                shadeBoost = base.shadeBoost, shadeBoostBrightness = base.shadeBoostBrightness,
+                shadeBoostContrast = base.shadeBoostContrast, shadeBoostGamma = base.shadeBoostGamma,
+                shadeBoostSaturation = base.shadeBoostSaturation, textureFiltering = base.textureFiltering,
+                texturePreloading = base.texturePreloading, triFilter = base.triFilter,
+                tvShader = base.tvShader, upscaleFloat = base.upscaleFloat, vsyncEnable = base.vsyncEnable,
+            )
+            Tab.Fixes -> cur.copy(
+                alignSprite = base.alignSprite, antiBlur = base.antiBlur, autoFlush = base.autoFlush,
+                autoFlushSw = base.autoFlushSw, bilinearUpscale = base.bilinearUpscale,
+                cpuClutRender = base.cpuClutRender, cpuFramebufferConversion = base.cpuFramebufferConversion,
+                cpuSpriteRenderBw = base.cpuSpriteRenderBw, cpuSpriteRenderLevel = base.cpuSpriteRenderLevel,
+                disableDepthEmulation = base.disableDepthEmulation,
+                disableFramebufferFetch = base.disableFramebufferFetch,
+                disableInterlaceOffset = base.disableInterlaceOffset,
+                disablePartialInvalidation = base.disablePartialInvalidation,
+                disableRenderFixes = base.disableRenderFixes, disableSafeFeatures = base.disableSafeFeatures,
+                disableShaderCache = base.disableShaderCache,
+                disableVertexShaderExpand = base.disableVertexShaderExpand, dithering = base.dithering,
+                drawBuffering = base.drawBuffering, estimateTextureRegion = base.estimateTextureRegion,
+                forceEvenSpritePosition = base.forceEvenSpritePosition,
+                gpuPaletteConversion = base.gpuPaletteConversion, gpuTargetClut = base.gpuTargetClut,
+                halfPixelOffset = base.halfPixelOffset, hwAccurateAlphaTest = base.hwAccurateAlphaTest,
+                integerScaling = base.integerScaling, limit24BitDepth = base.limit24BitDepth,
+                manualUserHacks = base.manualUserHacks, mergeSprite = base.mergeSprite,
+                mipmapSw = base.mipmapSw, nativeScaling = base.nativeScaling,
+                overrideTextureBarriers = base.overrideTextureBarriers, preloadFrameData = base.preloadFrameData,
+                readTargetsWhenClosing = base.readTargetsWhenClosing, roundSprite = base.roundSprite,
+                screenOffsets = base.screenOffsets, showOverscan = base.showOverscan,
+                skipDrawEnd = base.skipDrawEnd, skipDrawStart = base.skipDrawStart,
+                spinCpuReadbacks = base.spinCpuReadbacks, spinGpuReadbacks = base.spinGpuReadbacks,
+                swThreads = base.swThreads, swThreadsHeight = base.swThreadsHeight,
+                syncToHostRefresh = base.syncToHostRefresh, textureInsideRt = base.textureInsideRt,
+                textureOffsetX = base.textureOffsetX, textureOffsetY = base.textureOffsetY,
+                unscaledPaletteDraw = base.unscaledPaletteDraw, useBlitSwapChain = base.useBlitSwapChain,
+                vsyncQueueSize = base.vsyncQueueSize,
+            )
+            Tab.Audio -> cur.copy(
+                audioBufferMs = base.audioBufferMs, audioFastForwardVolume = base.audioFastForwardVolume,
+                audioMuted = base.audioMuted, audioOutputLatencyMs = base.audioOutputLatencyMs,
+                audioTimeStretch = base.audioTimeStretch, audioVolume = base.audioVolume,
+                spu2NeonReverb = base.spu2NeonReverb,
+            )
+            Tab.Patches -> cur.copy(
+                enableCheats = base.enableCheats,
+                enableNoInterlacingPatches = base.enableNoInterlacingPatches,
+                enablePatches = base.enablePatches, enableWideScreenPatches = base.enableWideScreenPatches,
+                hostFs = base.hostFs,
+            )
+            Tab.Network -> cur.copy(
+                dev9AutoGateway = base.dev9AutoGateway, dev9AutoMask = base.dev9AutoMask,
+                dev9Dns1 = base.dev9Dns1, dev9Dns2 = base.dev9Dns2, dev9EthApi = base.dev9EthApi,
+                dev9EthDevice = base.dev9EthDevice, dev9EthEnable = base.dev9EthEnable,
+                dev9EthLogDhcp = base.dev9EthLogDhcp, dev9EthLogDns = base.dev9EthLogDns,
+                dev9Gateway = base.dev9Gateway, dev9HddEnable = base.dev9HddEnable,
+                dev9HddFile = base.dev9HddFile, dev9InterceptDhcp = base.dev9InterceptDhcp,
+                dev9Mask = base.dev9Mask, dev9ModeDns1 = base.dev9ModeDns1,
+                dev9ModeDns2 = base.dev9ModeDns2, dev9Ps2Ip = base.dev9Ps2Ip,
+            )
+            Tab.Recompiler -> cur.copy(
+                enableFastmem = base.enableFastmem, recEE = base.recEE, recIOP = base.recIOP,
+                recVU0 = base.recVU0, recVU1 = base.recVU1,
+            )
+            Tab.Overlay -> {
+                UiScale.resetToDefaults()
+                cur.copy(
+                    osdShowCpu = base.osdShowCpu, osdShowFps = base.osdShowFps,
+                    osdShowFrameTimes = base.osdShowFrameTimes, osdShowGpu = base.osdShowGpu,
+                    osdShowGsStats = base.osdShowGsStats, osdShowHardwareInfo = base.osdShowHardwareInfo,
+                    osdShowResolution = base.osdShowResolution, osdShowSpeed = base.osdShowSpeed,
+                    osdShowVersion = base.osdShowVersion, osdShowVps = base.osdShowVps,
+                )
+            }
+            Tab.Pad -> {
+                // Stick feel/deadzone/modes + rumble live OUTSIDE Settings (Main.prefs);
+                // mirror what resetCurrentScope does for the pad. Button binds + macros
+                // keep their own per-row resets, so this won't nuke careful mappings.
+                com.armsx2.input.ControllerMappings.resetTunables()
+                com.armsx2.input.ControllerMappings.setRumbleEnabled(true)
+                null
+            }
+            Tab.Hotkeys -> {
+                com.armsx2.input.ControllerMappings.clearAllHotkeys()
+                null
+            }
+            else -> null // PlayingNow / Skins / Info — nothing persisted to reset
+        }
+        if (updated != null) saveSettings(updated)
+    }
+
     private fun anyOsdElementEnabled(settings: Settings): Boolean =
         settings.osdShowFps ||
             settings.osdShowVps ||
@@ -780,6 +915,21 @@ object InGameOverlay {
 
     private fun openLoadStates() {
         enterState(if (hardcoreOn.value) State.HardcoreSaveStateBlocked else State.LoadStateSlots)
+    }
+
+    /** Open the pause overlay straight to the Save-State slot picker — used by the
+     *  on-screen SAVE button so the user picks which slot to save to (open() resets
+     *  to Root, so we enter the picker state right after). */
+    fun openSaveStatePicker() {
+        open()
+        openSaveStates()
+    }
+
+    /** Open the pause overlay straight to the Load-State slot picker — used by the
+     *  on-screen LOAD button so the user picks which slot to load from. */
+    fun openLoadStatePicker() {
+        open()
+        openLoadStates()
     }
 
     private fun swapDisc() {
@@ -2024,42 +2174,80 @@ object InGameOverlay {
         }
     }
 
-    /** Scope-aware "reset to defaults" row, shown under the scope toggle. Global
-     *  scope resets all global settings to defaults; Game scope drops the current
-     *  game's overrides. Requires a confirming second tap to avoid accidents. */
+    /** Scope-aware "reset to defaults" row, shown under the scope toggle. Two buttons:
+     *  "Reset Tab" clears only the tab you're looking at (so e.g. resetting the Pad tab
+     *  no longer wipes every other game setting), and "Reset All"/"Reset Game" does the
+     *  whole-tier reset (the old behaviour). Each requires a confirming second tap;
+     *  arming one disarms the other. The per-tab button hides on tabs with nothing to
+     *  reset (Play/Skins/Info). */
     @Composable
     private fun ResetScopeButton() {
-        val armed = remember(currentTab.value, settingsScope.value, settingsOnly.value) {
+        val tabArmed = remember(currentTab.value, settingsScope.value, settingsOnly.value) {
+            mutableStateOf(false)
+        }
+        val allArmed = remember(currentTab.value, settingsScope.value, settingsOnly.value) {
             mutableStateOf(false)
         }
         val game = settingsScope.value == SettingsScope.Game && currentSerial.value != null
-        val label = when {
-            armed.value -> "Tap again to confirm reset"
-            game -> "Reset this game to global"
-            else -> "Reset global to defaults"
-        }
-        val act = {
-            if (armed.value) {
-                resetCurrentScope()
-                armed.value = false
-            } else {
-                armed.value = true
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (currentTabHasReset()) {
+                ResetChip(
+                    modifier = Modifier.weight(1f),
+                    id = "settings-reset-tab",
+                    label = if (tabArmed.value) "Tap to confirm" else "Reset Tab",
+                    armed = tabArmed.value,
+                ) {
+                    if (tabArmed.value) {
+                        resetCurrentTab(); tabArmed.value = false
+                    } else {
+                        tabArmed.value = true; allArmed.value = false
+                    }
+                }
+            }
+            ResetChip(
+                modifier = Modifier.weight(1f),
+                id = "settings-reset-all",
+                label = when {
+                    allArmed.value -> "Tap to confirm"
+                    game -> "Reset Game"
+                    else -> "Reset All"
+                },
+                armed = allArmed.value,
+            ) {
+                if (allArmed.value) {
+                    resetCurrentScope(); allArmed.value = false
+                } else {
+                    allArmed.value = true; tabArmed.value = false
+                }
             }
         }
+    }
+
+    /** One pill in the reset row. Red when armed (awaiting confirm tap). */
+    @Composable
+    private fun RowScope.ResetChip(
+        modifier: Modifier,
+        id: String,
+        label: String,
+        armed: Boolean,
+        onClick: () -> Unit,
+    ) {
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
+            modifier = modifier
                 .clip(RoundedCornerShape(4.dp))
                 .background(Color(0xFF1A1A1A))
                 .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(4.dp))
                 .height(20.dp)
-                .controllerFocusable("settings-reset", onConfirm = act)
-                .clickable(onClick = act),
+                .controllerFocusable(id, onConfirm = onClick)
+                .clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 label,
-                color = if (armed.value) Color(0xFFE53935) else Colors.pasx2_blue,
+                color = if (armed) Color(0xFFE53935) else Colors.pasx2_blue,
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
