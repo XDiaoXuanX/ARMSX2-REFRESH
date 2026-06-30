@@ -130,8 +130,18 @@ public:
 		VSSelector vs;
 		u8 pad[3];
 
-		__fi bool operator==(const ProgramSelector& p) const { return BitEqual(*this, p); }
-		__fi bool operator!=(const ProgramSelector& p) const { return !BitEqual(*this, p); }
+		// Compare ONLY the meaningful key fields, matching ProgramSelectorHash above
+		// (which hashes {vs.key, ps.key_hi, ps.key_lo}). BitEqual() memcmp'd all 32 bytes
+		// including this struct's uninitialized trailing/alignment padding, so two
+		// logically-identical selectors landed in the same hash bucket yet failed ==,
+		// making m_programs.find() miss every time. Result: the same shaders recompiled
+		// every frame (issue #243 — Jackie Chan Adventures: 142 unique shaders, 41k+
+		// recompiles, GS-thread pegged). Field compare is hash-consistent and padding-proof.
+		__fi bool operator==(const ProgramSelector& p) const
+		{
+			return vs.key == p.vs.key && ps.key_hi == p.ps.key_hi && ps.key_lo == p.ps.key_lo;
+		}
+		__fi bool operator!=(const ProgramSelector& p) const { return !(*this == p); }
 	};
 	static_assert(sizeof(ProgramSelector) == 32, "Program selector is 32 bytes");
 
