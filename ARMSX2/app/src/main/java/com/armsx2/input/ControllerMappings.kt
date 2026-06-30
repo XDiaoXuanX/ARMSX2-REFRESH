@@ -334,6 +334,14 @@ object ControllerMappings {
         Main.prefs.edit().putInt(playerPrefix(player) + KEY_PREFIX + action.id, physicalKeyCode).apply()
     }
 
+    /** Unbind a pad button: store KEYCODE_UNKNOWN — the same "unbound" sentinel the
+     *  analog-toggle action already uses by default. physicalFor() then returns UNKNOWN
+     *  (never matches a real key in targetForPhysical), labelForKey shows "Not set", and
+     *  the freed physical button can instead be assigned as an ARMSX2 hotkey. */
+    fun clearAction(action: Action, player: Int = 0) {
+        Main.prefs.edit().putInt(playerPrefix(player) + KEY_PREFIX + action.id, KeyEvent.KEYCODE_UNKNOWN).apply()
+    }
+
     fun reset(player: Int = 0) {
         val edit = Main.prefs.edit()
         actions.forEach { edit.remove(playerPrefix(player) + KEY_PREFIX + it.id) }
@@ -364,8 +372,12 @@ object ControllerMappings {
         stickBindTick.value++
     }
 
-    fun targetForPhysical(physicalKeyCode: Int, player: Int = 0): Int? =
-        actions.firstOrNull { physicalFor(it, player) == physicalKeyCode }?.targetKeyCode
+    fun targetForPhysical(physicalKeyCode: Int, player: Int = 0): Int? {
+        // Unbound actions store KEYCODE_UNKNOWN; never let a stray UNKNOWN event match
+        // one (it would otherwise map to the first unbound action's PS2 button).
+        if (physicalKeyCode == KeyEvent.KEYCODE_UNKNOWN) return null
+        return actions.firstOrNull { physicalFor(it, player) == physicalKeyCode }?.targetKeyCode
+    }
 
     // ---- System hotkeys (menu / quick save / quick load) -----------------
     // Physical buttons bound to app actions, NOT forwarded to the PS2. Handled in
