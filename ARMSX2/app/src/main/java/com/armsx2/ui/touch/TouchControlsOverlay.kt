@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -246,10 +247,15 @@ fun TouchControlsOverlay() {
                     TouchButtonId.Kind.PRESSURE -> PressureButtonWidget(cfg, edit)
                     TouchButtonId.Kind.FASTFORWARD -> FastForwardWidget(cfg, edit)
                     TouchButtonId.Kind.MACRO -> MacroWidget(cfg, edit)
+                    TouchButtonId.Kind.STATEACTION -> StateActionWidget(cfg, edit)
 	                    else -> ButtonWidget(
 	                        cfg = cfg,
 	                        edit = edit,
-	                        inputEnabled = !(faceMulti && isMultiTouchKind(cfg.id.kind)),
+	                        // Latched (tap-to-hold) buttons stay on their own pressGestures
+	                        // handler even with multi-touch on, so the latch logic runs
+	                        // (the shared layer has no latch); the changedToDown fix keeps
+	                        // them multi-touch-correct anyway.
+	                        inputEnabled = !(faceMulti && isMultiTouchKind(cfg.id.kind) && !cfg.tapToHold),
 	                        forcedPressed = faceMulti && cfg.id in multiPressed,
 	                    )
                 }
@@ -260,7 +266,7 @@ fun TouchControlsOverlay() {
         if (faceMulti) {
             FaceMultiTouchLayer(
 	                buttons = layout.buttons.filter {
-	                    it.enabled && it.id.kind == TouchButtonId.Kind.FACE
+	                    it.enabled && it.id.kind == TouchButtonId.Kind.FACE && !it.tapToHold
 	                },
 	                widthPx = widthPx,
 	                heightPx = heightPx,
@@ -274,7 +280,7 @@ fun TouchControlsOverlay() {
             // side to keep each bounding box tight (no overlap with the d-pad/sticks).
             FaceMultiTouchLayer(
                 buttons = layout.buttons.filter {
-                    it.enabled && it.id.kind == TouchButtonId.Kind.SHOULDER && it.xFrac < 0.5f
+                    it.enabled && it.id.kind == TouchButtonId.Kind.SHOULDER && it.xFrac < 0.5f && !it.tapToHold
                 },
                 widthPx = widthPx,
                 heightPx = heightPx,
@@ -282,7 +288,7 @@ fun TouchControlsOverlay() {
             )
             FaceMultiTouchLayer(
                 buttons = layout.buttons.filter {
-                    it.enabled && it.id.kind == TouchButtonId.Kind.SHOULDER && it.xFrac >= 0.5f
+                    it.enabled && it.id.kind == TouchButtonId.Kind.SHOULDER && it.xFrac >= 0.5f && !it.tapToHold
                 },
                 widthPx = widthPx,
                 heightPx = heightPx,
@@ -346,7 +352,7 @@ private fun ButtonWidget(
         .fillMaxSize()
         .let {
             if (edit) it.editGestures(cfg)
-            else if (inputEnabled) it.pressGestures(cfg.id.keycode) { p -> localPressed = p }
+            else if (inputEnabled) it.pressGestures(cfg.id.keycode, cfg.tapToHold) { p -> localPressed = p }
             else it
         }
     // Pressed feedback: every button shrinks a hair AND darkens.
@@ -441,7 +447,8 @@ private fun drawableFor(id: TouchButtonId, pressed: Boolean): Int = when (id) {
     // DPad / sticks render their own composed sprites; PAUSE / FAST_FORWARD / macros render their own.
     TouchButtonId.DPAD, TouchButtonId.L_STICK, TouchButtonId.R_STICK,
     TouchButtonId.PAUSE, TouchButtonId.PRESSURE, TouchButtonId.FAST_FORWARD,
-    TouchButtonId.MACRO1, TouchButtonId.MACRO2, TouchButtonId.MACRO3, TouchButtonId.MACRO4 -> R.drawable.pad_cross
+    TouchButtonId.MACRO1, TouchButtonId.MACRO2, TouchButtonId.MACRO3, TouchButtonId.MACRO4,
+    TouchButtonId.SAVE_STATE, TouchButtonId.LOAD_STATE -> R.drawable.pad_cross
 }
 
 /** Pressure-sensitivity modifier button. Emits no PS2 keycode; while held it
@@ -717,6 +724,46 @@ private fun MacroWidget(cfg: TouchButtonCfg, edit: Boolean) {
                 cfg.id.label,
                 color = Color.White.copy(alpha = opacity.coerceIn(0.35f, 1f)),
                 fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+/** On-screen Save-State / Load-State button. Edit mode renders an outlined
+ *  "SAVE"/"LOAD" box; in play mode a tap opens the pause overlay's slot picker so the
+ *  user chooses which slot to save to / load from (the physical SAVE_STATE/LOAD_STATE
+ *  hotkeys remain quick-to-current-slot). Opt-in (disabled in the default layout). */
+@Composable
+private fun StateActionWidget(cfg: TouchButtonCfg, edit: Boolean) {
+    val label = if (cfg.id == TouchButtonId.SAVE_STATE) "SAVE" else "LOAD"
+    if (edit) {
+        Box(
+            modifier = Modifier.fillMaxSize().editGestures(cfg),
+            contentAlignment = Alignment.Center,
+        ) {
+            EditAdornment(cfg.id)
+            Text(label, color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+    } else {
+        val opacity = TouchControls.opacity.value
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.30f * opacity))
+                .pointerInput(cfg.id) {
+                    detectTapGestures(onTap = {
+                        if (cfg.id == TouchButtonId.SAVE_STATE) InGameOverlay.openSaveStatePicker()
+                        else InGameOverlay.openLoadStatePicker()
+                    })
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                label,
+                color = Color.White.copy(alpha = opacity.coerceIn(0.35f, 1f)),
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
             )
         }
@@ -1088,27 +1135,62 @@ private fun isMultiTouchKind(kind: TouchButtonId.Kind): Boolean =
     kind == TouchButtonId.Kind.FACE || kind == TouchButtonId.Kind.SHOULDER
 
 /** Press/release pointerInput for a single digital button. Emits the
- *  keycode on down, releases on up or pointer cancel. */
-private fun Modifier.pressGestures(keycode: Int, onPressedChange: (Boolean) -> Unit) =
-    pointerInput(keycode) {
-        awaitPointerEventScope {
-            while (true) {
-                val ev = awaitPointerEvent()
-                val change: PointerInputChange = ev.changes.firstOrNull() ?: continue
-                if (!change.pressed) continue
-                onPressedChange(true)
-                sendDigital(keycode, true)
-                // Keep the controls awake while the user is actively tapping
-                // buttons (resets the auto-hide timer).
-                TouchControls.noteTouchInteraction()
-                // Wait for the release.
+ *  keycode on down, releases on up or pointer cancel.
+ *
+ *  Claims ONLY a finger that just went down on THIS button (changedToDown),
+ *  never a pointer already held elsewhere — grabbing the analog stick's pointer
+ *  via a blind firstOrNull() was the stick+button multi-touch bug (#244). Then
+ *  follows that pointer by id until it lifts.
+ *
+ *  [tapToHold]: latch mode — a tap toggles the button held (stays pressed +
+ *  visually down) until the next tap, instead of momentary press. Released on
+ *  dispose so a latched button can't get stuck down in the emulator. */
+private fun Modifier.pressGestures(
+    keycode: Int,
+    tapToHold: Boolean = false,
+    onPressedChange: (Boolean) -> Unit,
+) =
+    pointerInput(keycode, tapToHold) {
+        var latched = false
+        try {
+            awaitPointerEventScope {
                 while (true) {
-                    val next = awaitPointerEvent()
-                    val nc = next.changes.firstOrNull { it.id == change.id }
-                    if (nc == null || !nc.pressed) break
+                    val ev = awaitPointerEvent()
+                    val down: PointerInputChange =
+                        ev.changes.firstOrNull { it.changedToDown() } ?: continue
+                    val id = down.id
+                    // Keep the controls awake while the user is actively tapping.
+                    TouchControls.noteTouchInteraction()
+                    if (tapToHold) {
+                        // Toggle the latch on this tap-down.
+                        latched = !latched
+                        onPressedChange(latched)
+                        sendDigital(keycode, latched)
+                        // Consume this finger's lifetime so the same press can't
+                        // re-toggle; ignore other pointers.
+                        while (true) {
+                            val next = awaitPointerEvent()
+                            val nc = next.changes.firstOrNull { it.id == id }
+                            if (nc == null || !nc.pressed) break
+                        }
+                    } else {
+                        onPressedChange(true)
+                        sendDigital(keycode, true)
+                        while (true) {
+                            val next = awaitPointerEvent()
+                            val nc = next.changes.firstOrNull { it.id == id }
+                            if (nc == null || !nc.pressed) break
+                        }
+                        onPressedChange(false)
+                        sendDigital(keycode, false)
+                    }
                 }
-                onPressedChange(false)
+            }
+        } finally {
+            // Disposed/reconfigured while latched → don't leave the key stuck down.
+            if (latched) {
                 sendDigital(keycode, false)
+                onPressedChange(false)
             }
         }
     }
@@ -1306,6 +1388,16 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
                 )
                 ToolbarChip(if (selectedCfg.enabled) "Hide" else "Show") {
                     TouchControls.updateButton(selectedCfg.id) { it.copy(enabled = !it.enabled) }
+                }
+                // Tap-to-hold (latch) only applies to the digital action buttons that
+                // run through pressGestures (face diamond + shoulders) — e.g. hold R1
+                // for crouch without keeping a thumb down.
+                if (selectedCfg.id.kind == TouchButtonId.Kind.FACE ||
+                    selectedCfg.id.kind == TouchButtonId.Kind.SHOULDER
+                ) {
+                    ToolbarChip(if (selectedCfg.tapToHold) "Tap-Hold On" else "Tap-Hold Off") {
+                        TouchControls.updateButton(selectedCfg.id) { it.copy(tapToHold = !it.tapToHold) }
+                    }
                 }
             }
         }

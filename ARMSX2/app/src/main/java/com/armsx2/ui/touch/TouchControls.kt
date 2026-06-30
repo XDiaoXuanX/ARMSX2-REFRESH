@@ -30,6 +30,9 @@ object TouchControls {
     private const val KEY_FACE_MULTI = "touch.faceMulti"
     private const val KEY_FLOATING_STICK = "touch.floatingStick"
     private const val KEY_VIS_MODE = "touch.visibilityMode"
+    // One-shot 2.4.7 defaults migration for EXISTING users (saved prefs/layouts
+    // predate the default changes, so the new defaults wouldn't otherwise apply).
+    private const val KEY_DEFAULTS_MIGRATED_247 = "touch.defaults.migrated.247"
     // Per-game active-profile override: touch.active.game.<serial> -> profile name.
     private const val KEY_ACTIVE_GAME_PREFIX = "touch.active.game."
     // Per-game CUSTOM layout: touch.layout.game.<serial> -> layout JSON. This is
@@ -89,8 +92,9 @@ object TouchControls {
      *  single thumb can slide/press between Cross/Square/Circle/Triangle and
      *  emit overlapping button presses. */
     // Multi-touch hit-test layer for face + shoulder buttons (lets you press
-    // several at once / roll between them). Persisted under KEY_FACE_MULTI.
-    val faceMultiTouch = mutableStateOf(false)
+    // several at once / roll between them, and press them while the stick is
+    // held). Persisted under KEY_FACE_MULTI. Default ON.
+    val faceMultiTouch = mutableStateOf(true)
 
     // Floating on-screen stick: the first touch-down inside a stick's zone becomes
     // its origin (the ring re-centers under your finger) instead of a fixed center —
@@ -228,10 +232,27 @@ object TouchControls {
         val match = list.firstOrNull { it.name == active } ?: list.first()
         activeLayout.value = match.layout.copy()
         opacity.value = Main.prefs.getFloat(KEY_OPACITY, 0.55f).coerceIn(0.20f, 1.0f)
-        faceMultiTouch.value = Main.prefs.getBoolean(KEY_FACE_MULTI, false)
+        faceMultiTouch.value = Main.prefs.getBoolean(KEY_FACE_MULTI, true)
         floatingStick.value = Main.prefs.getBoolean(KEY_FLOATING_STICK, false)
         visibilityMode.value = Main.prefs.getInt(KEY_VIS_MODE, 11).coerceIn(0, 11)
         if (visibilityMode.value == 0) visible.value = false
+
+        // One-shot 2.4.7 defaults migration: existing users have saved prefs/layouts
+        // that predate the new defaults (multi-touch was off, the Pressure button was
+        // visible), so the default flips above don't reach them. Apply once; after this
+        // the user's own choices stick.
+        if (!Main.prefs.getBoolean(KEY_DEFAULTS_MIGRATED_247, false)) {
+            faceMultiTouch.value = true
+            fun hidePressure(layout: TouchLayout): TouchLayout = layout.copy(
+                buttons = layout.buttons.map {
+                    if (it.id.kind == TouchButtonId.Kind.PRESSURE) it.copy(enabled = false) else it
+                }
+            )
+            for (i in profiles.indices) profiles[i] = profiles[i].copy(layout = hidePressure(profiles[i].layout))
+            activeLayout.value = hidePressure(activeLayout.value)
+            Main.prefs.edit().putBoolean(KEY_DEFAULTS_MIGRATED_247, true).apply()
+            persist()
+        }
     }
 
     private fun persist() {
@@ -618,6 +639,12 @@ enum class TouchButtonId(val label: String, val keycode: Int, val kind: Kind) {
     // Rendered by FastForwardWidget.
     FAST_FORWARD("▶▶", 0, Kind.FASTFORWARD),
 
+    // On-screen quick save-state / load-state buttons (to the active slot). Emit no
+    // PS2 keycode; tapping calls Main.saveState() / Main.loadState() — the same actions
+    // as the SAVE_STATE/LOAD_STATE hotkeys. Opt-in (disabled in the default layout).
+    SAVE_STATE("SAVE", 0, Kind.STATEACTION),
+    LOAD_STATE("LOAD", 0, Kind.STATEACTION),
+
     // Macro / combo buttons: each fires a user-chosen SET of pad buttons at once
     // (e.g. R1+R2+R3). Emits no keycode of its own; the set is configured per macro
     // (TouchControls.macroButtons) and dispatched by MacroWidget. Opt-in (disabled in
@@ -632,7 +659,7 @@ enum class TouchButtonId(val label: String, val keycode: Int, val kind: Kind) {
     // soft (~50%) press. Rendered by PressureButtonWidget.
     PRESSURE("P½", 0, Kind.PRESSURE);
 
-    enum class Kind { FACE, SHOULDER, MENU, DPAD, STICK, PAUSE, PRESSURE, FASTFORWARD, MACRO }
+    enum class Kind { FACE, SHOULDER, MENU, DPAD, STICK, PAUSE, PRESSURE, FASTFORWARD, MACRO, STATEACTION }
 }
 
 /** Position + size for a single widget. xFrac / yFrac are anchor-point
@@ -644,6 +671,9 @@ data class TouchButtonCfg(
     val yFrac: Float,
     val sizeDp: Float,
     val enabled: Boolean = true,
+    /** Tap-to-hold / latch: a tap toggles the button held (stays pressed until
+     *  tapped again) instead of momentary press. Per-button, opt-in. */
+    val tapToHold: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id.name)
@@ -651,6 +681,7 @@ data class TouchButtonCfg(
         put("y", yFrac.toDouble())
         put("size", sizeDp.toDouble())
         put("on", enabled)
+        put("hold", tapToHold)
     }
 
     companion object {
@@ -663,6 +694,7 @@ data class TouchButtonCfg(
                 yFrac = json.optDouble("y", 0.5).toFloat().coerceIn(0f, 1f),
                 sizeDp = json.optDouble("size", 64.0).toFloat().coerceIn(28f, 220f),
                 enabled = json.optBoolean("on", true),
+                tapToHold = json.optBoolean("hold", false),
             )
         }
     }
@@ -729,6 +761,9 @@ data class TouchLayout(val buttons: List<TouchButtonCfg>) {
                 TouchButtonCfg(TouchButtonId.MACRO2, 0.48f, 0.40f, 42f, enabled = false),
                 TouchButtonCfg(TouchButtonId.MACRO3, 0.56f, 0.40f, 42f, enabled = false),
                 TouchButtonCfg(TouchButtonId.MACRO4, 0.64f, 0.40f, 42f, enabled = false),
+                // Quick save/load-state buttons — also OPT-IN (disabled). Second row.
+                TouchButtonCfg(TouchButtonId.SAVE_STATE, 0.30f, 0.54f, 44f, enabled = false),
+                TouchButtonCfg(TouchButtonId.LOAD_STATE, 0.38f, 0.54f, 44f, enabled = false),
                 // Analog sticks — bottom inside, between DPad/face cluster
                 // and the center, so thumb travel is short.
                 TouchButtonCfg(TouchButtonId.L_STICK,  0.28f, 0.80f, 130f),
@@ -746,7 +781,7 @@ data class TouchLayout(val buttons: List<TouchButtonCfg>) {
                 // Pressure-modifier button — tucked under the D-pad (left side),
                 // clear of the action. Hold it, then press a face/shoulder/d-pad
                 // button for a ~50% (soft) press. Movable in overlay edit mode.
-                TouchButtonCfg(TouchButtonId.PRESSURE, 0.10f, 0.78f, 44f),
+                TouchButtonCfg(TouchButtonId.PRESSURE, 0.10f, 0.78f, 44f, enabled = false),
             ),
         )
     }
