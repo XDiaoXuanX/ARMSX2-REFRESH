@@ -10,12 +10,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.armsx2.EmuState
@@ -83,7 +86,14 @@ object WindowImpl {
                     // Touch controls layer — sits between the game surface
                     // and the pause/library overlays. Self-gates on
                     // eState + visibility latch, so safe to always invoke.
-                    com.armsx2.ui.touch.TouchControlsOverlay()
+                    // Force LTR: the overlay positions buttons/stick with
+                    // Modifier.offset(x=…) which Compose auto-mirrors under an
+                    // RTL locale (Arabic), flipping the controls left<->right
+                    // (visual desynced from the fractional-coord hit-testing).
+                    // The on-screen controls are an absolute layout, never RTL.
+                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                        com.armsx2.ui.touch.TouchControlsOverlay()
+                    }
                     // In-game overlay paints last so it's on top of both
                     // the surface and any library showing underneath.
                     if (overlayVisible.value) {
