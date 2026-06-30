@@ -60,7 +60,7 @@ fun PerformanceTab(state: MutableState<Settings>) {
         }
         HelpText("Tap a preset. Optimal = safe for most games. Fast = aggressive (EE cycle skip + fast CDVD) for low-end devices; may glitch some. Tweaking any speedhack below un-highlights both (custom).")
         SettingsDivider()
-        CollapsibleSection("Speedhacks", initiallyExpanded = true) {
+        CollapsibleSection("Speedhacks", initiallyExpanded = false) {
             IntSliderRow(
                 label = "EE Cycle Rate",
                 value = s.eeCycleRate,

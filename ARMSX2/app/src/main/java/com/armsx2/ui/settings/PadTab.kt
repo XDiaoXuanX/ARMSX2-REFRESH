@@ -256,7 +256,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 )
             }
         }
-        CollapsibleSection("Player & Rumble", initiallyExpanded = true) {
+        CollapsibleSection("Player & Rumble", initiallyExpanded = false) {
             // Local co-op: pick which player's buttons / stick mode you're editing. P2 is
             // the second controller to press a button in-game (auto-assigned). Stick
             // feel (deadzone / sensitivity / acceleration) and the D-pad-as-stick toggle
@@ -451,7 +451,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 SettingsDivider()
             }
         }
-        CollapsibleSection("Button Mapping", initiallyExpanded = true) {
+        CollapsibleSection("Button Mapping", initiallyExpanded = false) {
             ControllerMappings.actions.forEach { action ->
                 val physical = ControllerMappings.physicalFor(action, editPlayer.value)
                 PadBindingRow(
@@ -577,6 +577,9 @@ private fun MacroConfigDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Colors.surfaceColor,
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
         title = { Text("Configure ${macroId.label}", color = Color.White, fontWeight = FontWeight.Bold) },
         text = {
             Column(Modifier.verticalScroll(remember { ScrollState(0) })) {
