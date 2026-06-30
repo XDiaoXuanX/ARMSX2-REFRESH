@@ -430,7 +430,16 @@ GSVector4i GSTextureCache::TranslateAlignedRectByPage(u32 tbp, u32 tebp, u32 tbw
 				// The width is mismatched to the page.
 				if (!is_invalidation && GSConfig.UserHacks_TextureInsideRt < GSTextureInRtMode::MergeTargets)
 				{
-					DevCon.Warning("Uneven pages mess up sbp %x dbp %x spgw %d dpgw %d src fmt %d dst fmt %d src_rect %d, %d, %d, %d draw %lld", sbp, tbp, src_pgw, dst_pgw, spsm, tpsm, in_rect.x, in_rect.y, in_rect.z, in_rect.w, GSState::s_n);
+					// Some titles (e.g. Jackie Chan Adventures) hit this every frame; the bail
+					// itself is the intended behavior, but the unconditional DevCon.Warning then
+					// re-formats + logs ~60x/sec. Fire it once per process to keep the diagnostic
+					// without the per-frame logging cost. GS behavior unchanged.
+					static bool warned_uneven_pages = false;
+					if (!warned_uneven_pages)
+					{
+						warned_uneven_pages = true;
+						DevCon.Warning("Uneven pages mess up sbp %x dbp %x spgw %d dpgw %d src fmt %d dst fmt %d src_rect %d, %d, %d, %d draw %lld", sbp, tbp, src_pgw, dst_pgw, spsm, tpsm, in_rect.x, in_rect.y, in_rect.z, in_rect.w, GSState::s_n);
+					}
 					return GSVector4i::zero();
 				}
 
