@@ -133,6 +133,64 @@ object TouchControls {
      *  so the auto-hide timer restarts. Not persisted. */
     val interactionTick = mutableStateOf(0)
 
+    // ---- On-screen macro / combo buttons (Macro1-4) ----------------------------
+    // Each macro fires a user-chosen SET of pad buttons at once (e.g. R1+R2+R3).
+    // Stored per macro under touch.macro.<id> = comma-separated TouchButtonId names.
+    private const val KEY_MACRO_PREFIX = "touch.macro."
+
+    /** Bumped when any macro's button set changes so the config UI + overlay recompose. */
+    val macroBindTick = mutableStateOf(0)
+
+    /** The discrete pad buttons a macro may fire (face / shoulders / L3 R3 / Start /
+     *  Select). No D-pad/sticks (directional) or pause/macro/fast-forward (not pad
+     *  buttons). Order = the config dialog's display order. */
+    val macroAssignableButtons: List<TouchButtonId> = listOf(
+        TouchButtonId.TRIANGLE, TouchButtonId.CIRCLE, TouchButtonId.CROSS, TouchButtonId.SQUARE,
+        TouchButtonId.L1, TouchButtonId.R1, TouchButtonId.L2, TouchButtonId.R2,
+        TouchButtonId.L3, TouchButtonId.R3, TouchButtonId.START, TouchButtonId.SELECT,
+    )
+
+    /** Buttons macro [id] fires, in config order (empty if unconfigured). */
+    fun macroButtons(id: TouchButtonId): List<TouchButtonId> {
+        val raw = Main.prefs.getString(KEY_MACRO_PREFIX + id.name, "").orEmpty()
+        if (raw.isEmpty()) return emptyList()
+        val set = raw.split(",").mapNotNull { runCatching { TouchButtonId.valueOf(it) }.getOrNull() }.toSet()
+        // Keep macroAssignableButtons order, drop anything stale/non-assignable.
+        return macroAssignableButtons.filter { it in set }
+    }
+
+    fun setMacroButtons(id: TouchButtonId, buttons: List<TouchButtonId>) {
+        val csv = macroAssignableButtons.filter { it in buttons.toSet() }.joinToString(",") { it.name }
+        Main.prefs.edit().putString(KEY_MACRO_PREFIX + id.name, csv).apply()
+        macroBindTick.value++
+    }
+
+    // Optional PHYSICAL-controller trigger per macro: bind a physical button to fire
+    // the macro's button set (the same set the on-screen M1-M4 buttons use). Stored
+    // separately so a macro can be touch-only, physical-only, or both. KEYCODE_UNKNOWN
+    // (0) = no physical trigger.
+    private const val KEY_MACRO_PHYS_PREFIX = "touch.macro.phys."
+
+    fun macroPhysicalCode(id: TouchButtonId): Int =
+        Main.prefs.getInt(KEY_MACRO_PHYS_PREFIX + id.name, android.view.KeyEvent.KEYCODE_UNKNOWN)
+
+    fun setMacroPhysicalCode(id: TouchButtonId, keycode: Int) {
+        Main.prefs.edit().putInt(KEY_MACRO_PHYS_PREFIX + id.name, keycode).apply()
+        macroBindTick.value++
+    }
+
+    fun clearMacroPhysicalCode(id: TouchButtonId) = setMacroPhysicalCode(id, android.view.KeyEvent.KEYCODE_UNKNOWN)
+
+    /** The macro a physical [keycode] triggers — only if it's bound AND has buttons
+     *  configured. Checked in the gameplay key path (Main) before normal pad routing. */
+    fun macroForPhysicalCode(keycode: Int): TouchButtonId? {
+        if (keycode == android.view.KeyEvent.KEYCODE_UNKNOWN) return null
+        for (id in listOf(TouchButtonId.MACRO1, TouchButtonId.MACRO2, TouchButtonId.MACRO3, TouchButtonId.MACRO4)) {
+            if (macroPhysicalCode(id) == keycode && macroButtons(id).isNotEmpty()) return id
+        }
+        return null
+    }
+
     /** Set true once load() has run — used to avoid clobbering disk state
      *  on first composition. */
     private var loaded = false
@@ -554,12 +612,27 @@ enum class TouchButtonId(val label: String, val keycode: Int, val kind: Kind) {
     // outlined "PAUSE" box in edit mode so it can be moved/resized.
     PAUSE("Pause", 0, Kind.PAUSE),
 
+    // On-screen fast-forward (Turbo) toggle. Emits no PS2 keycode; tapping it
+    // toggles locked fast-forward via Main.toggleFastForward() — the same action
+    // as the FAST_FORWARD_TOGGLE hotkey. Opt-in: disabled in the default layout.
+    // Rendered by FastForwardWidget.
+    FAST_FORWARD("▶▶", 0, Kind.FASTFORWARD),
+
+    // Macro / combo buttons: each fires a user-chosen SET of pad buttons at once
+    // (e.g. R1+R2+R3). Emits no keycode of its own; the set is configured per macro
+    // (TouchControls.macroButtons) and dispatched by MacroWidget. Opt-in (disabled in
+    // the default layout).
+    MACRO1("M1", 0, Kind.MACRO),
+    MACRO2("M2", 0, Kind.MACRO),
+    MACRO3("M3", 0, Kind.MACRO),
+    MACRO4("M4", 0, Kind.MACRO),
+
     // Pressure-sensitivity modifier. Emits no PS2 keycode; while held it sets
     // TouchControls.pressureModifierHeld so pressure-capable buttons report a
     // soft (~50%) press. Rendered by PressureButtonWidget.
     PRESSURE("P½", 0, Kind.PRESSURE);
 
-    enum class Kind { FACE, SHOULDER, MENU, DPAD, STICK, PAUSE, PRESSURE }
+    enum class Kind { FACE, SHOULDER, MENU, DPAD, STICK, PAUSE, PRESSURE, FASTFORWARD, MACRO }
 }
 
 /** Position + size for a single widget. xFrac / yFrac are anchor-point
@@ -645,6 +718,17 @@ data class TouchLayout(val buttons: List<TouchButtonCfg>) {
                 // Start / Select centered at the bottom
                 TouchButtonCfg(TouchButtonId.SELECT,   0.45f, 0.92f, 48f),
                 TouchButtonCfg(TouchButtonId.START,    0.55f, 0.92f, 48f),
+                // Fast-forward + macro buttons — OPT-IN (disabled by default, so they
+                // splice into existing layouts without changing them). Parked in a row
+                // across the upper-middle (y 0.40) — clear of the edit-mode toolbar at
+                // the top (so they're reachable to grab/enable) and above the main
+                // controls. Users enable + reposition them in the editor; configure each
+                // macro's button set in Pad settings → Touch Macros.
+                TouchButtonCfg(TouchButtonId.FAST_FORWARD, 0.30f, 0.40f, 44f, enabled = false),
+                TouchButtonCfg(TouchButtonId.MACRO1, 0.40f, 0.40f, 42f, enabled = false),
+                TouchButtonCfg(TouchButtonId.MACRO2, 0.48f, 0.40f, 42f, enabled = false),
+                TouchButtonCfg(TouchButtonId.MACRO3, 0.56f, 0.40f, 42f, enabled = false),
+                TouchButtonCfg(TouchButtonId.MACRO4, 0.64f, 0.40f, 42f, enabled = false),
                 // Analog sticks — bottom inside, between DPad/face cluster
                 // and the center, so thumb travel is short.
                 TouchButtonCfg(TouchButtonId.L_STICK,  0.28f, 0.80f, 130f),

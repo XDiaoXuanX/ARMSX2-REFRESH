@@ -1386,6 +1386,18 @@ class Main: ComponentActivity() {
                                 // controller = P1 (port 0), next = P2 (port 1) — and
                                 // resolve the bind against THAT player's mapping.
                                 val port = com.armsx2.input.PadRouter.portForDevice(event.nativeKeyEvent.deviceId)
+                                // Physical-controller macro: a bound button fires the
+                                // macro's whole button set at once (down on press, up on
+                                // release), reusing the macro slots the on-screen M1-M4
+                                // buttons use. Checked before normal pad routing so a
+                                // macro overrides that button's regular mapping.
+                                val macro = com.armsx2.ui.touch.TouchControls.macroForPhysicalCode(event.key.nativeKeyCode)
+                                if (macro != null) {
+                                    com.armsx2.ui.touch.TouchControls.macroButtons(macro).forEach {
+                                        sendKeyAction(event.type, it.keycode, port)
+                                    }
+                                    return@onKeyEvent true
+                                }
                                 val target = ControllerMappings.targetForPhysical(event.key.nativeKeyCode, port)
                                     ?: return@onKeyEvent false
                                 sendKeyAction(event.type, target, port)
@@ -1774,19 +1786,9 @@ class Main: ComponentActivity() {
                 }
                 ControllerMappings.SysHotkey.FAST_FORWARD_TOGGLE -> {
                     // Press once to lock fast-forward (Turbo) on, press again to return
-                    // to the user's current limiter mode — no need to hold during long
-                    // grinds. Restoring the real base mode keeps it in sync with the
-                    // frame-limit toggle instead of forcing Nominal.
-                    if (down && event.repeatCount == 0) {
-                        Main.fastForwardToggleActive = !Main.fastForwardToggleActive
-                        val on = Main.fastForwardToggleActive
-                        runCatching { NativeApp.speedhackLimitermode(if (on) 1 else baseLimiterMode()) }
-                        android.widget.Toast.makeText(
-                            this,
-                            if (on) "Fast Forward ON" else "Fast Forward OFF",
-                            android.widget.Toast.LENGTH_SHORT,
-                        ).show()
-                    }
+                    // to the user's current limiter mode. Shared with the on-screen
+                    // fast-forward touch button (FastForwardWidget).
+                    if (down && event.repeatCount == 0) toggleFastForward()
                     return true
                 }
                 ControllerMappings.SysHotkey.RES_UP -> {
@@ -1831,6 +1833,21 @@ class Main: ComponentActivity() {
      *  turned it off. Mirrors the frame-limit toggle so the two stay in sync. */
     private fun baseLimiterMode(): Int =
         if (com.armsx2.ui.InGameOverlay.frameLimitOn.value) 0 else 3
+
+    /** Toggle locked fast-forward (Turbo) on/off — shared by the FAST_FORWARD_TOGGLE
+     *  hotkey and the on-screen fast-forward touch button (FastForwardWidget). Restores
+     *  the user's base limiter mode when turning off so it stays in sync with the
+     *  frame-limit toggle. */
+    fun toggleFastForward() {
+        Main.fastForwardToggleActive = !Main.fastForwardToggleActive
+        val on = Main.fastForwardToggleActive
+        runCatching { NativeApp.speedhackLimitermode(if (on) 1 else baseLimiterMode()) }
+        android.widget.Toast.makeText(
+            this,
+            if (on) "Fast Forward ON" else "Fast Forward OFF",
+            android.widget.Toast.LENGTH_SHORT,
+        ).show()
+    }
 
     private fun cycleSaveSlot() {
         val next = (Main.currentSaveSlot.value + 1) % 10

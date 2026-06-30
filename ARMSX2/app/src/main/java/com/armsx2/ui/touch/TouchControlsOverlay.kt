@@ -244,6 +244,8 @@ fun TouchControlsOverlay() {
                     TouchButtonId.Kind.STICK -> StickWidget(cfg, edit)
                     TouchButtonId.Kind.PAUSE -> PauseWidget(cfg, edit)
                     TouchButtonId.Kind.PRESSURE -> PressureButtonWidget(cfg, edit)
+                    TouchButtonId.Kind.FASTFORWARD -> FastForwardWidget(cfg, edit)
+                    TouchButtonId.Kind.MACRO -> MacroWidget(cfg, edit)
 	                    else -> ButtonWidget(
 	                        cfg = cfg,
 	                        edit = edit,
@@ -436,9 +438,10 @@ private fun drawableFor(id: TouchButtonId, pressed: Boolean): Int = when (id) {
     TouchButtonId.SELECT   -> if (pressed) R.drawable.pad_select_pressed   else R.drawable.pad_select
     TouchButtonId.L3       -> if (pressed) R.drawable.pad_l3_pressed       else R.drawable.pad_l3
     TouchButtonId.R3       -> if (pressed) R.drawable.pad_r3_pressed       else R.drawable.pad_r3
-    // DPad / sticks render their own composed sprites; PAUSE renders none.
+    // DPad / sticks render their own composed sprites; PAUSE / FAST_FORWARD / macros render their own.
     TouchButtonId.DPAD, TouchButtonId.L_STICK, TouchButtonId.R_STICK,
-    TouchButtonId.PAUSE, TouchButtonId.PRESSURE -> R.drawable.pad_cross
+    TouchButtonId.PAUSE, TouchButtonId.PRESSURE, TouchButtonId.FAST_FORWARD,
+    TouchButtonId.MACRO1, TouchButtonId.MACRO2, TouchButtonId.MACRO3, TouchButtonId.MACRO4 -> R.drawable.pad_cross
 }
 
 /** Pressure-sensitivity modifier button. Emits no PS2 keycode; while held it
@@ -623,6 +626,100 @@ private fun PauseWidget(cfg: TouchButtonCfg, edit: Boolean) {
                     )
                 },
         )
+    }
+}
+
+/** On-screen fast-forward (Turbo) toggle. Edit mode renders an outlined "▶▶" box
+ *  so it can be dragged/resized like any widget; in play mode a tap calls
+ *  Main.toggleFastForward() — the same action as the FAST_FORWARD_TOGGLE hotkey.
+ *  Opt-in (disabled in the default layout). */
+@Composable
+private fun FastForwardWidget(cfg: TouchButtonCfg, edit: Boolean) {
+    if (edit) {
+        Box(
+            modifier = Modifier.fillMaxSize().editGestures(cfg),
+            contentAlignment = Alignment.Center,
+        ) {
+            EditAdornment(cfg.id)
+            Text("▶▶", color = Color.White.copy(alpha = 0.75f), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+    } else {
+        val opacity = TouchControls.opacity.value
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.30f * opacity))
+                .pointerInput(cfg.id) {
+                    detectTapGestures(onTap = { com.armsx2.Main.instance?.toggleFastForward() })
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "▶▶",
+                color = Color.White.copy(alpha = opacity.coerceIn(0.35f, 1f)),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+/** Press gesture that fires a SET of pad keycodes at once (down on press, up on
+ *  release) — the macro/combo dispatch. Mirrors pressGestures but multi-keycode. */
+private fun Modifier.macroPressGestures(keycodes: List<Int>) =
+    pointerInput(keycodes) {
+        awaitPointerEventScope {
+            while (true) {
+                val ev = awaitPointerEvent()
+                val change = ev.changes.firstOrNull() ?: continue
+                if (!change.pressed) continue
+                keycodes.forEach { sendDigital(it, true) }
+                TouchControls.noteTouchInteraction()
+                while (true) {
+                    val next = awaitPointerEvent()
+                    val nc = next.changes.firstOrNull { it.id == change.id }
+                    if (nc == null || !nc.pressed) break
+                }
+                keycodes.forEach { sendDigital(it, false) }
+            }
+        }
+    }
+
+/** Macro / combo button. Edit mode renders an outlined "M#" box; in play mode a
+ *  press fires every pad button configured for this macro (TouchControls.macroButtons)
+ *  and releases them on lift. Opt-in (disabled in the default layout); configure the
+ *  button set in Pad settings → Touch Macros. An unconfigured macro is a no-op. */
+@Composable
+private fun MacroWidget(cfg: TouchButtonCfg, edit: Boolean) {
+    if (edit) {
+        Box(
+            modifier = Modifier.fillMaxSize().editGestures(cfg),
+            contentAlignment = Alignment.Center,
+        ) {
+            EditAdornment(cfg.id)
+            Text(cfg.id.label, color = Color.White.copy(alpha = 0.75f), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+    } else {
+        val opacity = TouchControls.opacity.value
+        val keycodes = remember(cfg.id, TouchControls.macroBindTick.value) {
+            TouchControls.macroButtons(cfg.id).map { it.keycode }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.30f * opacity))
+                .macroPressGestures(keycodes),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                cfg.id.label,
+                color = Color.White.copy(alpha = opacity.coerceIn(0.35f, 1f)),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
 }
 
