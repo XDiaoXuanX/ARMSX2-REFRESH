@@ -497,6 +497,14 @@ object ControllerMappings {
     /** Ordered buffer of buttons pressed during an active capture (≤2 used). */
     val captureKeys = mutableListOf<Int>()
 
+    /**
+     * eventTime (uptimeMillis) of the first DOWN in the current capture. Used to
+     * reject a 2nd keycode that arrives near-simultaneously — some controllers
+     * emit two keycodes for one physical press, which would otherwise be misread
+     * as a 2-button combo and make single-button hotkeys impossible to bind.
+     */
+    var captureFirstDownMs = 0L
+
     /** Start capturing a (re)binding for [h]. */
     fun beginHotkeyCapture(h: SysHotkey) {
         captureKeys.clear()

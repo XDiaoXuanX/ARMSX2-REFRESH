@@ -126,6 +126,12 @@ private const val UI_KEY_AXIS_SUPPRESS_MS = 220L
 private const val NAV_REPEAT_INITIAL_MS = 340L
 private const val NAV_REPEAT_INTERVAL_MS = 110L
 
+// During a hotkey capture, a 2nd keycode arriving within this window of the
+// first DOWN is treated as part of the SAME physical press (some controllers
+// emit two codes per button) rather than a deliberate modifier+key combo.
+// A real combo is a held first button + a later second press, well past this.
+private const val COMBO_MIN_GAP_MS = 40L
+
 val codeGenTests = mutableStateOf("")
 val patchTests = mutableStateOf("")
 val vuJitTests = mutableStateOf("")
@@ -1470,8 +1476,19 @@ class Main: ComponentActivity() {
             if (kc != KeyEvent.KEYCODE_UNKNOWN) {
                 val buf = ControllerMappings.captureKeys
                 if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                    if (!buf.contains(kc)) buf.add(kc)
-                    if (buf.size >= 2) {
+                    if (buf.isEmpty()) {
+                        // First button of this capture.
+                        buf.add(kc)
+                        ControllerMappings.captureFirstDownMs = event.eventTime
+                    } else if (!buf.contains(kc) &&
+                        event.eventTime - ControllerMappings.captureFirstDownMs >= COMBO_MIN_GAP_MS
+                    ) {
+                        // A distinct 2nd button pressed deliberately (held the first,
+                        // then pressed this) → modifier combo. The time gate rejects a
+                        // 2nd keycode fired ~instantly by one physical press (some pads
+                        // emit two codes per button), which would otherwise block
+                        // single-button binds entirely.
+                        buf.add(kc)
                         ControllerMappings.bindHotkeyCombo(capturing, buf[0], buf[1])
                         ControllerMappings.endHotkeyCapture()
                     }
@@ -1847,6 +1864,18 @@ class Main: ComponentActivity() {
             if (on) "Fast Forward ON" else "Fast Forward OFF",
             android.widget.Toast.LENGTH_SHORT,
         ).show()
+    }
+
+    /** Quick save / load to the active slot — shared by the SAVE_STATE/LOAD_STATE
+     *  hotkeys and the on-screen Save/Load State touch buttons. Runs off the UI thread. */
+    fun saveState() {
+        val slot = Main.currentSaveSlot.value
+        kotlin.concurrent.thread { runCatching { NativeApp.saveStateToSlot(slot) } }
+    }
+
+    fun loadState() {
+        val slot = Main.currentSaveSlot.value
+        kotlin.concurrent.thread { runCatching { NativeApp.loadStateFromSlot(slot) } }
     }
 
     private fun cycleSaveSlot() {
@@ -2530,10 +2559,19 @@ class Main: ComponentActivity() {
             }
             return
         }
-        var right = hatX > 0.5f
-        var left = hatX < -0.5f
-        var down = hatY > 0.5f
-        var up = hatY < -0.5f
+        // HAT → D-pad only when that direction is still bound. The physical HAT never
+        // flows through the keycode binding path (it arrives as a motion axis), so
+        // clearing/reassigning a D-pad direction in the Pad tab was previously ignored
+        // here. The custom-stick→D-pad fold below is a SEPARATE binding and stays
+        // active even when the physical D-pad is cleared.
+        val dpRightBound = ControllerMappings.targetForPhysical(KeyEvent.KEYCODE_DPAD_RIGHT, port) != null
+        val dpLeftBound = ControllerMappings.targetForPhysical(KeyEvent.KEYCODE_DPAD_LEFT, port) != null
+        val dpDownBound = ControllerMappings.targetForPhysical(KeyEvent.KEYCODE_DPAD_DOWN, port) != null
+        val dpUpBound = ControllerMappings.targetForPhysical(KeyEvent.KEYCODE_DPAD_UP, port) != null
+        var right = hatX > 0.5f && dpRightBound
+        var left = hatX < -0.5f && dpLeftBound
+        var down = hatY > 0.5f && dpDownBound
+        var up = hatY < -0.5f && dpUpBound
 
         fun foldStick(axisX: Int, axisY: Int) {
             val x = ev.getAxisValue(axisX)
@@ -2589,9 +2627,14 @@ class Main: ComponentActivity() {
         // to 0..1, so pressure ramps smoothly from zero to full instead of flicking on/off
         // around the old hard 15% stick-deadzone boundary (the jitter non-Xbox pads showed)
         // — and the low 15% of travel is no longer wasted.
+        // Honor the L2/R2 binding: triggers arrive as motion axes, never through the
+        // keycode binding path, so clearing/remapping them in the Pad tab was ignored.
+        // Resolve the physical trigger keycode to its mapped PS2 target — null = cleared,
+        // so the trigger is disabled; otherwise drive the resolved (possibly remapped) code.
+        val target = ControllerMappings.targetForPhysical(code, port) ?: return
         val raw = maxOf(event.getAxisValue(axisA), event.getAxisValue(axisB)).coerceIn(0f, 1f)
         val out = if (raw <= TRIGGER_DEAD) 0f else (raw - TRIGGER_DEAD) / (1f - TRIGGER_DEAD)
-        NativeApp.setPadButtonForPort(port, code, (out * 32767).toInt(), out > 0f)
+        NativeApp.setPadButtonForPort(port, target, (out * 32767).toInt(), out > 0f)
     }
 
     override fun onPause() {
