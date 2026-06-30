@@ -41,9 +41,10 @@ fun AudioTab(state: MutableState<Settings>) {
         )
         IntSliderRow(
             label = "Volume",
-            value = s.audioVolume.coerceIn(0, 100),
+            value = s.audioVolume.coerceIn(0, 150),
             min = 0,
-            max = 100,
+            max = 150,
+            description = "Above 100% boosts/amplifies SPU2 output — handy for quiet games, but very high levels can distort/clip.",
             valueFormatter = { "$it%" },
             onChange = { apply(s.copy(audioVolume = it)) },
         )
